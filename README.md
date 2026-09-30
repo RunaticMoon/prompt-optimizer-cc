@@ -189,6 +189,7 @@ prompt-optimizer.systemPromptFile
 ## 6. 비용·프라이버시
 
 - **호출 수**: 라운드당 정확히 `$.model.complete` 1회. 작업당 최대 `maxRounds`(기본 3)회. 자동 재시도·상위 모델 폴백·fork는 없다.
+  - 단, 플러그인이 1회 호출해도 **엔진의 API 클라이언트가 5xx 오류에서 같은 요청을 자체 재시도**할 수 있다. 로컬 mock API 검증(2.1.285)에서 HTTP 500 한 번에 요청 3건(최초 1 + 재시도 2)이 관찰됐다. `$.model.complete`에는 재시도 옵션이 없어 플러그인에서 끌 수 없다. 같은 검증에서 응답 지연(15초)은 `timeoutMs`(12초) 뒤 중단되고 원문이 복원됐다. 재시도가 타임아웃 안에 포함되는지는 확인하지 않았다.
 - **기본 파라미터**: 모델 `haiku`, effort `low`(고정), `maxTokens 1024`, `timeoutMs 12000`.
 - **요청 구성**: `<context>` + `<original_prompt>` + (있으면) `<current_draft>` + `<dialogue>` + `<instruction>` + JSON 출력 지시. 전체 프롬프트+시스템이 16000자(`MAX_REQUEST_CHARS`)를 넘으면 오래된 대화부터 버리고, 그래도 넘으면 문맥을 뒤에서 자른다. 원문은 자르지 않는다.
 - **문맥 상한**: 최근 `contextTurns`(기본 4)개 사용자 턴에서 최신 우선으로 최대 8개 메시지·4000자, 메시지당 1200자(중간 `[중략]`), 프로젝트 규칙 1200자, cwd/repo 400자, 도구 이름 400자, 전체 6000자. 규칙 파일은 `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` 후보만 읽고, 256 KiB를 넘으면 건너뛴다.
