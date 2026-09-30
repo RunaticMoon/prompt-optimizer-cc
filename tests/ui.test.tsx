@@ -156,12 +156,37 @@ describe('optimizer UI', () => {
     expect(drawn).toContain('/optimize accept · send · raw · cancel · retry <보완>')
   })
 
-  test('mobile table without Input keeps the draft and command route visible', async ($, on) => {
+  test('mobile table without Input keeps buttons and shows the retry command', async ($, on) => {
     const { controller } = fakeController(state(workflow()))
     const ui = await captureUi($, on, controller, 'Input')
     const drawn = textOf(await ui.render({ ...PANE, surface: 'mobile' }))
     expect(drawn).toContain('한국어로 작성한 개선안입니다.')
-    expect(drawn).toContain('/optimize accept · send · raw · cancel · retry <보완>')
+    for (const label of ['입력창으로 가져오기', '바로 보내기', '원문 보내기', '다시 다듬기', '취소']) {
+      expect(drawn).toContain(label)
+    }
+    expect(drawn).toContain('/optimize retry <보완 내용>')
+    expect(drawn).not.toContain('명령: /optimize accept')
+  })
+
+  test('80-column pane keeps the header and all actions before a long draft', async ($, on) => {
+    const item = workflow()
+    item.original = '오래된 원문 '.repeat(30)
+    item.draft = '길게 작성한 개선안 '.repeat(80)
+    const { controller } = fakeController(state(item))
+    const ui = await captureUi($, on, controller)
+    const drawn = textOf(await ui.render({
+      ...PANE,
+      viewport: { columns: 80, rows: 40 },
+      props: { ...PANE.props, bodyColumns: 74 },
+    }))
+    expect(drawn.indexOf('프롬프트 옵티마이저')).toBeLessThan(drawn.indexOf('입력창으로 가져오기'))
+    for (const label of ['입력창으로 가져오기', '바로 보내기', '원문 보내기', '다시 다듬기', '취소']) {
+      expect(drawn.indexOf(label)).toBeLessThan(drawn.indexOf('현재 개선안'))
+    }
+    expect(drawn).toContain('… (전체는 가져오기로 확인)')
+    expect(drawn).not.toContain(item.draft)
+    expect(drawn).toContain('원문 전체 보기')
+    expect(drawn).not.toContain(item.original)
   })
 
   test('actions call the matching controller method once, and busy actions are unavailable', async ($, on) => {
@@ -266,5 +291,34 @@ describe('optimizer UI', () => {
     expect(statuses.at(-1)).toBeUndefined()
     expect(toasts).toHaveLength(0)
     expect(DEFAULT_CONFIG.maxRounds).toBe(3)
+  })
+
+  test('presenter closes a finished pane once and invalidates it, but never closes composer', async () => {
+    const closed: string[] = []
+    let invalidations = 0
+    const ui: UiPorts = {
+      open: async () => ({ isPlaced: true }),
+      close: async id => { closed.push(id); throw new Error('already closed') },
+      invalidate: () => { invalidations++ },
+      status: () => undefined,
+      log: () => undefined,
+      toast: () => undefined,
+    }
+    const presenter = createPresenter()
+    const current = state(workflow())
+    presenter.present(ui, current)
+    current.workflow = null
+    presenter.present(ui, current)
+    presenter.present(ui, current)
+    await Promise.resolve()
+    expect(closed).toEqual([PANE_ID])
+    expect(invalidations).toBe(2)
+
+    current.workflow = { ...workflow(), ui: 'composer' }
+    presenter.present(ui, current)
+    current.workflow = null
+    presenter.present(ui, current)
+    expect(closed).toEqual([PANE_ID])
+    expect(invalidations).toBe(2)
   })
 })

@@ -1,4 +1,5 @@
 import type { RuntimeState, Workflow } from '../contracts'
+import { PANE_ID } from '../controller'
 import type { UiPorts } from './ui-ports'
 
 export const COMPOSER_GUIDE =
@@ -28,11 +29,22 @@ export function createPresenter(): {
   let lastError = ''
   let lastNotice = ''
   let hadStatus = false
+  let lastWorkflowUi: Workflow['ui'] | undefined
 
   return {
     present(ui, state, notice) {
       const workflow = state.workflow
       if (!workflow) {
+        const closedPane = lastWorkflowUi === 'pane'
+        lastWorkflowUi = undefined
+        if (closedPane) {
+          try {
+            void ui.close(PANE_ID).catch(() => undefined)
+          } catch {
+            // The pane may already have been closed by delivery or the user.
+          }
+          ui.invalidate()
+        }
         if (hadStatus) ui.status(undefined)
         activeId = undefined
         lastDraft = ''
@@ -43,6 +55,8 @@ export function createPresenter(): {
         if (notice) ui.toast(notice)
         return
       }
+
+      lastWorkflowUi = workflow.ui
 
       if (activeId !== workflow.id) {
         activeId = workflow.id

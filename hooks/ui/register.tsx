@@ -52,6 +52,22 @@ function latestOptimizerMessage(workflow: Workflow): string {
   return [...workflow.dialogue].reverse().find((entry) => entry.role === 'optimizer')?.text ?? ''
 }
 
+/** Bound a narrow preview by terminal cells; the complete draft stays available through accept. */
+function previewText(value: string, maxCells: number, suffix: string): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  const chars = Array.from(normalized)
+  const width = (text: string) => Array.from(text).reduce((sum, char) => sum + (char.codePointAt(0)! > 0x7f ? 2 : 1), 0)
+  if (width(normalized) <= maxCells) return normalized
+  const limit = maxCells - width(suffix)
+  let used = 0
+  let end = 0
+  while (end < chars.length && used + width(chars[end]!) <= limit) {
+    used += width(chars[end]!)
+    end++
+  }
+  return `${chars.slice(0, end).join('')}${suffix}`
+}
+
 /** Escape and the pane close mark both arrive with origin `person`. */
 export async function handlePaneClose(
   controller: OptimizerController,
@@ -101,9 +117,8 @@ export function registerUi(
       : workflow.original
     const message = latestOptimizerMessage(workflow)
 
-    // Mobile has no Input today; a surface may also omit controls in ui.resolve.
-    // Keep the placed pane useful and show the command route in either case.
-    if (typeof Button !== 'function' || typeof Input !== 'function') {
+    // A surface without Button needs command text; mobile can still use its Button table.
+    if (typeof Button !== 'function') {
       return (
         <Box flexDirection="column" paddingX={1}>
           <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
@@ -115,6 +130,60 @@ export function registerUi(
           {workflow.lastError && <Text wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
           {busy && <Text>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
           <Text wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
+        </Box>
+      )
+    }
+
+    const actions = (
+      <Box marginTop={1} flexDirection="row" flexWrap="wrap" gap={1}>
+        {draftReady
+          ? <Button key={KEYS.accept} label="입력창으로 가져오기" variant="primary" autoFocus onPress={() => undefined} />
+          : <Text dimColor>[입력창으로 가져오기 · 사용 불가]</Text>}
+        {draftReady
+          ? <Button key={KEYS.send} label="바로 보내기" onPress={() => undefined} />
+          : <Text dimColor>[바로 보내기 · 사용 불가]</Text>}
+        {!busy
+          ? <Button key={KEYS.raw} label="원문 보내기" onPress={() => undefined} />
+          : <Text dimColor>[원문 보내기 · 사용 불가]</Text>}
+        {retryReady
+          ? <Button key={KEYS.retry} label="다시 다듬기" onPress={() => undefined} />
+          : <Text dimColor>[다시 다듬기 · 사용 불가]</Text>}
+        {cancelReady
+          ? <Button key={KEYS.cancel} label="취소" role="dismiss" onPress={() => undefined} />
+          : <Text dimColor>[취소 · 사용 불가]</Text>}
+      </Box>
+    )
+    const instruction = retryReady
+      ? typeof Input === 'function'
+        ? <Input key={KEYS.instruction} label="보완 내용" placeholder="수정하거나 확인할 내용을 입력하세요" submitLabel="다듬기" onSubmit={() => undefined} />
+        : <Text wrap="wrap">보완은 /optimize retry &lt;보완 내용&gt;</Text>
+      : <Text dimColor>지금은 보완 요청을 입력할 수 없습니다.</Text>
+
+    if ((e.viewport?.columns ?? e.props.bodyColumns) <= 90) {
+      const bodyColumns = e.props.bodyColumns || (e.viewport?.columns ?? 80) - 4
+      const draft = workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+          {actions}
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>보완 요청</Text>
+            {instruction}
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>현재 개선안</Text>
+            <Text wrap="wrap">{previewText(draft, Math.max(32, bodyColumns - 4) * 2, '… (전체는 가져오기로 확인)')}</Text>
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>원문</Text>
+            <Text wrap="wrap">{showOriginal ? workflow.original : previewText(workflow.original, Math.max(24, bodyColumns - 4), '…')}</Text>
+            {originalChars.length > 24 && (busy
+              ? <Text dimColor>[원문 전체 보기 · 사용 불가]</Text>
+              : <Button key={KEYS.original} label={showOriginal ? '원문 접기' : '원문 전체 보기'} plain onPress={() => undefined} />)}
+          </Box>
+          {message && <Text wrap="wrap">{`옵티마이저: ${previewText(message, Math.max(32, bodyColumns - 4) * 2, '…')}`}</Text>}
+          {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
+          {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
         </Box>
       )
     }
@@ -150,27 +219,9 @@ export function registerUi(
         {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
         <Box marginTop={1} flexDirection="column">
           <Text bold>보완 요청</Text>
-          {retryReady
-            ? <Input key={KEYS.instruction} label="보완 내용" placeholder="수정하거나 확인할 내용을 입력하세요" submitLabel="다듬기" onSubmit={() => undefined} />
-            : <Text dimColor>지금은 보완 요청을 입력할 수 없습니다.</Text>}
+          {instruction}
         </Box>
-        <Box marginTop={1} flexDirection="row" flexWrap="wrap" gap={1}>
-          {draftReady
-            ? <Button key={KEYS.accept} label="입력창으로 가져오기" variant="primary" autoFocus onPress={() => undefined} />
-            : <Text dimColor>[입력창으로 가져오기 · 사용 불가]</Text>}
-          {draftReady
-            ? <Button key={KEYS.send} label="바로 보내기" onPress={() => undefined} />
-            : <Text dimColor>[바로 보내기 · 사용 불가]</Text>}
-          {!busy
-            ? <Button key={KEYS.raw} label="원문 보내기" onPress={() => undefined} />
-            : <Text dimColor>[원문 보내기 · 사용 불가]</Text>}
-          {retryReady
-            ? <Button key={KEYS.retry} label="다시 다듬기" onPress={() => undefined} />
-            : <Text dimColor>[다시 다듬기 · 사용 불가]</Text>}
-          {cancelReady
-            ? <Button key={KEYS.cancel} label="취소" role="dismiss" onPress={() => undefined} />
-            : <Text dimColor>[취소 · 사용 불가]</Text>}
-        </Box>
+        {actions}
       </Box>
     )
   })
