@@ -1,0 +1,6 @@
+{
+  "description": "Prompt optimizer hooks: intercept eligible composer submissions, hold the improvement dialogue in plugin state, and hand a finished draft back to the prompt box.",
+  "modules": [
+    "./register.ts"
+  ]
+}

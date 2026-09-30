@@ -1,0 +1,16 @@
+{
+  "name": "prompt-optimizer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code prompt-optimizer mod: dev scripts for the hooks module.",
+  "scripts": {
+    "typecheck": "node scripts/check-types.mjs",
+    "test": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .",
+    "validate": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .",
+    "check:package": "node scripts/check-package.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
