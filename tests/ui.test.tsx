@@ -1,4 +1,4 @@
-import type { On, RenderInput } from 'claude-code'
+import type { EngineInterface, On, RenderInput } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { describe, expect, test } from 'claude-code/testing'
 
@@ -71,8 +71,8 @@ type CapturedHook = (...args: unknown[]) => unknown
  * `ui.render`'s hook calls `$.ui.resolve(e)`, available only on the hook-side
  * `$`; the probe session.start hook captures one so the render hook can draw.
  */
-async function captureUi($: Engine, on: On, controller: OptimizerController): Promise<{
-  render: (e: RenderInput<'Pane', 'terminal'>) => Promise<unknown>
+async function captureUi($: Engine, on: On, controller: OptimizerController, omittedControl?: 'Button' | 'Input'): Promise<{
+  render: (e: RenderInput<'Pane'>) => Promise<unknown>
   press: (e: unknown) => Promise<unknown>
   input: (e: unknown) => Promise<unknown>
 }> {
@@ -93,7 +93,17 @@ async function captureUi($: Engine, on: On, controller: OptimizerController): Pr
   const call = (event: string, e: unknown): Promise<unknown> => {
     const hook = hooks.get(event)
     if (hook === undefined) throw new Error(`no ${event} hook was registered`)
-    return Promise.resolve(hook(hook$, e, (inner: unknown) => ({ inner })))
+    const engine = event === 'ui.render' && omittedControl
+      ? {
+          ui: {
+            resolve: async (input: RenderInput<'Pane'>) => {
+              const table = await (hook$ as EngineInterface).ui.resolve(input)
+              return { ...table, [omittedControl]: undefined }
+            },
+          },
+        }
+      : hook$
+    return Promise.resolve(hook(engine, e, (inner: unknown) => ({ inner })))
   }
   return {
     render: e => call('ui.render', e),
@@ -125,6 +135,33 @@ describe('optimizer UI', () => {
     expect(textOf(await ui.render(PANE))).toContain('진행 중인 개선 작업이 없습니다')
     current.workflow = { ...workflow(), ui: 'composer' }
     expect(textOf(await ui.render(PANE))).toContain('개선 대화는 입력창에서 진행 중입니다')
+  })
+
+  test('placed desktop and VS Code panes render the workflow', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller)
+    for (const surface of ['desktop', 'vscode'] as const) {
+      const drawn = textOf(await ui.render({ ...PANE, surface }))
+      expect(drawn).toContain('프롬프트 옵티마이저')
+      expect(drawn).toContain('한국어로 작성한 개선안입니다.')
+    }
+  })
+
+  test('a pane without Button offers command actions in text', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller, 'Button')
+    const drawn = textOf(await ui.render({ ...PANE, surface: 'desktop' }))
+    expect(drawn).toContain('검토')
+    expect(drawn).toContain('한국어로 작성한 개선안입니다.')
+    expect(drawn).toContain('/optimize accept · send · raw · cancel · retry <보완>')
+  })
+
+  test('mobile table without Input keeps the draft and command route visible', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller, 'Input')
+    const drawn = textOf(await ui.render({ ...PANE, surface: 'mobile' }))
+    expect(drawn).toContain('한국어로 작성한 개선안입니다.')
+    expect(drawn).toContain('/optimize accept · send · raw · cancel · retry <보완>')
   })
 
   test('actions call the matching controller method once, and busy actions are unavailable', async ($, on) => {

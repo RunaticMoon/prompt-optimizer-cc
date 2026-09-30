@@ -75,9 +75,11 @@ export function registerUi(
   let renderedWorkflowId: string | undefined
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    if (e.requestId !== PANE_ID || e.surface !== 'terminal') return next(e)
+    if (e.requestId !== PANE_ID) return next(e)
 
-    const { Box, Text, Button, Input } = await $.ui.resolve(e)
+    const elements = await $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    const Input = 'Input' in elements ? elements.Input : undefined
     const workflow = controller.getState().workflow
     if (!workflow) return <Text>진행 중인 개선 작업이 없습니다</Text>
     if (workflow.ui === 'composer') return <Text>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
@@ -98,6 +100,24 @@ export function registerUi(
       ? `${originalChars.slice(0, 180).join('')}…`
       : workflow.original
     const message = latestOptimizerMessage(workflow)
+
+    // Mobile has no Input today; a surface may also omit controls in ui.resolve.
+    // Keep the placed pane useful and show the command route in either case.
+    if (typeof Button !== 'function' || typeof Input !== 'function') {
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+          <Text bold>원문</Text>
+          <Text wrap="wrap">{workflow.original}</Text>
+          <Text bold>현재 개선안</Text>
+          <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+          {message && <Text wrap="wrap">{`옵티마이저: ${message}`}</Text>}
+          {workflow.lastError && <Text wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
+          {busy && <Text>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
+          <Text wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column" paddingX={1}>
