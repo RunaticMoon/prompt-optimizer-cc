@@ -1,0 +1,103 @@
+{
+  "name": "prompt-optimizer",
+  "version": "0.1.0",
+  "description": "Drafts and improves the prompt you are about to send before the main session sees it: it keeps the submission out of the transcript, holds a short optimizer dialogue in its own state (a pane, or the prompt box itself on narrow terminals), and puts a finished draft back in the prompt box for your own Enter. One cheap completion per round, no fork, no transcript rewrite.",
+  "author": {
+    "name": "prompt-optimizer"
+  },
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enabled",
+      "description": "Intercept eligible prompts before they reach the main session.",
+      "required": false,
+      "default": true
+    },
+    "triggerMode": {
+      "type": "string",
+      "title": "Trigger mode",
+      "description": "\"always\" improves every eligible prompt; \"prefix\" improves only prompts that start with the trigger prefix.",
+      "required": false,
+      "default": "always",
+      "options": [
+        "always",
+        "prefix"
+      ]
+    },
+    "triggerPrefix": {
+      "type": "string",
+      "title": "Trigger prefix",
+      "description": "Prefix that starts an optimization when trigger mode is \"prefix\".",
+      "required": false,
+      "default": "?? "
+    },
+    "rawPrefix": {
+      "type": "string",
+      "title": "Raw prefix",
+      "description": "Leading marker that strips itself and sends the rest of the prompt straight through.",
+      "required": false,
+      "default": "::raw "
+    },
+    "uiMode": {
+      "type": "string",
+      "title": "Interface",
+      "description": "\"auto\" prefers a pane and falls back to the prompt box; \"pane\" requires the pane; \"composer\" always holds the dialogue in the prompt box.",
+      "required": false,
+      "default": "auto",
+      "options": [
+        "auto",
+        "pane",
+        "composer"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "title": "Model",
+      "description": "Model alias or id used for the optimizer's own completions.",
+      "required": false,
+      "default": "haiku"
+    },
+    "maxTokens": {
+      "type": "number",
+      "title": "Max tokens",
+      "description": "Output cap for one optimizer completion (128-2048).",
+      "required": false,
+      "default": 1024
+    },
+    "timeoutMs": {
+      "type": "number",
+      "title": "Timeout (ms)",
+      "description": "Time limit for one optimizer completion (1000-30000).",
+      "required": false,
+      "default": 12000
+    },
+    "maxRounds": {
+      "type": "number",
+      "title": "Max rounds",
+      "description": "Most completions allowed in one workflow (1-5).",
+      "required": false,
+      "default": 3
+    },
+    "contextTurns": {
+      "type": "number",
+      "title": "Context turns",
+      "description": "Recent user turns read into the context snapshot (0-8).",
+      "required": false,
+      "default": 4
+    },
+    "contextMaxChars": {
+      "type": "number",
+      "title": "Context characters",
+      "description": "Character budget for the context snapshot (0-8000).",
+      "required": false,
+      "default": 6000
+    },
+    "systemPromptFile": {
+      "type": "string",
+      "title": "System prompt file",
+      "description": "Optional file with extra system instructions; empty keeps the built-in prompt.",
+      "required": false,
+      "default": ""
+    }
+  }
+}
