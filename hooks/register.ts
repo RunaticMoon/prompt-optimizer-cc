@@ -228,12 +228,15 @@ export function register(on: On, options: PluginOptions): void {
     }
     const r = await next(e)
     if (
+      r.isFilled &&
       e.origin.kind === 'plugin' &&
       e.origin.name !== PLUGIN_NAME &&
       controller.getState().bypass !== null
     ) {
       // Another plugin overwrote the box: the restored draft is gone, so its
-      // bypass follows the new text (and is void for the optimizer's draft).
+      // bypass follows the text that landed (and is void for the optimizer's
+      // draft). A fill that was refused left the box as it was, so the permit
+      // over the restored draft still stands.
       controller.onPromptEdit(e.text)
     }
     return r
@@ -244,7 +247,9 @@ export function register(on: On, options: PluginOptions): void {
     const r = await next(e)
     if (e.key.startsWith(CONFIG_PREFIX) && 'value' in r) {
       const field = e.key.slice(CONFIG_PREFIX.length)
-      const result = validateConfigChange(field, e.value)
+      // A hook beneath may clamp or replace the value; the row's actual new
+      // value is what `next` resolved to, never the requested `e.value`.
+      const result = validateConfigChange(field, r.value)
       if (result.ok) {
         assignConfig(config, result.key, result.value)
         const nextOverrides = { ...overrides }

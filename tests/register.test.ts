@@ -4,7 +4,7 @@ import type {
   PromptFillInput,
   PromptSubmitInput,
 } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test, type Plugin } from 'claude-code/testing'
 
 const USAGE: ModelUsage = {
   input_tokens: 12,
@@ -36,6 +36,43 @@ const SESSION_START = {
   isInteractive: true,
 }
 
+/** The `command.run` envelope a foreign plugin's fill trigger carries. */
+const FOREIGN_RUN = {
+  command: 'foreign-fill',
+  args: '',
+  origin: { kind: 'composer' } as const,
+  presentation: { isFullscreen: false, columns: 80 },
+}
+
+/** A `config.set` input: the test `$` wants the pinned fields the real menu fills. */
+function configChange(key: string, value: string) {
+  return {
+    key,
+    value,
+    previous: value,
+    provider: { plugin: 'prompt-optimizer', tier: 'user' as const },
+    origin: { kind: 'plugin' as const, name: 'register-test' },
+  }
+}
+
+const FOREIGN_FILL_TEXT = '외부 플러그인 텍스트'
+
+/**
+ * A second plugin whose command makes a `prompt.fill` of its own, so the
+ * optimizer's `prompt.fill` hook sees a foreign origin. Self-contained, as an
+ * inline plugin must be.
+ */
+const FOREIGN_FILL: Plugin = {
+  name: 'foreign-fill-plugin',
+  register(on) {
+    on('command.run', { command: 'foreign-fill' }, async ($, _e) => {
+      // Inline, as an inline plugin's module closes over nothing of the test.
+      const r = await $.prompt.fill({ text: '외부 플러그인 텍스트', mode: 'replace' })
+      return { text: r.isFilled ? 'foreign landed' : 'foreign refused' }
+    })
+  },
+}
+
 describe('register — the wired module', () => {
   test(
     'intercepts, runs one completion, restores and bypasses, and leaves foreign input alone',
@@ -48,9 +85,14 @@ describe('register — the wired module', () => {
       const modelCalls: ModelCompleteRequest[] = []
       const fills: PromptFillInput[] = []
       const submits: PromptSubmitInput[] = []
+      const configSets: Array<[string, unknown]> = []
       let forks = 0
 
       on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('config.set', (_$, e) => {
+        configSets.push([e.key, e.value])
+        return { value: e.value }
+      })
       on('model.complete', (_$, e) => {
         modelCalls.push(e)
         return { value: answered(DRAFT) }
@@ -119,9 +161,11 @@ describe('register — the wired module', () => {
       expect(submits[2]?.text).toBe('다른 플러그인 제출')
       expect(modelCalls).toHaveLength(1)
 
-      // 6. `/optimize off` turns interception off for later submissions.
+      // 6. `/optimize off` turns interception off and mirrors the row into
+      //    persistent settings.
       const off = await $.command.run({ ...COMMAND_RUN, args: 'off' })
-      expect(off.text).toBe('자동 가로채기를 껐습니다.')
+      expect(off.text).toBe('자동 가로채기를 껐습니다.\n설정에 저장했습니다.')
+      expect(configSets).toEqual([['prompt-optimizer.enabled', false]])
       await $.prompt.submit({ text: '그대로 보내기', origin: { kind: 'composer' }, wait: false })
       expect(submits).toHaveLength(4)
       expect(submits[3]?.text).toBe('그대로 보내기')
@@ -129,6 +173,112 @@ describe('register — the wired module', () => {
 
       // 7. The fork path is never used.
       expect(forks).toBe(0)
+    },
+  )
+
+  test('config.set: the row takes the clamped value the chain resolved to', { options: {} }, async ($, on) => {
+    on('session.start', (_$, e) => ({ cwd: e.cwd }))
+    on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+    // Beneath the plugin, a hook clamps the requested value.
+    on('config.set', () => ({ value: 'clamped-model' }))
+
+    await $.session.start(SESSION_START)
+    const set = await $.config.set(configChange('prompt-optimizer.model', 'sonnet'))
+    expect(set).toEqual({ value: 'clamped-model' })
+
+    const status = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+    expect(status.text).toContain('모델: clamped-model')
+  })
+
+  test('config.set: a denied row change leaves the effective value alone', { options: {} }, async ($, on) => {
+    on('session.start', (_$, e) => ({ cwd: e.cwd }))
+    on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+    on('config.set', () => ({ deny: 'locked by policy' }))
+
+    await $.session.start(SESSION_START)
+    const set = await $.config.set(configChange('prompt-optimizer.model', 'sonnet'))
+    expect(set).toEqual({ deny: 'locked by policy' })
+
+    const status = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+    expect(status.text).toContain('모델: haiku')
+    expect(status.text).not.toContain('sonnet')
+  })
+
+  test(
+    'prompt.fill: a refused foreign fill leaves the restored draft bypassing',
+    { options: { uiMode: 'composer' }, plugins: [FOREIGN_FILL] },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const submits: PromptSubmitInput[] = []
+      let refuseForeign = false
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered(DRAFT) }))
+      on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+      on('prompt.fill', (_$, e) => {
+        if (
+          refuseForeign &&
+          e.origin.kind === 'plugin' &&
+          e.origin.name === FOREIGN_FILL.name
+        ) {
+          return { isFilled: false }
+        }
+        return { isFilled: true }
+      })
+      on('prompt.submit', (_$, e) => {
+        submits.push(e)
+        return { text: e.text }
+      })
+
+      await $.session.start(SESSION_START)
+      await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+      const accepted = await $.command.run({ ...COMMAND_RUN, args: 'accept' })
+      expect(accepted.text).toContain('입력창으로 가져왔습니다')
+
+      refuseForeign = true
+      const foreign = await $.command.run(FOREIGN_RUN)
+      expect(foreign.text).toBe('foreign refused')
+
+      // The box never took the foreign text, so the restored draft still
+      // bypasses interception exactly once.
+      const passed = await $.prompt.submit({ text: DRAFT, origin: { kind: 'composer' }, wait: false })
+      expect(passed).toEqual({ text: DRAFT })
+      expect(submits.map(s => s.text)).toEqual([DRAFT])
+    },
+  )
+
+  test(
+    'prompt.fill: a landed foreign fill moves the bypass onto its text',
+    { options: { uiMode: 'composer' }, plugins: [FOREIGN_FILL] },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const submits: PromptSubmitInput[] = []
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered(DRAFT) }))
+      on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+      on('prompt.fill', () => ({ isFilled: true }))
+      on('prompt.submit', (_$, e) => {
+        submits.push(e)
+        return { text: e.text }
+      })
+
+      await $.session.start(SESSION_START)
+      await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+      await $.command.run({ ...COMMAND_RUN, args: 'accept' })
+
+      const foreign = await $.command.run(FOREIGN_RUN)
+      expect(foreign.text).toBe('foreign landed')
+
+      const passed = await $.prompt.submit({
+        text: FOREIGN_FILL_TEXT,
+        origin: { kind: 'composer' },
+        wait: false,
+      })
+      expect(passed).toEqual({ text: FOREIGN_FILL_TEXT })
+      expect(submits.map(s => s.text)).toEqual([FOREIGN_FILL_TEXT])
     },
   )
 })

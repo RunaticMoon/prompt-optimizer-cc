@@ -58,12 +58,11 @@ export function classifySubmission(
     return { kind: 'bypass', text: e.text, ticket }
   }
 
-  // 6. An explicit raw marker strips itself and sends the rest untouched. Only
-  //    a wholly empty remainder is dropped; a remainder of spaces is raw too.
+  // 6. An explicit raw marker strips itself and sends the rest untouched. An
+  //    empty or whitespace-only remainder is raw too; the controller drops a
+  //    blank raw submission so the marker never reaches the main session.
   if (config.rawPrefix !== '' && e.text.startsWith(config.rawPrefix)) {
-    const raw = e.text.slice(config.rawPrefix.length)
-    if (raw === '') return pass('empty')
-    return { kind: 'raw', text: raw }
+    return { kind: 'raw', text: e.text.slice(config.rawPrefix.length) }
   }
 
   // 7. Commands and shell input belong to the engine, even while a dialogue

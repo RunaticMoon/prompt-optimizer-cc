@@ -156,14 +156,29 @@ interface Rig {
   deps: CommandDeps
   calls: string[]
   sets: Array<[string, unknown]>
+  /** Every `$.config.set` the hook made: `[key, value]`, one per persisted row. */
+  configSets: Array<[string, unknown]>
   ui: Array<'pane' | 'composer'>
   /** Which UI choice `chooseUi` answers with. */
   uiChoice: 'pane' | 'composer'
+  /** When set, the fake `$.config.set` denies with this reason. */
+  configSetResult: { deny: string } | null
+  /** When set, the fake `$.config.set` throws it. */
+  configSetError: unknown
 }
 
-function rig(opts: { current?: Readonly<RuntimeState>; config?: OptimizerConfig; setResult?: { ok: false; error: string } } = {}): Rig {
+function rig(
+  opts: {
+    current?: Readonly<RuntimeState>
+    config?: OptimizerConfig
+    setResult?: { ok: false; error: string }
+    configSetResult?: { deny: string }
+    configSetError?: unknown
+  } = {},
+): Rig {
   const calls: string[] = []
   const sets: Array<[string, unknown]> = []
+  const configSets: Array<[string, unknown]> = []
   const ui: Array<'pane' | 'composer'> = []
   const current = opts.current ?? liveState()
   const currentConfig = opts.config ?? config()
@@ -204,8 +219,11 @@ function rig(opts: { current?: Readonly<RuntimeState>; config?: OptimizerConfig;
   const self: Rig = {
     calls,
     sets,
+    configSets,
     ui,
     uiChoice: 'pane',
+    configSetResult: opts.configSetResult ?? null,
+    configSetError: opts.configSetError,
     deps: {
       controller,
       settings,
@@ -230,14 +248,18 @@ let wired: ((args: string) => Promise<{ text: string }>) | null = null
 /**
  * Registers the `/optimize` hook into a capturer and a base `command.run`
  * beneath it (kept for the pass-through test, which goes through the engine).
+ *
+ * The hook is driven with a stub `$` carrying only `config.set`, the one member
+ * the hook itself reaches; the ports it builds are lazy, so the stubbed
+ * controller never reads the rest.
  */
-function wire(on: On, deps: CommandDeps): void {
+function wire(on: On, r: Rig): void {
   let hook: ((...args: unknown[]) => unknown) | undefined
   const capturing = ((_event: string, ...rest: unknown[]) => {
     hook = rest[rest.length - 1] as (...args: unknown[]) => unknown
     return { catch: () => undefined }
   }) as unknown as On
-  registerCommands(capturing, deps)
+  registerCommands(capturing, r.deps)
 
   wired = async args => {
     const e = {
@@ -246,7 +268,16 @@ function wire(on: On, deps: CommandDeps): void {
       origin: { kind: 'composer' },
       presentation: { isFullscreen: false, columns: 80 },
     }
-    return (await hook?.({} as never, e)) as { text: string }
+    const stub = {
+      config: {
+        set: async (input: { key: string; value: unknown }) => {
+          r.configSets.push([input.key, input.value])
+          if (r.configSetError !== undefined) throw r.configSetError
+          return r.configSetResult ?? { value: input.value }
+        },
+      },
+    }
+    return (await hook?.(stub, e)) as { text: string }
   }
 
   on('command.run', (_$, e) => ({ text: `base:${e.command}` }))
@@ -258,41 +289,63 @@ function run(_$: Engine, args: string): Promise<CommandRunResult> {
 }
 
 describe('registerCommands — settings intents', () => {
-  test('on writes the enabled flag through the settings port', async ($, on) => {
+  test('on writes the enabled flag and persists the row', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'on')
-    expect(result.text).toBe('자동 가로채기를 켰습니다.')
+    expect(result.text).toBe('자동 가로채기를 켰습니다.\n설정에 저장했습니다.')
     expect(r.sets).toEqual([['enabled', true]])
+    expect(r.configSets).toEqual([['prompt-optimizer.enabled', true]])
   })
 
-  test('off clears the enabled flag', async ($, on) => {
+  test('off clears the enabled flag and persists the row', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'off')
-    expect(result.text).toBe('자동 가로채기를 껐습니다.')
+    expect(result.text).toBe('자동 가로채기를 껐습니다.\n설정에 저장했습니다.')
     expect(r.sets).toEqual([['enabled', false]])
+    expect(r.configSets).toEqual([['prompt-optimizer.enabled', false]])
   })
 
-  test('model writes the trimmed value', async ($, on) => {
+  test('model writes the trimmed value and persists it', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'model  sonnet ')
     expect(r.sets).toEqual([['model', 'sonnet']])
-    expect(result.text).toBe('옵티마이저 모델을 "sonnet"로 설정했습니다.')
+    expect(r.configSets).toEqual([['prompt-optimizer.model', 'sonnet']])
+    expect(result.text).toBe('옵티마이저 모델을 "sonnet"로 설정했습니다.\n설정에 저장했습니다.')
   })
 
-  test('model reports a refused write', async ($, on) => {
+  test('model reports a refused write and persists nothing', async ($, on) => {
     const r = rig({ setResult: { ok: false, error: 'unknown model' } })
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'model nope')
     expect(r.sets).toEqual([['model', 'nope']])
+    expect(r.configSets).toEqual([])
     expect(result.text).toBe('모델을 바꾸지 못했습니다: unknown model')
+  })
+
+  test('a denied persistent write notes the setting is session-only', async ($, on) => {
+    const r = rig({ configSetResult: { deny: 'managed by policy' } })
+    wire(on, r)
+    const result = await run($, 'off')
+    expect(r.configSets).toEqual([['prompt-optimizer.enabled', false]])
+    expect(result.text).toBe('자동 가로채기를 껐습니다.\n이번 세션에만 적용됨(managed by policy)')
+  })
+
+  test('a thrown persistent write is reported as session-only, never escaping', async ($, on) => {
+    const r = rig({ configSetError: new Error('settings are read-only') })
+    wire(on, r)
+    const result = await run($, 'model sonnet')
+    expect(r.configSets).toEqual([['prompt-optimizer.model', 'sonnet']])
+    expect(result.text).toBe(
+      '옵티마이저 모델을 "sonnet"로 설정했습니다.\n이번 세션에만 적용됨(settings are read-only)',
+    )
   })
 
   test('model without a value never writes and returns the usage error', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'model')
     expect(r.sets).toEqual([])
     expect(result.text).toContain('사용법 오류')
@@ -301,7 +354,7 @@ describe('registerCommands — settings intents', () => {
 
   test('status reads the settings and controller state without a model call', async ($, on) => {
     const r = rig({ config: config({ model: 'sonnet' }) })
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'status')
     expect(result.text).toContain('모델: sonnet')
     expect(result.text).toContain('진행 중인 개선 작업: wf-1')
@@ -311,7 +364,7 @@ describe('registerCommands — settings intents', () => {
 
   test('help lists the commands without touching controller or settings', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'help')
     expect(result.text).toContain('/optimize accept')
     expect(result.text).toContain('/optimize model <id>')
@@ -324,7 +377,7 @@ describe('registerCommands — controller intents', () => {
   test('a plain sentence starts an explicit run with the chosen UI', async ($, on) => {
     const r = rig()
     r.uiChoice = 'composer'
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, '로그인 오류를 고쳐줘')
     expect(r.calls).toEqual(['startExplicit(로그인 오류를 고쳐줘,composer)'])
     expect(r.ui).toEqual(['composer'])
@@ -333,7 +386,7 @@ describe('registerCommands — controller intents', () => {
 
   test('a bare command starts from the composer draft', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, '')
     expect(r.calls).toEqual(['startExplicit(,pane)'])
     expect(result.text).toBe('현재 입력창 초안으로 개선을 시작합니다.')
@@ -341,7 +394,7 @@ describe('registerCommands — controller intents', () => {
 
   test('accept, send, raw and cancel each call their controller method once', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     await run($, 'accept')
     await run($, 'send')
     await run($, 'raw')
@@ -351,7 +404,7 @@ describe('registerCommands — controller intents', () => {
 
   test('retry passes the instruction, or none when absent', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     await run($, 'retry 더 짧게')
     await run($, 'retry')
     expect(r.calls).toEqual(['retry(더 짧게)', 'retry()'])
@@ -359,7 +412,7 @@ describe('registerCommands — controller intents', () => {
 
   test('an active-workflow command with no run says so and calls nothing', async ($, on) => {
     const r = rig({ current: liveState({ workflow: null }) })
-    wire(on, r.deps)
+    wire(on, r)
     for (const args of ['accept', 'send', 'raw', 'cancel', 'retry']) {
       const result = await run($, args)
       expect(result.text).toContain('진행 중인 개선 작업이 없습니다')
@@ -373,7 +426,7 @@ describe('registerCommands — controller intents', () => {
     r.deps.controller.accept = async () => {
       throw new Error('controller exploded')
     }
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'accept')
     expect(result.text).toBe('오류: controller exploded')
   })
@@ -382,17 +435,17 @@ describe('registerCommands — controller intents', () => {
 describe('registerCommands — result shape and pass-through', () => {
   test('the result carries text only, never a context for the main model', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await run($, 'on')
     // `ref` is the engine's own run tag; what must never appear is `context`.
-    expect(result.text).toBe('자동 가로채기를 켰습니다.')
+    expect(result.text).toBe('자동 가로채기를 켰습니다.\n설정에 저장했습니다.')
     expect(result.context).toBeUndefined()
     expect('context' in result).toBe(false)
   })
 
   test('another command passes through to the hooks beneath', async ($, on) => {
     const r = rig()
-    wire(on, r.deps)
+    wire(on, r)
     const result = await $.command.run({
       command: 'other',
       args: '',

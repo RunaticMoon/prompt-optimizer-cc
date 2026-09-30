@@ -86,6 +86,27 @@ export interface CommandDeps {
   chooseUi(ui: UiPorts): Promise<'pane' | 'composer'>
 }
 
+/**
+ * The persistent `/config` row `/optimize on|off|model` mirrors into. Kept as
+ * the caller's request; the row key itself is spelled literally at the hook's
+ * `$.config.set` call site.
+ */
+export type PersistRequest =
+  | { kind: 'enabled'; value: boolean }
+  | { kind: 'model'; value: string }
+
+/**
+ * What one `/optimize` run produced: the line(s) shown, and, when a settings
+ * intent succeeded in memory, the row the caller should persist. The caller
+ * performs the write (only it holds `$`) and appends its result to the text.
+ */
+export interface CommandOutcome {
+  /** The line(s) the person sees. */
+  text: string
+  /** The setting to mirror into persistent config, when one changed. */
+  persist?: PersistRequest
+}
+
 /** One parsed `/optimize` invocation. */
 export type ParsedCommand =
   | { kind: 'start'; text?: string }
@@ -202,9 +223,27 @@ export function formatStatus(config: OptimizerConfig, state: Readonly<RuntimeSta
  * bare second registration of the same event would fail the loader.
  */
 export function registerCommands(on: On, deps: CommandDeps): void {
-  on('command.run', { command: OPTIMIZE_COMMAND.name }, ($, e) =>
-    runCommand(deps, portsOf($), uiPortsOf($), e.args).then(text => ({ text })),
-  )
+  on('command.run', { command: OPTIMIZE_COMMAND.name }, async ($, e) => {
+    const outcome = await runCommand(deps, portsOf($), uiPortsOf($), e.args)
+    if (outcome.persist === undefined) return { text: outcome.text }
+
+    // Mirror the in-memory change into persistent settings, best effort. The
+    // row key is a literal per branch (the loader reads it here); this plugin's
+    // own `config.set` hook never sees the call, so the override stands.
+    const { kind, value } = outcome.persist
+    try {
+      const result =
+        kind === 'enabled'
+          ? await $.config.set({ key: 'prompt-optimizer.enabled', value })
+          : await $.config.set({ key: 'prompt-optimizer.model', value })
+      if ('deny' in result) {
+        return { text: `${outcome.text}\n이번 세션에만 적용됨(${result.deny})` }
+      }
+      return { text: `${outcome.text}\n설정에 저장했습니다.` }
+    } catch (cause) {
+      return { text: `${outcome.text}\n이번 세션에만 적용됨(${describeError(cause)})` }
+    }
+  })
 }
 
 /**
@@ -252,20 +291,20 @@ function uiPortsOf($: EngineInterface): UiPorts {
   }
 }
 
-/** Runs one parsed intent and returns the line(s) the person sees. */
+/** Runs one parsed intent and returns its outcome. */
 async function runCommand(
   deps: CommandDeps,
   ports: EnginePorts,
   ui: UiPorts,
   args: string,
-): Promise<string> {
+): Promise<CommandOutcome> {
   const parsed = parseOptimizeArgs(args)
   try {
     return await dispatch(deps, ports, ui, parsed)
   } catch (error) {
     // A failing controller method (or a refused UI choice) becomes one line,
     // never an exception escaping the command hook.
-    return `오류: ${describeError(error)}`
+    return { text: `오류: ${describeError(error)}` }
   }
 }
 
@@ -275,55 +314,78 @@ async function dispatch(
   ports: EnginePorts,
   ui: UiPorts,
   command: ParsedCommand,
-): Promise<string> {
+): Promise<CommandOutcome> {
   switch (command.kind) {
     case 'on':
-      return applySetting(deps.settings, 'enabled', true, '자동 가로채기를 켰습니다.', '자동 가로채기를 켜지 못했습니다')
+      return settingOutcome(
+        deps.settings,
+        'enabled',
+        true,
+        '자동 가로채기를 켰습니다.',
+        '자동 가로채기를 켜지 못했습니다',
+        { kind: 'enabled', value: true },
+      )
     case 'off':
-      return applySetting(deps.settings, 'enabled', false, '자동 가로채기를 껐습니다.', '자동 가로채기를 끄지 못했습니다')
+      return settingOutcome(
+        deps.settings,
+        'enabled',
+        false,
+        '자동 가로채기를 껐습니다.',
+        '자동 가로채기를 끄지 못했습니다',
+        { kind: 'enabled', value: false },
+      )
     case 'model':
-      return applySetting(
+      return settingOutcome(
         deps.settings,
         'model',
         command.model,
         `옵티마이저 모델을 "${command.model}"로 설정했습니다.`,
         '모델을 바꾸지 못했습니다',
+        { kind: 'model', value: command.model },
       )
     case 'status':
-      return formatStatus(deps.settings.get(), deps.controller.getState())
+      return { text: formatStatus(deps.settings.get(), deps.controller.getState()) }
     case 'help':
-      return HELP_TEXT
+      return { text: HELP_TEXT }
     case 'error':
-      return `사용법 오류: ${command.message}`
+      return { text: `사용법 오류: ${command.message}` }
 
     case 'start': {
       const choice = await deps.chooseUi(ui)
       await deps.controller.startExplicit(ports, command.text, choice)
-      return command.text === undefined
-        ? '현재 입력창 초안으로 개선을 시작합니다.'
-        : '입력한 텍스트로 개선을 시작합니다.'
+      return {
+        text:
+          command.text === undefined
+            ? '현재 입력창 초안으로 개선을 시작합니다.'
+            : '입력한 텍스트로 개선을 시작합니다.',
+      }
     }
 
     case 'accept':
-      if (!hasWorkflow(deps)) return NO_WORKFLOW
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       await deps.controller.accept(ports)
-      return '개선안을 입력창으로 가져왔습니다. 내용을 확인하고 Enter를 누르세요.'
+      return { text: '개선안을 입력창으로 가져왔습니다. 내용을 확인하고 Enter를 누르세요.' }
     case 'send':
-      if (!hasWorkflow(deps)) return NO_WORKFLOW
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       await deps.controller.sendDraft(ports)
-      return '개선안을 보냈습니다.'
+      return { text: '개선안을 보냈습니다.' }
     case 'raw':
-      if (!hasWorkflow(deps)) return NO_WORKFLOW
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       await deps.controller.sendOriginal(ports)
-      return '원문을 그대로 보냈습니다.'
+      return { text: '원문을 그대로 보냈습니다.' }
     case 'cancel':
-      if (!hasWorkflow(deps)) return NO_WORKFLOW
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       await deps.controller.cancel(ports)
-      return '개선 작업을 취소했습니다.'
+      return { text: '개선 작업을 취소했습니다.' }
     case 'retry':
-      if (!hasWorkflow(deps)) return NO_WORKFLOW
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       await deps.controller.retry(ports, command.instruction)
-      return command.instruction === undefined ? '같은 요청으로 다시 다듬습니다.' : '보완 내용으로 다시 다듬습니다.'
+      return {
+        text:
+          command.instruction === undefined
+            ? '같은 요청으로 다시 다듬습니다.'
+            : '보완 내용으로 다시 다듬습니다.',
+      }
   }
 }
 
@@ -335,16 +397,20 @@ function hasWorkflow(deps: CommandDeps): boolean {
   return deps.controller.getState().workflow !== null
 }
 
-/** Applies one settings write and reports success or the returned error. */
-async function applySetting(
+/**
+ * Applies one settings write and reports success or the returned error. A
+ * success also carries the row to persist, for the hook to mirror.
+ */
+async function settingOutcome(
   settings: SettingsPort,
   key: ConfigKey,
   value: unknown,
   success: string,
   failure: string,
-): Promise<string> {
+  persist: PersistRequest,
+): Promise<CommandOutcome> {
   const result = await settings.set(key, value)
-  return result.ok ? success : `${failure}: ${result.error}`
+  return result.ok ? { text: success, persist } : { text: `${failure}: ${result.error}` }
 }
 
 /** A thrown value's message, for a one-line error. */

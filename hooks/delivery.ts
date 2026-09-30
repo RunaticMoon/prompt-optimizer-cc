@@ -98,17 +98,23 @@ export async function transferDraft(
   }
 
   // 4. A permit is issued only for a fill that actually landed, over the text
-  //    the box now holds (`append`/`insert` keep what was already there).
-  let text = target.text
-  if (target.mode !== 'replace') {
+  //    the box now holds (`append`/`insert` keep what was already there). The
+  //    fill's own view comes first, for `replace` too: the engine drops the
+  //    code points a terminal cannot draw (zero-width and the like) when it
+  //    fills and again when the composer sends, so `target.text` may not be
+  //    what a later submission carries. A box that cannot be read falls back
+  //    to the text the caller asked for.
+  let text = filled.text
+  if (text === '') {
     try {
       text = (await $.prompt.read()).text
     } catch {
-      // The fill landed but the box cannot be re-read; the fill's own view is
-      // the best available record of the final text.
-      text = filled.text
+      // The fill landed but the box cannot be re-read; the requested text is
+      // the last available record of what the caller meant to place.
+      text = ''
     }
   }
+  if (text === '') text = target.text
   const ticket: BypassTicket = {
     sessionId: target.sessionId,
     workflowId: target.workflowId,

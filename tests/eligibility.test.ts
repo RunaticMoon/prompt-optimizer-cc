@@ -248,10 +248,12 @@ describe('classifySubmission — rule 6: raw prefix', () => {
     })
   })
 
-  test('a bare marker with an empty remainder passes as empty', () => {
+  test('a bare marker with an empty remainder is raw too', () => {
+    // The controller drops the blank raw submission; the classifier still
+    // strips the marker so it never reaches the main session as its own text.
     expect(classifySubmission(submit({ text: '::raw ' }), config(), state(), 0)).toEqual({
-      kind: 'pass',
-      reason: 'empty',
+      kind: 'raw',
+      text: '',
     })
   })
 

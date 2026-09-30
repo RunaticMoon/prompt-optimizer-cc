@@ -16,7 +16,10 @@ import { BYPASS_TTL_MS, sendApproved, transferDraft } from '../hooks/delivery'
  * happened and how often.
  */
 interface EngineHooks {
-  /** Box texts returned by successive `$.prompt.read()` calls; '' when absent. */
+  /**
+   * The box before the fill. A string is the live box a fill then rewrites; an
+   * array is handed to successive `$.prompt.read()` calls, '' once exhausted.
+   */
   box?: string | readonly string[]
   /** Overrides the default successful fill result. */
   fill?: (input: PromptFillArgs) => PromptFilled | Promise<PromptFilled>
@@ -42,12 +45,10 @@ function fakeEngine(hooks: EngineHooks = {}): FakeEngine {
   const fills: PromptFillArgs[] = []
   const submits: PromptSubmitArgs[] = []
   const closes: string[] = []
-  const boxes: string[] =
-    hooks.box === undefined
-      ? []
-      : typeof hooks.box === 'string'
-        ? [hooks.box]
-        : [...hooks.box]
+  const queue: string[] | null = Array.isArray(hooks.box) ? [...hooks.box] : null
+  // The live box: a fill rewrites it the way the engine does, so a later read
+  // and the fill's own `text` agree on the box's final contents.
+  let live = typeof hooks.box === 'string' ? hooks.box : ''
 
   const engine = {
     ui: {
@@ -61,7 +62,7 @@ function fakeEngine(hooks: EngineHooks = {}): FakeEngine {
       read: async (): Promise<{ text: string; cursor: number }> => {
         calls.push('prompt.read')
         if (hooks.readError !== undefined) throw hooks.readError
-        const text = boxes.shift() ?? ''
+        const text = queue !== null ? (queue.shift() ?? '') : live
         return { text, cursor: text.length }
       },
       fill: async (input: PromptFillArgs): Promise<PromptFilled> => {
@@ -69,7 +70,9 @@ function fakeEngine(hooks: EngineHooks = {}): FakeEngine {
         fills.push(input)
         if (hooks.fillError !== undefined) throw hooks.fillError
         if (hooks.fill !== undefined) return hooks.fill(input)
-        return { isFilled: true, text: input.text, cursor: input.text.length }
+        const mode = input.mode ?? 'replace'
+        live = mode === 'replace' ? input.text : live + input.text
+        return { isFilled: true, text: live, cursor: live.length }
       },
       submit: async (input: PromptSubmitArgs): Promise<PromptSubmitResult> => {
         calls.push('prompt.submit')
@@ -200,12 +203,13 @@ describe('transferDraft — draft conflict', () => {
   })
 
   test('append mode skips the conflict check and adds after the draft', async () => {
-    const { engine, calls, fills } = fakeEngine({ box: '기존 초안 + 추가' })
+    const { engine, calls, fills } = fakeEngine({ box: '기존 초안' })
     const result = await transferDraft(engine, transfer({ text: ' + 추가', mode: 'append' }), { now: 0 })
 
-    expect(result.kind).toBe('filled')
+    expect(result).toMatchObject({ kind: 'filled', text: '기존 초안 + 추가' })
     expect(fills[0]).toEqual({ text: ' + 추가', mode: 'append' })
-    expect(calls).toEqual(['prompt.fill(append)', 'prompt.read'])
+    // The fill's own view of the box is enough; no read is needed.
+    expect(calls).toEqual(['prompt.fill(append)'])
   })
 
   test('insert mode skips the conflict check', async () => {
@@ -213,7 +217,7 @@ describe('transferDraft — draft conflict', () => {
     const result = await transferDraft(engine, transfer({ text: '가운데', mode: 'insert' }), { now: 0 })
 
     expect(result.kind).toBe('filled')
-    expect(calls).toEqual(['prompt.fill(insert)', 'prompt.read'])
+    expect(calls).toEqual(['prompt.fill(insert)'])
   })
 })
 
@@ -268,7 +272,7 @@ describe('transferDraft — fill refusal mapping', () => {
 })
 
 describe('transferDraft — bypass permit', () => {
-  test('replace issues a permit over the target text with the TTL expiry', async () => {
+  test('replace issues a permit over the box text with the TTL expiry', async () => {
     const { engine } = fakeEngine({ box: '' })
     const result = await transferDraft(
       engine,
@@ -288,8 +292,44 @@ describe('transferDraft — bypass permit', () => {
     })
   })
 
+  test('replace permits the box text after the engine strips undrawable code points', async () => {
+    // The engine drops zero-width code points at both the fill and the send, so
+    // a permit over `target.text` would never match the composer's submission.
+    const { engine } = fakeEngine({
+      box: '',
+      fill: input => ({ isFilled: true, text: input.text.replaceAll('\u200B', ''), cursor: 0 }),
+    })
+    const result = await transferDraft(engine, transfer({ text: '초안\u200B' }), { now: 0 })
+
+    expect(result).toMatchObject({ kind: 'filled', text: '초안' })
+    expect(result.kind === 'filled' ? result.ticket.text : null).toBe('초안')
+  })
+
+  test('falls back to a fresh read when the fill reports no text', async () => {
+    // The first read clears the conflict check; the fill reports no text, so
+    // the second read supplies the box.
+    const { engine, calls } = fakeEngine({
+      box: ['', '읽어낸 상자'],
+      fill: () => ({ isFilled: true, text: '', cursor: 0 }),
+    })
+    const result = await transferDraft(engine, transfer({ text: '초안' }), { now: 0 })
+
+    expect(result).toMatchObject({ kind: 'filled', text: '읽어낸 상자' })
+    expect(calls).toEqual(['prompt.read', 'prompt.fill(replace)', 'prompt.read'])
+  })
+
+  test('falls back to the requested text when the fill and the box are both blank', async () => {
+    const { engine } = fakeEngine({
+      box: '',
+      fill: () => ({ isFilled: true, text: '', cursor: 0 }),
+    })
+    const result = await transferDraft(engine, transfer({ text: '초안' }), { now: 0 })
+
+    expect(result).toMatchObject({ kind: 'filled', text: '초안' })
+  })
+
   test('append issues a permit over the box after the fill', async () => {
-    const { engine } = fakeEngine({ box: '기존 초안 + 추가' })
+    const { engine } = fakeEngine({ box: '기존 초안' })
     const result = await transferDraft(engine, transfer({ text: ' + 추가', mode: 'append' }), { now: 5 })
 
     expect(result).toEqual({
@@ -304,8 +344,8 @@ describe('transferDraft — bypass permit', () => {
     })
   })
 
-  test('append falls back to the fill’s text when the box cannot be re-read', async () => {
-    const { engine } = fakeEngine({
+  test('append uses the fill’s own report even when the box cannot be read', async () => {
+    const { engine, calls } = fakeEngine({
       box: '',
       readError: new Error('gone'),
       fill: () => ({ isFilled: true, text: '합쳐진 텍스트', cursor: 6 }),
@@ -313,6 +353,8 @@ describe('transferDraft — bypass permit', () => {
     const result = await transferDraft(engine, transfer({ text: ' + 추가', mode: 'append' }), { now: 0 })
 
     expect(result).toMatchObject({ kind: 'filled', text: '합쳐진 텍스트' })
+    // The fill's text is authoritative, so no re-read is attempted.
+    expect(calls).toEqual(['prompt.fill(append)'])
   })
 
   test('a refusal carries no permit', async () => {

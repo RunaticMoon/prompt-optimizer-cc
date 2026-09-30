@@ -41,7 +41,7 @@
     "uiMode": {
       "type": "string",
       "title": "Interface",
-      "description": "\"auto\" prefers a pane and falls back to the prompt box; \"pane\" requires the pane; \"composer\" always holds the dialogue in the prompt box.",
+      "description": "\"auto\" and \"pane\" open the dialogue in a pane and fall back to the prompt-box dialogue when it cannot be placed; \"composer\" always holds the dialogue in the prompt box.",
       "required": false,
       "default": "auto",
       "options": [
