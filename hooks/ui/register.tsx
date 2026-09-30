@@ -21,23 +21,26 @@ const KEYS = {
 function portsOf($: EngineInterface): EnginePorts {
   return {
     session: {
-      messages: ((...args: unknown[]) => Reflect.apply($.session.messages, $.session, args)) as EnginePorts['session']['messages'],
-      cwd: (...args) => $.session.cwd(...args),
-      root: (...args) => $.session.root(...args),
-      repo: (...args) => $.session.repo(...args),
+      // The controller only calls `messages()` with no argument; the cast keeps
+      // the overloaded call type without reading the method as a value.
+      messages: (() => $.session.messages()) as unknown as EnginePorts['session']['messages'],
+      cwd: () => $.session.cwd(),
+      root: () => $.session.root(),
+      repo: () => $.session.repo(),
     },
     fs: {
-      stat: (...args) => $.fs.stat(...args),
-      read: ((...args: unknown[]) => Reflect.apply($.fs.read, $.fs, args)) as EnginePorts['fs']['read'],
+      stat: path => $.fs.stat(path),
+      read: ((path: string) => $.fs.read(path)) as unknown as EnginePorts['fs']['read'],
     },
-    env: { get: (...args) => $.env.get(...args) },
-    model: { complete: (...args) => $.model.complete(...args) },
+    // The loader wants a literal env name; `HOME` is the only one read.
+    env: { get: () => $.env.get('HOME') },
+    model: { complete: (request, options) => $.model.complete(request, options) },
     prompt: {
-      read: (...args) => $.prompt.read(...args),
-      fill: (...args) => $.prompt.fill(...args),
-      submit: (...args) => $.prompt.submit(...args),
+      read: () => $.prompt.read(),
+      fill: args => $.prompt.fill(args),
+      submit: args => $.prompt.submit(args),
     },
-    ui: { close: (...args) => $.ui.close(...args) },
+    ui: { close: args => $.ui.close(args) },
   }
 }
 

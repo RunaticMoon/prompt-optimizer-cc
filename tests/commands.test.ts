@@ -219,24 +219,42 @@ function rig(opts: { current?: Readonly<RuntimeState>; config?: OptimizerConfig;
 }
 
 /**
- * Registers the `/optimize` hook and a base `command.run` beneath it. The
- * harness only accepts `on` before the first `$` call, so this is done once per
- * test, before any `$.command.run`; the mod's own register owns neither the
- * command registration nor the base until task L.
+ * The `command.run` hook `registerCommands` registers, captured so the test
+ * drives it directly. Since task L wires the same event from the loaded plugin
+ * (whose hooks sit above the test's own), dispatching through `$.command.run`
+ * would answer with the plugin's real handler, not this rig; capturing keeps
+ * the unit isolated.
+ */
+let wired: ((args: string) => Promise<{ text: string }>) | null = null
+
+/**
+ * Registers the `/optimize` hook into a capturer and a base `command.run`
+ * beneath it (kept for the pass-through test, which goes through the engine).
  */
 function wire(on: On, deps: CommandDeps): void {
-  registerCommands(on, deps)
+  let hook: ((...args: unknown[]) => unknown) | undefined
+  const capturing = ((_event: string, ...rest: unknown[]) => {
+    hook = rest[rest.length - 1] as (...args: unknown[]) => unknown
+    return { catch: () => undefined }
+  }) as unknown as On
+  registerCommands(capturing, deps)
+
+  wired = async args => {
+    const e = {
+      command: OPTIMIZE_COMMAND.name,
+      args,
+      origin: { kind: 'composer' },
+      presentation: { isFullscreen: false, columns: 80 },
+    }
+    return (await hook?.({} as never, e)) as { text: string }
+  }
+
   on('command.run', (_$, e) => ({ text: `base:${e.command}` }))
 }
 
-/** Runs `/optimize <args>` the way a person's Enter would. */
-function run($: Engine, args: string): Promise<CommandRunResult> {
-  return $.command.run({
-    command: OPTIMIZE_COMMAND.name,
-    args,
-    origin: { kind: 'composer' },
-    presentation: { isFullscreen: false, columns: 80 },
-  })
+/** Runs `/optimize <args>` through the captured hook. */
+function run(_$: Engine, args: string): Promise<CommandRunResult> {
+  return wired!(args) as unknown as Promise<CommandRunResult>
 }
 
 describe('registerCommands — settings intents', () => {

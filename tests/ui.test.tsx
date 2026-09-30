@@ -1,4 +1,5 @@
-import type { RenderInput } from 'claude-code'
+import type { On, RenderInput } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { OptimizerController } from '../hooks/controller'
@@ -58,18 +59,61 @@ function textOf(tree: unknown): string {
   return JSON.stringify(tree)
 }
 
+/** A hook the capturer stored, callable with the engine's `$`. */
+type CapturedHook = (...args: unknown[]) => unknown
+
+/**
+ * Registers the UI into a capturer and hands back the hooks, so the test drives
+ * them directly. Task L now wires the same events from the loaded plugin (whose
+ * hooks sit above the test's own), so a `$.ui.render`/`press`/`input` dispatch
+ * would reach the plugin's real handler; capturing keeps this unit isolated.
+ *
+ * `ui.render`'s hook calls `$.ui.resolve(e)`, available only on the hook-side
+ * `$`; the probe session.start hook captures one so the render hook can draw.
+ */
+async function captureUi($: Engine, on: On, controller: OptimizerController): Promise<{
+  render: (e: RenderInput<'Pane', 'terminal'>) => Promise<unknown>
+  press: (e: unknown) => Promise<unknown>
+  input: (e: unknown) => Promise<unknown>
+}> {
+  let hook$: unknown
+  on('session.start', (_$, e) => {
+    hook$ = _$
+    return { cwd: e.cwd }
+  })
+  await $.session.start({ cwd: '/tmp/prompt-optimizer-ui', surface: 'terminal', isInteractive: true })
+
+  const hooks = new Map<string, CapturedHook>()
+  const capturing = ((event: string, ...rest: unknown[]) => {
+    hooks.set(event, rest[rest.length - 1] as CapturedHook)
+    return { catch: () => undefined }
+  }) as unknown as On
+  registerUi(capturing, controller, () => 3, 'test')
+
+  const call = (event: string, e: unknown): Promise<unknown> => {
+    const hook = hooks.get(event)
+    if (hook === undefined) throw new Error(`no ${event} hook was registered`)
+    return Promise.resolve(hook(hook$, e, (inner: unknown) => ({ inner })))
+  }
+  return {
+    render: e => call('ui.render', e),
+    press: e => call('ui.press', e),
+    input: e => call('ui.input', e),
+  }
+}
+
 describe('optimizer UI', () => {
   test('pane describes each phase and an empty workflow', async ($, on) => {
     const current = state(workflow())
     const { controller } = fakeController(current)
-    registerUi(on, controller, () => 3, 'test')
+    const ui = await captureUi($, on, controller)
 
     for (const [phase, label] of [
       ['collecting', '수집 중'], ['generating', '생성 중'], ['reviewing', '검토'],
       ['failed', '실패'], ['transferring', '전달 중'], ['sending', '전송 중'],
     ] as const) {
       current.workflow = { ...workflow(phase), lastError: phase === 'failed' ? '네트워크 오류' : undefined }
-      const drawn = textOf(await $.ui.render(PANE))
+      const drawn = textOf(await ui.render(PANE))
       expect(drawn).toContain(label)
       expect(drawn).toContain('1/3회')
       expect(drawn).toContain('10토큰')
@@ -78,17 +122,18 @@ describe('optimizer UI', () => {
     }
 
     current.workflow = null
-    expect(textOf(await $.ui.render(PANE))).toContain('진행 중인 개선 작업이 없습니다')
+    expect(textOf(await ui.render(PANE))).toContain('진행 중인 개선 작업이 없습니다')
     current.workflow = { ...workflow(), ui: 'composer' }
-    expect(textOf(await $.ui.render(PANE))).toContain('개선 대화는 입력창에서 진행 중입니다')
+    expect(textOf(await ui.render(PANE))).toContain('개선 대화는 입력창에서 진행 중입니다')
   })
 
   test('actions call the matching controller method once, and busy actions are unavailable', async ($, on) => {
     const current = state(workflow())
     const { controller, calls } = fakeController(current)
-    registerUi(on, controller, () => 3, 'test')
+    const ui = await captureUi($, on, controller)
+    const press = (element: string) =>
+      ui.press({ component: 'Pane', requestId: PANE_ID, plugin: 'test', element })
 
-    const mounted = await $.ui.mount({ plugin: 'test', ...PANE })
     const actions = [
       ['optimizer:accept', 'accept'],
       ['optimizer:send', 'sendDraft'],
@@ -97,36 +142,36 @@ describe('optimizer UI', () => {
       ['optimizer:cancel', 'cancel'],
     ] as const
     for (const [key, call] of actions) {
-      await mounted.press({ key })
+      await press(key)
       expect(calls.at(-1)).toBe(call)
     }
     expect(calls).toHaveLength(actions.length)
 
     current.workflow = workflow('generating')
-    await mounted.redraw()
-    const busy = textOf(await mounted.drawn())
+    const busy = textOf(await ui.render(PANE))
     expect(busy).toContain('입력창으로 가져오기 · 사용 불가')
     expect(busy).toContain('잠시 기다려 주세요.')
-    await expect(mounted.press({ key: 'optimizer:accept' })).rejects.toThrow()
+    await press('optimizer:accept')
     expect(calls).toHaveLength(actions.length)
 
     current.workflow = { ...workflow('failed'), draft: '', lastError: '다시 시도할 수 있습니다.' }
-    await mounted.redraw()
-    const failed = textOf(await mounted.drawn())
+    const failed = textOf(await ui.render(PANE))
     expect(failed).toContain('입력창으로 가져오기 · 사용 불가')
     expect(failed).toContain('다시 시도할 수 있습니다.')
-    await expect(mounted.press({ key: 'optimizer:send' })).rejects.toThrow()
+    await press('optimizer:send')
     expect(calls).toHaveLength(actions.length)
   })
 
   test('Input Enter refines; an empty instruction does not', async ($, on) => {
     const current = state(workflow())
     const { controller, calls } = fakeController(current)
-    registerUi(on, controller, () => 3, 'test')
-    const mounted = await $.ui.mount({ plugin: 'test', ...PANE })
-    await mounted.input({ key: 'optimizer:instruction', text: ' 더 짧게 ' })
+    const ui = await captureUi($, on, controller)
+    const type = (value: string) =>
+      ui.input({ component: 'Pane', requestId: PANE_ID, plugin: 'test', kind: 'submit', element: 'optimizer:instruction', value })
+
+    await type(' 더 짧게 ')
     expect(calls).toEqual(['refine:더 짧게'])
-    await mounted.input({ key: 'optimizer:instruction', text: '   ' })
+    await type('   ')
     expect(calls).toEqual(['refine:더 짧게'])
   })
 

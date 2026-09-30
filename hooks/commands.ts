@@ -22,6 +22,7 @@
 import type { CommandSpec, EngineInterface, On } from 'claude-code'
 
 import type { ConfigKey, EnginePorts, OptimizerConfig, RuntimeState } from './contracts'
+import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
 export const OPTIMIZE_COMMAND: CommandSpec = {
@@ -75,8 +76,14 @@ export interface CommandDeps {
   controller: CommandController
   /** Read/validate settings for the `on`, `off`, `model` and `status` intents. */
   settings: SettingsPort
-  /** Asks the host to try a pane; its answer picks the explicit run's UI. */
-  chooseUi(): Promise<'pane' | 'composer'>
+  /**
+   * Asks the host to try a pane; its answer picks the explicit run's UI.
+   *
+   * The ports are the ones built inside this hook from the live `$`: opening
+   * the pane inside the command's own dispatch is what lets a narrow terminal
+   * still place it (2.1.285's user-gesture rule).
+   */
+  chooseUi(ui: UiPorts): Promise<'pane' | 'composer'>
 }
 
 /** One parsed `/optimize` invocation. */
@@ -195,7 +202,9 @@ export function formatStatus(config: OptimizerConfig, state: Readonly<RuntimeSta
  * bare second registration of the same event would fail the loader.
  */
 export function registerCommands(on: On, deps: CommandDeps): void {
-  on('command.run', { command: OPTIMIZE_COMMAND.name }, ($, e) => runCommand(deps, portsOf($), e.args).then(text => ({ text })))
+  on('command.run', { command: OPTIMIZE_COMMAND.name }, ($, e) =>
+    runCommand(deps, portsOf($), uiPortsOf($), e.args).then(text => ({ text })),
+  )
 }
 
 /**
@@ -205,31 +214,54 @@ export function registerCommands(on: On, deps: CommandDeps): void {
 function portsOf($: EngineInterface): EnginePorts {
   return {
     session: {
-      messages: ((...args: unknown[]) => Reflect.apply($.session.messages, $.session, args)) as EnginePorts['session']['messages'],
-      cwd: (...args) => $.session.cwd(...args),
-      root: (...args) => $.session.root(...args),
-      repo: (...args) => $.session.repo(...args),
+      // The controller only calls `messages()` with no argument; the cast keeps
+      // the overloaded call type without reading the method as a value.
+      messages: (() => $.session.messages()) as unknown as EnginePorts['session']['messages'],
+      cwd: () => $.session.cwd(),
+      root: () => $.session.root(),
+      repo: () => $.session.repo(),
     },
     fs: {
-      stat: (...args) => $.fs.stat(...args),
-      read: ((...args: unknown[]) => Reflect.apply($.fs.read, $.fs, args)) as EnginePorts['fs']['read'],
+      stat: path => $.fs.stat(path),
+      read: ((path: string) => $.fs.read(path)) as unknown as EnginePorts['fs']['read'],
     },
-    env: { get: (...args) => $.env.get(...args) },
-    model: { complete: (...args) => $.model.complete(...args) },
+    // The loader wants a literal env name; `HOME` is the only one read.
+    env: { get: () => $.env.get('HOME') },
+    model: { complete: (request, options) => $.model.complete(request, options) },
     prompt: {
-      read: (...args) => $.prompt.read(...args),
-      fill: (...args) => $.prompt.fill(...args),
-      submit: (...args) => $.prompt.submit(...args),
+      read: () => $.prompt.read(),
+      fill: args => $.prompt.fill(args),
+      submit: args => $.prompt.submit(args),
     },
-    ui: { close: (...args) => $.ui.close(...args) },
+    ui: { close: args => $.ui.close(args) },
+  }
+}
+
+/**
+ * Keeps `$` at the hook site: the UI boundary `chooseUi` receives, so the pane
+ * is opened inside the command's own user-gesture dispatch.
+ */
+function uiPortsOf($: EngineInterface): UiPorts {
+  return {
+    open: args => $.ui.open(args),
+    close: id => $.ui.close({ id }),
+    invalidate: () => $.ui.invalidate('ui.render'),
+    status: text => $.ui.status(text),
+    log: text => $.ui.log(text),
+    toast: text => $.ui.toast(text),
   }
 }
 
 /** Runs one parsed intent and returns the line(s) the person sees. */
-async function runCommand(deps: CommandDeps, ports: EnginePorts, args: string): Promise<string> {
+async function runCommand(
+  deps: CommandDeps,
+  ports: EnginePorts,
+  ui: UiPorts,
+  args: string,
+): Promise<string> {
   const parsed = parseOptimizeArgs(args)
   try {
-    return await dispatch(deps, ports, parsed)
+    return await dispatch(deps, ports, ui, parsed)
   } catch (error) {
     // A failing controller method (or a refused UI choice) becomes one line,
     // never an exception escaping the command hook.
@@ -238,7 +270,12 @@ async function runCommand(deps: CommandDeps, ports: EnginePorts, args: string): 
 }
 
 /** Executes one parsed intent. */
-async function dispatch(deps: CommandDeps, ports: EnginePorts, command: ParsedCommand): Promise<string> {
+async function dispatch(
+  deps: CommandDeps,
+  ports: EnginePorts,
+  ui: UiPorts,
+  command: ParsedCommand,
+): Promise<string> {
   switch (command.kind) {
     case 'on':
       return applySetting(deps.settings, 'enabled', true, '자동 가로채기를 켰습니다.', '자동 가로채기를 켜지 못했습니다')
@@ -260,8 +297,8 @@ async function dispatch(deps: CommandDeps, ports: EnginePorts, command: ParsedCo
       return `사용법 오류: ${command.message}`
 
     case 'start': {
-      const ui = await deps.chooseUi()
-      await deps.controller.startExplicit(ports, command.text, ui)
+      const choice = await deps.chooseUi(ui)
+      await deps.controller.startExplicit(ports, command.text, choice)
       return command.text === undefined
         ? '현재 입력창 초안으로 개선을 시작합니다.'
         : '입력한 텍스트로 개선을 시작합니다.'
