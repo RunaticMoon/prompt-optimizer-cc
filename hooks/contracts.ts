@@ -236,6 +236,14 @@ export type OptimizerEvent =
   | { type: 'reset'; sessionId: string }
   | { type: 'bypass-issued'; ticket: BypassTicket }
   | { type: 'bypass-consumed'; sessionId: string; workflowId: string }
+  /** The context snapshot finished collecting for this generation. */
+  | { type: 'context'; workflowId: string; generation: number; context: ContextSnapshot }
+  /** The user sent a refinement instruction; appended to the dialogue before the next completion. */
+  | { type: 'instruct'; workflowId: string; text: string }
+  /** The user edited the restored draft in the composer; the bypass follows the edited text. */
+  | { type: 'bypass-edited'; sessionId: string; text: string }
+  /** The bypass permit was revoked (another fill, cleared draft, session end, expiry). */
+  | { type: 'bypass-revoked'; sessionId: string }
 
 /** Where a finished draft is written back. */
 export interface TransferTarget {
