@@ -161,6 +161,7 @@ export type PassReason =
   | 'slash-command'
   | 'shell'
   | 'over-limit'
+  | 'no-trigger'
 
 /** What the classifier decides for one submission. */
 export type SubmissionDecision =
@@ -169,6 +170,8 @@ export type SubmissionDecision =
   | { kind: 'raw'; text: string }
   | { kind: 'bypass'; text: string; ticket: BypassTicket }
   | { kind: 'reply'; workflowId: string; text: string }
+  /** A workflow is already running (or holds the pane): the caller drops the submission, never passes it to the main session. */
+  | { kind: 'busy'; workflowId: string }
 
 /** How an interception was requested. */
 export type OptimizeTrigger = 'auto' | 'prefix' | 'command'
@@ -325,6 +328,9 @@ export const CONTEXT_CONVERSATION_CHARS = 4000
 
 /** Prompts longer than this are passed through untouched. */
 export const MAX_REQUEST_CHARS = 16000
+
+/** An original prompt longer than this is not optimized; it passes through unchanged (DESIGN ④). */
+export const MAX_ORIGINAL_CHARS = 6000
 
 /** Cap for an explicitly configured system prompt file. */
 export const SYSTEM_PROMPT_MAX_CHARS = 4000
