@@ -58,7 +58,7 @@ export interface Workflow {
   id: string
   /** Session the run belongs to. */
   sessionId: string
-  /** Bumped on cancel/reset so stale async results are discarded. */
+  /** Always 0; workflow ids are unique per session, which is what makes late replies stale. */
   generation: number
   /** Current stage (see {@link Phase}). */
   phase: Phase

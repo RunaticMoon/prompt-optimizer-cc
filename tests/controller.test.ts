@@ -83,6 +83,8 @@ interface Harness {
   closes: string[]
   completes: ModelCompleteRequest[]
   signals: Array<AbortSignal | undefined>
+  /** Fault injection: make the next notice-less repaint throw once. */
+  flags: { throwOnRepaint: boolean }
   /** Runs every queued round to completion (awaits the round's own promise). */
   flush(): Promise<void>
   /** Spins microtasks until `predicate` holds, so a detached round can be observed. */
@@ -123,6 +125,7 @@ function harness(options: HarnessOptions = {}): Harness {
   const closes: string[] = []
   const completes: ModelCompleteRequest[] = []
   const signals: Array<AbortSignal | undefined> = []
+  const flags = { throwOnRepaint: false }
   const boxes: string[] =
     options.box === undefined
       ? []
@@ -141,6 +144,10 @@ function harness(options: HarnessOptions = {}): Harness {
     onChange: (state, notice) => {
       changes.push(state)
       notices.push(notice)
+      if (flags.throwOnRepaint && notice === undefined) {
+        flags.throwOnRepaint = false
+        throw new Error('repaint failed')
+      }
     },
     ...options.deps,
   }
@@ -253,6 +260,7 @@ function harness(options: HarnessOptions = {}): Harness {
     closes,
     completes,
     signals,
+    flags,
     flush,
     waitFor,
   }
@@ -308,6 +316,22 @@ describe('onSubmit — intercepts one submission', () => {
     const outcome = await h.controller.onSubmit(h.ports, submit('::raw 그냥 보내기'), 'pane')
 
     expect(outcome).toEqual({ action: 'next', text: '그냥 보내기' })
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('drops a raw escape whose remainder is blank', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    const spaces = await h.controller.onSubmit(h.ports, submit('::raw    '), 'pane')
+    expect(spaces).toEqual({ action: 'drop', reason: '보낼 내용이 없습니다.' })
+    expect(h.controller.getState().workflow).toBeNull()
+
+    // A bare marker leaves an empty remainder; the classifier returns it as a
+    // raw decision too (task S), and the trim guard drops it rather than
+    // forwarding the marker to the main session.
+    const empty = await h.controller.onSubmit(h.ports, submit('::raw '), 'pane')
+    expect(empty).toEqual({ action: 'drop', reason: '보낼 내용이 없습니다.' })
     expect(h.controller.getState().workflow).toBeNull()
   })
 
@@ -402,6 +426,43 @@ describe('refine — the improvement dialogue', () => {
 
     expect(h.calls.complete).toBe(1)
     expect(h.notices).toContain('개선 횟수 한도에 도달했습니다')
+  })
+
+  test('puts a refinement instruction in the request exactly once', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    await h.controller.refine(h.ports, '더 짧게')
+
+    const refined = h.completes.at(-1)?.prompt ?? ''
+    // The supplement is rendered once, in the dialogue; the request must not
+    // also repeat it in an `<instruction>` section.
+    expect(refined.split('더 짧게')).toHaveLength(2)
+    expect(refined).not.toContain('<instruction>')
+
+    await h.controller.retry(h.ports, '조금 더')
+
+    const retried = h.completes.at(-1)?.prompt ?? ''
+    expect(retried.split('조금 더')).toHaveLength(2)
+    expect(retried).not.toContain('<instruction>')
+  })
+
+  test('reports a failed system prompt read once per run', async () => {
+    const h = harness({ config: { systemPromptFile: '/missing/prompt.md' } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const warned = (): Array<string | undefined> =>
+      h.notices.filter(notice => notice?.includes('시스템 프롬프트 파일을 읽지 못해'))
+    expect(warned()).toHaveLength(1)
+    expect(warned()[0]).toContain('/missing/prompt.md')
+
+    // The prompt is cached for the run, so a later round does not warn again.
+    await h.controller.refine(h.ports, '더 짧게')
+    expect(warned()).toHaveLength(1)
   })
 })
 
@@ -617,6 +678,62 @@ describe('cancel', () => {
 
     expect(h.notices).toContain('진행 중인 개선 작업이 없습니다.')
   })
+
+  test('ignores cancel while the draft is being moved to the box', async () => {
+    let releaseFill: (() => void) | undefined
+    const h = harness({
+      fill: input =>
+        new Promise<PromptFilled>(resolve => {
+          releaseFill = () =>
+            resolve({ isFilled: true, text: input.text, cursor: input.text.length })
+        }),
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.controller.getState().workflow?.phase === 'transferring')
+
+    await h.controller.cancel(h.ports)
+
+    expect(h.notices).toContain('입력창으로 옮기는 중이라 취소할 수 없습니다')
+    expect(h.fills).toHaveLength(1)
+    expect(h.controller.getState().workflow?.phase).toBe('transferring')
+
+    releaseFill?.()
+    await accepting
+
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.fills).toHaveLength(1)
+  })
+
+  test('ignores cancel while a draft is being sent', async () => {
+    let releaseSubmit: (() => void) | undefined
+    const h = harness({
+      submit: input =>
+        new Promise<PromptSubmitResult>(resolve => {
+          releaseSubmit = () => resolve({ text: input.text })
+        }),
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const sending = h.controller.sendDraft(h.ports)
+    await h.waitFor(() => h.controller.getState().workflow?.phase === 'sending')
+
+    await h.controller.cancel(h.ports)
+
+    expect(h.notices).toContain('전송 중이라 취소할 수 없습니다')
+    expect(h.submits).toHaveLength(1)
+
+    releaseSubmit?.()
+    await sending
+
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.submits).toHaveLength(1)
+  })
 })
 
 describe('startExplicit and lifecycle', () => {
@@ -674,5 +791,24 @@ describe('isolation invariants', () => {
     expect(h.calls.fork).toBe(0)
     expect(h.calls.submit).toBe(0)
     expect(h.controller.getState().usage.calls).toBe(2)
+  })
+})
+
+describe('scheduled work', () => {
+  test('turns a failed scheduled refine into a notice, never a rejection', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'composer')
+    await h.flush()
+
+    h.flags.throwOnRepaint = true
+    const outcome = await h.controller.onSubmit(h.ports, submit('더 짧게'), 'composer')
+    expect(outcome).toEqual({ action: 'drop', reason: '보완 요청을 옵티마이저에 전달했습니다.' })
+
+    // `flush` awaits the scheduled callback's promise: the wrapper must keep it
+    // from rejecting and report the fault as a notice instead.
+    await h.flush()
+
+    expect(h.notices).toContain('보완 요청을 처리하지 못했습니다: repaint failed')
   })
 })

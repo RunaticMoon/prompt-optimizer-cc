@@ -135,6 +135,10 @@ function refusalNotice(reason: TransferRefusal): string {
  * `AbortController` per in-flight workflow (keyed by workflow id) and the
  * cached system prompt for the current run. None of it is shared between
  * sessions; `onSessionStart`/`onSessionEnd` tear it all down.
+ *
+ * `Workflow.generation` stays `0` for a run's whole life: ids from `newId` only
+ * increase within a session and never repeat, so {@link isStale} still tells a
+ * late result from the current run without bumping the field on cancel/reset.
  */
 export function createController(deps: ControllerDeps): OptimizerController {
   let state: RuntimeState = initialState('')
@@ -152,6 +156,25 @@ export function createController(deps: ControllerDeps): OptimizerController {
   /** Emits a user-facing notice over the current state. */
   function notify(notice: string): void {
     deps.onChange(state, notice)
+  }
+
+  /**
+   * Runs `task` from the schedule queue without letting it reject. The host
+   * ignores the scheduled promise, so an unexpected fault is reported as a
+   * notice rather than surfacing as an unhandled rejection. The returned
+   * promise never rejects, so a test queue that awaits the callback still sees
+   * it settle. A `schedule` that throws propagates to the caller, which decides
+   * whether to undo a half-started run.
+   */
+  function scheduleTask(task: () => Promise<void>, failure: (cause: unknown) => string): void {
+    deps.schedule(() =>
+      Promise.resolve()
+        .then(task)
+        .catch(cause => notify(failure(cause)))
+        .catch(() => {
+          // A throwing notice sink must not itself become an unhandled rejection.
+        }),
+    )
   }
 
   /** Aborts every in-flight completion; used on cancel and session changes. */
@@ -260,14 +283,23 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
     if (system === null) {
       let extra = ''
+      let warning: string | undefined
       try {
-        extra = (await loadSystemPromptExtra(ports, config)).text
+        const loaded = await loadSystemPromptExtra(ports, config)
+        extra = loaded.text
+        warning = loaded.warning
       } catch {
         // A missing extra file falls back to the built-in prompt, already the
-        // empty `extra`; `loadSystemPromptExtra` also reports its own warning.
+        // empty `extra`; `loadSystemPromptExtra` reports its own warning when it
+        // can, but an unexpected throw here leaves none to relay.
         extra = ''
       }
       system = composeSystemPrompt(extra)
+      // The prompt is loaded once per run, so this is the run's one warning
+      // notice; the warning text itself names the file and the fallback taken.
+      if (warning !== undefined && warning !== '') {
+        notify(`시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${warning}`)
+      }
     }
 
     const current = state.workflow
@@ -359,6 +391,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
         return { action: 'next', text: e.text }
 
       case 'raw':
+        // The classifier hands back the remainder even when it is empty or only
+        // spaces; there is nothing to send, so drop instead of forwarding it.
+        if (decision.text.trim() === '') {
+          return { action: 'drop', reason: '보낼 내용이 없습니다.' }
+        }
         return { action: 'next', text: decision.text }
 
       case 'bypass':
@@ -374,7 +411,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
       case 'reply':
         try {
-          deps.schedule(() => refine(ports, decision.text))
+          scheduleTask(
+            () => refine(ports, decision.text),
+            cause => `보완 요청을 처리하지 못했습니다: ${describeError(cause)}`,
+          )
         } catch (cause) {
           notify(`보완 요청을 예약하지 못했습니다: ${describeError(cause)}`)
         }
@@ -386,7 +426,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
           resetSystemPrompt()
           workflow = makeWorkflow(decision.text, e.context ?? [], ui)
           apply({ type: 'start', workflow })
-          deps.schedule(() => runRound(ports))
+          scheduleTask(
+            () => runRound(ports),
+            cause => `개선을 시작하지 못했습니다: ${describeError(cause)}`,
+          )
         } catch (cause) {
           // Undo a half-started run and let the original through, so the person
           // is not stuck behind a workflow that never had a clock to run on.
@@ -427,7 +470,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
       resetSystemPrompt()
       const workflow = makeWorkflow(source, [], ui)
       apply({ type: 'start', workflow })
-      deps.schedule(() => runRound(ports))
+      scheduleTask(
+        () => runRound(ports),
+        cause => `개선을 시작하지 못했습니다: ${describeError(cause)}`,
+      )
     } catch (cause) {
       notify(`개선을 시작하지 못했습니다: ${describeError(cause)}`)
     }
@@ -440,7 +486,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return
     }
     apply({ type: 'instruct', workflowId: workflow.id, text: instruction })
-    await runRound(ports, instruction)
+    // The supplement now lives in the dialogue, which `buildModelRequest`
+    // renders; `''` stops it from also filling the `<instruction>` section
+    // (whose fallback is the same dialogue turn, doubling the text).
+    await runRound(ports, '')
   }
 
   async function retry(ports: EnginePorts, instruction?: string): Promise<void> {
@@ -451,8 +500,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
     if (instruction !== undefined && instruction !== '') {
       apply({ type: 'instruct', workflowId: workflow.id, text: instruction })
+      await runRound(ports, '')
+      return
     }
-    await runRound(ports, instruction)
+    await runRound(ports)
   }
 
   async function accept(ports: EnginePorts): Promise<void> {
@@ -539,6 +590,17 @@ export function createController(deps: ControllerDeps): OptimizerController {
     if (workflow === null) {
       if (state.bypass !== null) apply({ type: 'bypass-revoked', sessionId: state.sessionId })
       notify('진행 중인 개선 작업이 없습니다.')
+      return
+    }
+
+    // A transfer or send is already under way: aborting here would race a
+    // second `transferDraft`/`sendApproved` against the first. Refuse instead.
+    if (workflow.phase === 'transferring') {
+      notify('입력창으로 옮기는 중이라 취소할 수 없습니다')
+      return
+    }
+    if (workflow.phase === 'sending') {
+      notify('전송 중이라 취소할 수 없습니다')
       return
     }
 
