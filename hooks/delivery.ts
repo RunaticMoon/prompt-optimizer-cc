@@ -11,10 +11,11 @@
  * to fold into state, and neither retries a submit.
  */
 
-import type { EngineInterface, PromptFilled, PromptSubmitResult } from 'claude-code'
+import type { PromptFilled, PromptSubmitResult } from 'claude-code'
 
 import type {
   BypassTicket,
+  EnginePorts,
   SubmitTarget,
   TransferRefusal,
   TransferResult,
@@ -56,7 +57,7 @@ export type SendResult =
  * @returns `filled` with the bypass permit, or `refused` with the reason
  */
 export async function transferDraft(
-  $: EngineInterface,
+  $: EnginePorts,
   target: TransferTarget,
   opts: TransferOptions,
 ): Promise<TransferResult> {
@@ -128,7 +129,7 @@ export async function transferDraft(
  * @param target the text to submit
  * @returns `sent`, `dropped` with the engine's reason, or `failed` with a message
  */
-export async function sendApproved($: EngineInterface, target: SubmitTarget): Promise<SendResult> {
+export async function sendApproved($: EnginePorts, target: SubmitTarget): Promise<SendResult> {
   let result: PromptSubmitResult
   try {
     // Exactly one call. No retry on a drop, a failure, or a timeout.

@@ -14,9 +14,8 @@
  * and `$.env` only: no shell, `~` expanded by hand, the result truncated to
  * {@link SYSTEM_PROMPT_MAX_CHARS}.
  */
-import type { EngineInterface } from 'claude-code'
 
-import type { ConfigKey, OptimizerConfig } from './contracts'
+import type { ConfigKey, EnginePorts, OptimizerConfig } from './contracts'
 import {
   CONTEXT_MAX_CHARS_RANGE,
   CONTEXT_TURNS_RANGE,
@@ -261,7 +260,7 @@ function describeError(cause: unknown): string {
  * with a warning naming the file.
  */
 export async function loadSystemPromptExtra(
-  $: EngineInterface,
+  $: EnginePorts,
   config: OptimizerConfig,
 ): Promise<{ text: string; warning?: string }> {
   const file = config.systemPromptFile

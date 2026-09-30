@@ -9,7 +9,7 @@
  * so the main session's model turn, transcript and cache prefix stay untouched.
  */
 
-import type { EngineInterface, SessionMessage } from 'claude-code'
+import type { SessionMessage } from 'claude-code'
 
 import {
   CONTEXT_CONVERSATION_CHARS,
@@ -19,6 +19,7 @@ import {
   CONTEXT_TOOLS_CHARS,
   CONTEXT_TOTAL_CHARS,
   type ContextSnapshot,
+  type EnginePorts,
   type OptimizerConfig,
 } from './contracts'
 
@@ -110,7 +111,7 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
  * failure empties only the section it feeds and the read goes on.
  */
 export async function collectContext(
-  $: EngineInterface,
+  $: EnginePorts,
   config: OptimizerConfig,
 ): Promise<ContextSnapshot> {
   const messages = await readMessages($)
@@ -221,7 +222,7 @@ function joinPath(dir: string, relative: string): string {
   return `${base}/${relative}`
 }
 
-async function readMessages($: EngineInterface): Promise<readonly SessionMessage[]> {
+async function readMessages($: EnginePorts): Promise<readonly SessionMessage[]> {
   try {
     return await $.session.messages()
   } catch {
@@ -237,7 +238,7 @@ async function readText(read: () => Promise<string>): Promise<string> {
   }
 }
 
-async function readRepoName($: EngineInterface): Promise<string | null> {
+async function readRepoName($: EnginePorts): Promise<string | null> {
   try {
     const repo = await $.session.repo()
     return repo === null ? null : (repo.name ?? repo.root)
@@ -248,7 +249,7 @@ async function readRepoName($: EngineInterface): Promise<string | null> {
 
 /** The three CLAUDE.md candidates, read only when small enough to be worth it. */
 async function readRules(
-  $: EngineInterface,
+  $: EnginePorts,
   root: string,
   cwd: string,
 ): Promise<{ path: string; text: string }[]> {

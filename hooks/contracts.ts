@@ -3,6 +3,8 @@
  * other module (C-L) imports from. Types and constants only, no runtime logic.
  */
 
+import type { EngineInterface } from 'claude-code'
+
 /** User settings as the manifest `userConfig` declares them, after defaults. */
 export interface OptimizerConfig {
   /** Whether the optimizer intercepts eligible submissions at all. */
@@ -342,3 +344,17 @@ export const MAX_ORIGINAL_CHARS = 6000
 
 /** Cap for an explicitly configured system prompt file. */
 export const SYSTEM_PROMPT_MAX_CHARS = 4000
+
+/**
+ * The slice of the engine interface the helper modules use. The mod loader
+ * refuses a `$` passed across an import, so `register.ts` builds this object
+ * from `$.noun.method(...)` closures and hands it to the helpers instead.
+ */
+export type EnginePorts = {
+  session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'>
+  fs: Pick<EngineInterface['fs'], 'stat' | 'read'>
+  env: Pick<EngineInterface['env'], 'get'>
+  model: Pick<EngineInterface['model'], 'complete'>
+  prompt: Pick<EngineInterface['prompt'], 'read' | 'fill' | 'submit'>
+  ui: Pick<EngineInterface['ui'], 'close'>
+}
