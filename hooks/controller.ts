@@ -51,6 +51,8 @@ const REPLY_NOTICE = '보완 요청을 옵티마이저에 전달했습니다.'
 const OPTIMIZE_NOTICE = '프롬프트를 다듬는 중입니다.'
 const LIMIT_NOTICE = '개선 횟수 한도에 도달했습니다'
 const ACCEPT_NOTICE = '개선안을 입력창에 넣었습니다. Enter 로 전송하세요.'
+/** Result reason for an action refused while its run is mid-flight. */
+const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
 
 /** A token count with every field at zero, for arms that spent nothing. */
 const ZERO_USAGE: ModelUsage = {
@@ -91,6 +93,13 @@ export type SubmitOutcome =
   | { action: 'next'; text: string }
   | { action: 'drop'; reason: string }
 
+/**
+ * The result of an explicit command that may be refused by the current phase
+ * or by the engine. `reason` is the same one-line Korean notice the person
+ * would have seen; commands (J) render it as their response.
+ */
+export type ActionResult = { ok: true } | { ok: false; reason: string }
+
 /** The controller's public surface, as commands (J) and the UI (K) call it. */
 export interface OptimizerController {
   getState(): Readonly<RuntimeState>
@@ -98,10 +107,10 @@ export interface OptimizerController {
   startExplicit(ports: EnginePorts, text: string | undefined, ui: 'pane' | 'composer'): Promise<void>
   refine(ports: EnginePorts, instruction: string): Promise<void>
   retry(ports: EnginePorts, instruction?: string): Promise<void>
-  accept(ports: EnginePorts): Promise<void>
-  sendDraft(ports: EnginePorts): Promise<void>
-  sendOriginal(ports: EnginePorts): Promise<void>
-  cancel(ports: EnginePorts): Promise<void>
+  accept(ports: EnginePorts): Promise<ActionResult>
+  sendDraft(ports: EnginePorts): Promise<ActionResult>
+  sendOriginal(ports: EnginePorts): Promise<ActionResult>
+  cancel(ports: EnginePorts): Promise<ActionResult>
   onPromptEdit(text: string): void
   onSessionStart(sessionId: string): void
   onSessionEnd(): void
@@ -296,9 +305,15 @@ export function createController(deps: ControllerDeps): OptimizerController {
       }
       system = composeSystemPrompt(extra)
       // The prompt is loaded once per run, so this is the run's one warning
-      // notice; the warning text itself names the file and the fallback taken.
+      // notice; the warning text itself names the file and the reason. Only a
+      // missing/unreadable file leaves `extra` empty and falls back to the
+      // built-in prompt; a truncation warning keeps the loaded text.
       if (warning !== undefined && warning !== '') {
-        notify(`시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${warning}`)
+        notify(
+          extra === ''
+            ? `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${warning}`
+            : `시스템 프롬프트 파일 안내: ${warning}`,
+        )
       }
     }
 
@@ -503,21 +518,25 @@ export function createController(deps: ControllerDeps): OptimizerController {
       await runRound(ports, '')
       return
     }
-    await runRound(ports)
+    // A bare retry must not re-render the last supplement as `<instruction>`
+    // (it is already in the dialogue); `''` keeps it from doubling.
+    await runRound(ports, '')
   }
 
-  async function accept(ports: EnginePorts): Promise<void> {
+  async function accept(ports: EnginePorts): Promise<ActionResult> {
     const workflow = state.workflow
     if (workflow === null) {
       notify('복원할 개선안이 없습니다.')
-      return
+      return { ok: false, reason: '복원할 개선안이 없습니다.' }
     }
     // `transferring`/`sending` mean a button is already being handled: ignore
     // the double press rather than fill or submit twice.
-    if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') return
+    if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
+      return { ok: false, reason: IN_FLIGHT_REASON }
+    }
     if (workflow.draft === '') {
       notify('복원할 개선안이 없습니다.')
-      return
+      return { ok: false, reason: '복원할 개선안이 없습니다.' }
     }
 
     apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'transferring' })
@@ -527,32 +546,38 @@ export function createController(deps: ControllerDeps): OptimizerController {
       result = await restore(ports, workflow, workflow.draft)
     } catch (cause) {
       apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'reviewing' })
-      notify(`개선안을 입력창에 넣지 못했습니다: ${describeError(cause)}`)
-      return
+      const reason = `개선안을 입력창에 넣지 못했습니다: ${describeError(cause)}`
+      notify(reason)
+      return { ok: false, reason }
     }
 
     if (result.kind === 'filled') {
       apply({ type: 'bypass-issued', ticket: result.ticket })
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify(ACCEPT_NOTICE)
-      return
+      return { ok: true }
     }
     apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'reviewing' })
-    notify(refusalNotice(result.reason))
+    const reason = refusalNotice(result.reason)
+    notify(reason)
+    return { ok: false, reason }
   }
 
-  async function send(ports: EnginePorts, source: 'draft' | 'original'): Promise<void> {
+  async function send(ports: EnginePorts, source: 'draft' | 'original'): Promise<ActionResult> {
     const workflow = state.workflow
     if (workflow === null) {
       notify('전송할 개선 작업이 없습니다.')
-      return
+      return { ok: false, reason: '전송할 개선 작업이 없습니다.' }
     }
-    if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') return
+    if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
+      return { ok: false, reason: IN_FLIGHT_REASON }
+    }
 
     const text = source === 'draft' ? workflow.draft : workflow.original
     if (text === '') {
-      notify(source === 'draft' ? '전송할 개선안이 없습니다.' : '전송할 원문이 없습니다.')
-      return
+      const reason = source === 'draft' ? '전송할 개선안이 없습니다.' : '전송할 원문이 없습니다.'
+      notify(reason)
+      return { ok: false, reason }
     }
 
     apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'sending' })
@@ -568,40 +593,44 @@ export function createController(deps: ControllerDeps): OptimizerController {
       })
     } catch (cause) {
       apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'reviewing' })
-      notify(`전송에 실패했습니다: ${describeError(cause)}`)
-      return
+      const reason = `전송에 실패했습니다: ${describeError(cause)}`
+      notify(reason)
+      return { ok: false, reason }
     }
 
     if (result.kind === 'sent') {
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify('전송했습니다.')
-      return
+      return { ok: true }
     }
     apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'reviewing' })
-    notify(
+    const reason =
       result.kind === 'dropped'
         ? `전송이 차단되었습니다: ${result.reason}`
-        : `전송에 실패했습니다: ${result.message}`,
-    )
+        : `전송에 실패했습니다: ${result.message}`
+    notify(reason)
+    return { ok: false, reason }
   }
 
-  async function cancel(ports: EnginePorts): Promise<void> {
+  async function cancel(ports: EnginePorts): Promise<ActionResult> {
     const workflow = state.workflow
     if (workflow === null) {
       if (state.bypass !== null) apply({ type: 'bypass-revoked', sessionId: state.sessionId })
       notify('진행 중인 개선 작업이 없습니다.')
-      return
+      return { ok: false, reason: '진행 중인 개선 작업이 없습니다.' }
     }
 
     // A transfer or send is already under way: aborting here would race a
     // second `transferDraft`/`sendApproved` against the first. Refuse instead.
     if (workflow.phase === 'transferring') {
-      notify('입력창으로 옮기는 중이라 취소할 수 없습니다')
-      return
+      const reason = '입력창으로 옮기는 중이라 취소할 수 없습니다'
+      notify(reason)
+      return { ok: false, reason }
     }
     if (workflow.phase === 'sending') {
-      notify('전송 중이라 취소할 수 없습니다')
-      return
+      const reason = '전송 중이라 취소할 수 없습니다'
+      notify(reason)
+      return { ok: false, reason }
     }
 
     const entry = rounds.get(workflow.id)
@@ -618,16 +647,19 @@ export function createController(deps: ControllerDeps): OptimizerController {
     try {
       result = await restore(ports, workflow, workflow.original)
     } catch (cause) {
-      notify(`개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${describeError(cause)}`)
-      return
+      const reason = `개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${describeError(cause)}`
+      notify(reason)
+      return { ok: false, reason }
     }
 
     if (result.kind === 'filled') {
       apply({ type: 'bypass-issued', ticket: result.ticket })
       notify('개선을 취소하고 원문을 입력창에 복원했습니다.')
-      return
+      return { ok: true }
     }
-    notify(`개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${refusalNotice(result.reason)}`)
+    const reason = `개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${refusalNotice(result.reason)}`
+    notify(reason)
+    return { ok: false, reason }
   }
 
   function onPromptEdit(text: string): void {

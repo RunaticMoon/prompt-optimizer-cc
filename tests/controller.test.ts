@@ -464,6 +464,41 @@ describe('refine — the improvement dialogue', () => {
     await h.controller.refine(h.ports, '더 짧게')
     expect(warned()).toHaveLength(1)
   })
+
+  test('reports a truncated system prompt file as guidance, not a fallback', async () => {
+    const h = harness({
+      config: { systemPromptFile: '/long/prompt.md' },
+      files: { '/long/prompt.md': 'x'.repeat(4001) },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    // The file was read (only its tail dropped), so this must not claim the
+    // built-in prompt was used.
+    const guidance = h.notices.filter(notice => notice?.includes('시스템 프롬프트 파일 안내'))
+    expect(guidance).toHaveLength(1)
+    expect(guidance[0]).toContain('/long/prompt.md')
+    expect(h.notices.some(notice => notice?.includes('읽지 못해 기본 프롬프트를 사용합니다'))).toBe(
+      false,
+    )
+  })
+
+  test('a bare retry does not repeat the last supplement in <instruction>', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    await h.controller.refine(h.ports, '더 짧게')
+    await h.controller.retry(h.ports)
+
+    // The supplement is already in the dialogue; a bare retry must not also
+    // re-render it as the `<instruction>` section.
+    const retried = h.completes.at(-1)?.prompt ?? ''
+    expect(retried.split('더 짧게')).toHaveLength(2)
+    expect(retried).not.toContain('<instruction>')
+  })
 })
 
 describe('failure handling', () => {
@@ -733,6 +768,84 @@ describe('cancel', () => {
 
     expect(h.controller.getState().workflow).toBeNull()
     expect(h.submits).toHaveLength(1)
+  })
+})
+
+describe('action results', () => {
+  test('cancel without a run reports the reason', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    expect(await h.controller.cancel(h.ports)).toEqual({
+      ok: false,
+      reason: '진행 중인 개선 작업이 없습니다.',
+    })
+  })
+
+  test('a successful accept reports ok', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(await h.controller.accept(h.ports)).toEqual({ ok: true })
+  })
+
+  test('a refused accept carries the refusal line', async () => {
+    const h = harness({ box: '내가 새로 쓴 내용' })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(await h.controller.accept(h.ports)).toEqual({
+      ok: false,
+      reason: '입력창에 새로 작성한 내용이 있어 덮어쓰지 않았습니다',
+    })
+  })
+
+  test('a successful send reports ok', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(await h.controller.sendDraft(h.ports)).toEqual({ ok: true })
+  })
+
+  test('a dropped send carries the drop line', async () => {
+    const h = harness({ submit: () => ({ drop: 'blocked' }) })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(await h.controller.sendDraft(h.ports)).toEqual({
+      ok: false,
+      reason: '전송이 차단되었습니다: blocked',
+    })
+  })
+
+  test('a cancel refused mid-transfer reports the phase line', async () => {
+    let releaseFill: (() => void) | undefined
+    const h = harness({
+      fill: input =>
+        new Promise<PromptFilled>(resolve => {
+          releaseFill = () => resolve({ isFilled: true, text: input.text, cursor: input.text.length })
+        }),
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.controller.getState().workflow?.phase === 'transferring')
+
+    expect(await h.controller.cancel(h.ports)).toEqual({
+      ok: false,
+      reason: '입력창으로 옮기는 중이라 취소할 수 없습니다',
+    })
+
+    releaseFill?.()
+    await accepting
   })
 })
 

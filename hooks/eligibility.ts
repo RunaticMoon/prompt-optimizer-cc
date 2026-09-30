@@ -61,8 +61,18 @@ export function classifySubmission(
   // 6. An explicit raw marker strips itself and sends the rest untouched. An
   //    empty or whitespace-only remainder is raw too; the controller drops a
   //    blank raw submission so the marker never reaches the main session.
-  if (config.rawPrefix !== '' && e.text.startsWith(config.rawPrefix)) {
-    return { kind: 'raw', text: e.text.slice(config.rawPrefix.length) }
+  if (config.rawPrefix !== '') {
+    if (e.text.startsWith(config.rawPrefix)) {
+      return { kind: 'raw', text: e.text.slice(config.rawPrefix.length) }
+    }
+    // The CLI trims trailing whitespace before the hook sees the text, so a
+    // bare marker arrives as `::raw` rather than `::raw `. Treat exactly the
+    // marker (no trailing space) as a blank raw escape too, so it is dropped
+    // instead of being optimized as ordinary text.
+    const bareMarker = config.rawPrefix.trimEnd()
+    if (bareMarker !== '' && e.text.trimEnd() === bareMarker) {
+      return { kind: 'raw', text: '' }
+    }
   }
 
   // 7. Commands and shell input belong to the engine, even while a dialogue
@@ -96,8 +106,17 @@ export function classifySubmission(
   if (config.triggerMode === 'prefix') {
     if (config.triggerPrefix !== '' && e.text.startsWith(config.triggerPrefix)) {
       const text = e.text.slice(config.triggerPrefix.length).trim()
-      if (text === '') return pass('empty')
+      // Only the trigger was typed: nothing to improve. Return a blank raw
+      // escape so the controller drops it (보낼 내용이 없습니다.) rather than
+      // letting the bare prefix reach the main session.
+      if (text === '') return { kind: 'raw', text: '' }
       return { kind: 'optimize', text, trigger: 'prefix' }
+    }
+    // Same CLI trim problem as rule 6: `??` arrives without its trailing space.
+    // Recognize the bare trigger as empty input, not as untriggered text.
+    const bareTrigger = config.triggerPrefix.trimEnd()
+    if (bareTrigger !== '' && e.text.trimEnd() === bareTrigger) {
+      return { kind: 'raw', text: '' }
     }
     return pass('no-trigger')
   }

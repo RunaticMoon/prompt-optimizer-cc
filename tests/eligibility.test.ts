@@ -257,6 +257,24 @@ describe('classifySubmission — rule 6: raw prefix', () => {
     })
   })
 
+  test('a bare marker trimmed by the CLI is still raw', () => {
+    // The CLI strips trailing whitespace before the hook runs, so a bare
+    // marker arrives as `::raw`. It must still be a blank raw escape, not
+    // ordinary text to optimize.
+    expect(classifySubmission(submit({ text: '::raw' }), config(), state(), 0)).toEqual({
+      kind: 'raw',
+      text: '',
+    })
+  })
+
+  test('a longer word that merely starts with the marker is optimized', () => {
+    expect(classifySubmission(submit({ text: '::rawx 그대로' }), config(), state(), 0)).toEqual({
+      kind: 'optimize',
+      text: '::rawx 그대로',
+      trigger: 'auto',
+    })
+  })
+
   test('the marker is matched case-sensitively', () => {
     expect(classifySubmission(submit({ text: '::RAW 그대로' }), config(), state(), 0)).toEqual({
       kind: 'optimize',
@@ -472,10 +490,18 @@ describe('classifySubmission — rule 11: prefix mode', () => {
     ).toEqual({ kind: 'optimize', text: 'hello', trigger: 'prefix' })
   })
 
-  test('a bare prefix passes as empty', () => {
+  test('a bare prefix is a blank escape, not empty input', () => {
+    // Only the trigger was typed; there is nothing to improve. It becomes a
+    // blank raw escape so the controller drops it with 보낼 내용이 없습니다.
     expect(
       classifySubmission(submit({ text: '??    ' }), config({ triggerMode: 'prefix' }), state(), 0),
-    ).toEqual({ kind: 'pass', reason: 'empty' })
+    ).toEqual({ kind: 'raw', text: '' })
+  })
+
+  test('a bare prefix trimmed by the CLI is still a blank escape', () => {
+    expect(
+      classifySubmission(submit({ text: '??' }), config({ triggerMode: 'prefix' }), state(), 0),
+    ).toEqual({ kind: 'raw', text: '' })
   })
 
   test('text without the trigger passes', () => {
