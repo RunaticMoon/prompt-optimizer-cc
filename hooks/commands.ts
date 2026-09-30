@@ -22,6 +22,7 @@
 import type { CommandSpec, EngineInterface, On } from 'claude-code'
 
 import type { ConfigKey, EnginePorts, OptimizerConfig, RuntimeState } from './contracts'
+import type { ActionResult } from './controller'
 import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
@@ -48,8 +49,10 @@ export interface SettingsPort {
  * The controller surface the command drives (task I's `OptimizerController`).
  *
  * Declared locally with only the members used here; TypeScript's structural
- * typing lets task I's implementation pass as-is. Each method takes the engine
- * ports the command built, never `$`.
+ * typing lets task I's implementation pass as-is. The four actions that may be
+ * refused return the controller's {@link ActionResult}, so the command answers
+ * with the reason it carried when it did not succeed. Each method takes the
+ * engine ports the command built, never `$`.
  */
 export interface CommandController {
   /** The current serializable state, for `status`. */
@@ -61,13 +64,13 @@ export interface CommandController {
   /** Re-runs the last completion, optionally with a supplement. */
   retry(ports: EnginePorts, instruction?: string): Promise<void>
   /** Restores the draft into the composer. */
-  accept(ports: EnginePorts): Promise<void>
+  accept(ports: EnginePorts): Promise<ActionResult>
   /** Sends the improved draft now. */
-  sendDraft(ports: EnginePorts): Promise<void>
+  sendDraft(ports: EnginePorts): Promise<ActionResult>
   /** Sends the stored original. */
-  sendOriginal(ports: EnginePorts): Promise<void>
+  sendOriginal(ports: EnginePorts): Promise<ActionResult>
   /** Cancels the active run. */
-  cancel(ports: EnginePorts): Promise<void>
+  cancel(ports: EnginePorts): Promise<ActionResult>
 }
 
 /** What `registerCommands` needs: the controller, the settings, and the UI choice. */
@@ -236,7 +239,7 @@ export function registerCommands(on: On, deps: CommandDeps): void {
         kind === 'enabled'
           ? await $.config.set({ key: 'prompt-optimizer.enabled', value })
           : await $.config.set({ key: 'prompt-optimizer.model', value })
-      if ('deny' in result) {
+      if (typeof result.deny === 'string') {
         return { text: `${outcome.text}\n이번 세션에만 적용됨(${result.deny})` }
       }
       return { text: `${outcome.text}\n설정에 저장했습니다.` }
@@ -361,22 +364,25 @@ async function dispatch(
       }
     }
 
-    case 'accept':
+    case 'accept': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      await deps.controller.accept(ports)
-      return { text: '개선안을 입력창으로 가져왔습니다. 내용을 확인하고 Enter를 누르세요.' }
-    case 'send':
+      return actionOutcome(
+        await deps.controller.accept(ports),
+        '개선안을 입력창으로 가져왔습니다. 내용을 확인하고 Enter를 누르세요.',
+      )
+    }
+    case 'send': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      await deps.controller.sendDraft(ports)
-      return { text: '개선안을 보냈습니다.' }
-    case 'raw':
+      return actionOutcome(await deps.controller.sendDraft(ports), '개선안을 보냈습니다.')
+    }
+    case 'raw': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      await deps.controller.sendOriginal(ports)
-      return { text: '원문을 그대로 보냈습니다.' }
-    case 'cancel':
+      return actionOutcome(await deps.controller.sendOriginal(ports), '원문을 그대로 보냈습니다.')
+    }
+    case 'cancel': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      await deps.controller.cancel(ports)
-      return { text: '개선 작업을 취소했습니다.' }
+      return actionOutcome(await deps.controller.cancel(ports), '개선 작업을 취소했습니다.')
+    }
     case 'retry':
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       await deps.controller.retry(ports, command.instruction)
@@ -395,6 +401,15 @@ const NO_WORKFLOW = '진행 중인 개선 작업이 없습니다. `/optimize <�
 /** Whether an active workflow exists to act on. */
 function hasWorkflow(deps: CommandDeps): boolean {
   return deps.controller.getState().workflow !== null
+}
+
+/**
+ * The command's answer to one controller action: the success line when it
+ * succeeded, or the controller's own refusal reason when it did not. Never a
+ * blanket success over a refusal (e.g. `/optimize cancel` mid-transfer).
+ */
+function actionOutcome(result: ActionResult, success: string): CommandOutcome {
+  return { text: result.ok ? success : result.reason }
 }
 
 /**

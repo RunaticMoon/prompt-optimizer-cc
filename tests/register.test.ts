@@ -73,6 +73,31 @@ const FOREIGN_FILL: Plugin = {
   },
 }
 
+/** The fragment a foreign `append` fill adds to the box. */
+const FOREIGN_APPEND_FRAGMENT = '외부 조각'
+
+/**
+ * A foreign plugin that fills in `append` mode: its input's `text` is only the
+ * fragment, while the box keeps what was already there.
+ */
+const FOREIGN_APPEND: Plugin = {
+  name: 'foreign-append-plugin',
+  register(on) {
+    on('command.run', { command: 'foreign-append' }, async ($, _e) => {
+      const r = await $.prompt.fill({ text: '외부 조각', mode: 'append' })
+      return { text: r.isFilled ? 'foreign appended' : 'foreign append refused' }
+    })
+  },
+}
+
+/** The `command.run` envelope the append fill trigger carries. */
+const FOREIGN_APPEND_RUN = {
+  command: 'foreign-append',
+  args: '',
+  origin: { kind: 'composer' } as const,
+  presentation: { isFullscreen: false, columns: 80 },
+}
+
 describe('register — the wired module', () => {
   test(
     'intercepts, runs one completion, restores and bypasses, and leaves foreign input alone',
@@ -204,6 +229,29 @@ describe('register — the wired module', () => {
     expect(status.text).not.toContain('sonnet')
   })
 
+  test('config.set: an invalid row value keeps the old value and toasts', { options: {} }, async ($, on) => {
+    const toasts: string[] = []
+    on('session.start', (_$, e) => ({ cwd: e.cwd }))
+    on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+    // Beneath the plugin, the row is written with an out-of-range value.
+    on('config.set', (_$, e) => ({ value: e.value }))
+    on('ui.toast', (_$, e) => {
+      toasts.push(e.text)
+      return { value: undefined }
+    })
+
+    await $.session.start(SESSION_START)
+    const set = await $.config.set(configChange('prompt-optimizer.maxTokens', '99999'))
+    expect(set).toEqual({ value: '99999' })
+    expect(toasts).toEqual([
+      'prompt-optimizer: maxTokens 값이 올바르지 않아 이전 값을 유지합니다: "maxTokens" must be between 128 and 2048; using default 1024',
+    ])
+
+    // The stored value was refused, so the effective setting is unchanged.
+    const status = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+    expect(status.text).toContain('최대 토큰: 1024')
+  })
+
   test(
     'prompt.fill: a refused foreign fill leaves the restored draft bypassing',
     { options: { uiMode: 'composer' }, plugins: [FOREIGN_FILL] },
@@ -254,11 +302,15 @@ describe('register — the wired module', () => {
     async ($, on) => {
       const clock = mock.clock(on)
       const submits: PromptSubmitInput[] = []
+      let boxText = ''
 
       on('session.start', (_$, e) => ({ cwd: e.cwd }))
       on('model.complete', () => ({ value: answered(DRAFT) }))
-      on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
-      on('prompt.fill', () => ({ isFilled: true }))
+      on('prompt.read', () => ({ value: { text: boxText, cursor: boxText.length } }))
+      on('prompt.fill', (_$, e) => {
+        boxText = e.text
+        return { isFilled: true, text: boxText }
+      })
       on('prompt.submit', (_$, e) => {
         submits.push(e)
         return { text: e.text }
@@ -271,6 +323,7 @@ describe('register — the wired module', () => {
 
       const foreign = await $.command.run(FOREIGN_RUN)
       expect(foreign.text).toBe('foreign landed')
+      expect(boxText).toBe(FOREIGN_FILL_TEXT)
 
       const passed = await $.prompt.submit({
         text: FOREIGN_FILL_TEXT,
@@ -279,6 +332,46 @@ describe('register — the wired module', () => {
       })
       expect(passed).toEqual({ text: FOREIGN_FILL_TEXT })
       expect(submits.map(s => s.text)).toEqual([FOREIGN_FILL_TEXT])
+    },
+  )
+
+  test(
+    'prompt.fill: an append foreign fill moves the bypass onto the whole box',
+    { options: { uiMode: 'composer' }, plugins: [FOREIGN_APPEND] },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const submits: PromptSubmitInput[] = []
+      let boxText = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered(DRAFT) }))
+      on('prompt.read', () => ({ value: { text: boxText, cursor: boxText.length } }))
+      on('prompt.fill', (_$, e) => {
+        // Emulate the box: `replace` sets it, `append` keeps it and adds the
+        // fragment, so the fill's own `text` is not the whole box.
+        boxText = e.mode === 'append' ? boxText + e.text : e.text
+        return { isFilled: true, text: boxText }
+      })
+      on('prompt.submit', (_$, e) => {
+        submits.push(e)
+        return { text: e.text }
+      })
+
+      await $.session.start(SESSION_START)
+      await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+      await $.command.run({ ...COMMAND_RUN, args: 'accept' })
+      expect(boxText).toBe(DRAFT)
+
+      const foreign = await $.command.run(FOREIGN_APPEND_RUN)
+      expect(foreign.text).toBe('foreign appended')
+      expect(boxText).toBe(DRAFT + FOREIGN_APPEND_FRAGMENT)
+
+      // The bypass follows the whole box, so submitting it passes once; the
+      // bare fragment (the fill's own `text`) would have matched nothing.
+      const passed = await $.prompt.submit({ text: boxText, origin: { kind: 'composer' }, wait: false })
+      expect(passed).toEqual({ text: boxText })
+      expect(submits.map(s => s.text)).toEqual([boxText])
     },
   )
 })

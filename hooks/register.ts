@@ -233,11 +233,18 @@ export function register(on: On, options: PluginOptions): void {
       e.origin.name !== PLUGIN_NAME &&
       controller.getState().bypass !== null
     ) {
-      // Another plugin overwrote the box: the restored draft is gone, so its
-      // bypass follows the text that landed (and is void for the optimizer's
-      // draft). A fill that was refused left the box as it was, so the permit
-      // over the restored draft still stands.
-      controller.onPromptEdit(e.text)
+      // Another plugin altered the box: the restored draft is gone, so its
+      // bypass follows what the box actually holds now. The fill's own `text`
+      // is only its fragment for `append`/`insert`, so read the box; a box
+      // that cannot be read falls back to the fragment. A fill that was
+      // refused left the box as it was, so the permit still stands.
+      let text = e.text
+      try {
+        text = (await $.prompt.read()).text
+      } catch {
+        text = e.text
+      }
+      controller.onPromptEdit(text)
     }
     return r
   })
@@ -255,6 +262,13 @@ export function register(on: On, options: PluginOptions): void {
         const nextOverrides = { ...overrides }
         delete nextOverrides[result.key]
         overrides = nextOverrides
+      } else {
+        // The row was written, but the value fails this plugin's own rules (out
+        // of range, blank model, ...). Say so, instead of silently letting the
+        // stored value and the effective one diverge.
+        $.ui.toast(
+          `prompt-optimizer: ${field} 값이 올바르지 않아 이전 값을 유지합니다: ${result.error}`,
+        )
       }
     }
     return r

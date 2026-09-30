@@ -4,6 +4,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { OptimizerConfig, RuntimeState, Workflow } from '../hooks/contracts'
 import { DEFAULT_CONFIG } from '../hooks/contracts'
+import type { ActionResult } from '../hooks/controller'
 import {
   OPTIMIZE_COMMAND,
   formatStatus,
@@ -161,8 +162,10 @@ interface Rig {
   ui: Array<'pane' | 'composer'>
   /** Which UI choice `chooseUi` answers with. */
   uiChoice: 'pane' | 'composer'
-  /** When set, the fake `$.config.set` denies with this reason. */
-  configSetResult: { deny: string } | null
+  /** What each controller action returns; success unless a test overrides one. */
+  results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult>
+  /** When set, the fake `$.config.set` resolves to it. */
+  configSetResult: { value?: unknown; deny?: string } | null
   /** When set, the fake `$.config.set` throws it. */
   configSetError: unknown
 }
@@ -172,8 +175,9 @@ function rig(
     current?: Readonly<RuntimeState>
     config?: OptimizerConfig
     setResult?: { ok: false; error: string }
-    configSetResult?: { deny: string }
+    configSetResult?: { value?: unknown; deny?: string }
     configSetError?: unknown
+    results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult>>
   } = {},
 ): Rig {
   const calls: string[] = []
@@ -182,6 +186,13 @@ function rig(
   const ui: Array<'pane' | 'composer'> = []
   const current = opts.current ?? liveState()
   const currentConfig = opts.config ?? config()
+  const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult> = {
+    accept: { ok: true },
+    sendDraft: { ok: true },
+    sendOriginal: { ok: true },
+    cancel: { ok: true },
+    ...opts.results,
+  }
 
   const controller: CommandController = {
     getState: () => current,
@@ -196,15 +207,19 @@ function rig(
     },
     accept: async () => {
       calls.push('accept')
+      return results.accept
     },
     sendDraft: async () => {
       calls.push('sendDraft')
+      return results.sendDraft
     },
     sendOriginal: async () => {
       calls.push('sendOriginal')
+      return results.sendOriginal
     },
     cancel: async () => {
       calls.push('cancel')
+      return results.cancel
     },
   }
 
@@ -222,6 +237,7 @@ function rig(
     configSets,
     ui,
     uiChoice: 'pane',
+    results,
     configSetResult: opts.configSetResult ?? null,
     configSetError: opts.configSetError,
     deps: {
@@ -343,6 +359,16 @@ describe('registerCommands — settings intents', () => {
     )
   })
 
+  test('a persistent write carrying deny: undefined still counts as saved', async ($, on) => {
+    // The engine may resolve a write as `{ value, deny: undefined }`; only a
+    // string `deny` is a refusal, so this must not read as session-only.
+    const r = rig({ configSetResult: { value: true, deny: undefined } })
+    wire(on, r)
+    const result = await run($, 'on')
+    expect(result.text).toBe('자동 가로채기를 켰습니다.\n설정에 저장했습니다.')
+    expect(r.configSets).toEqual([['prompt-optimizer.enabled', true]])
+  })
+
   test('model without a value never writes and returns the usage error', async ($, on) => {
     const r = rig()
     wire(on, r)
@@ -400,6 +426,41 @@ describe('registerCommands — controller intents', () => {
     await run($, 'raw')
     await run($, 'cancel')
     expect(r.calls).toEqual(['accept', 'sendDraft', 'sendOriginal', 'cancel'])
+  })
+
+  test('successful actions keep their success lines', async ($, on) => {
+    const r = rig()
+    wire(on, r)
+    expect((await run($, 'accept')).text).toBe(
+      '개선안을 입력창으로 가져왔습니다. 내용을 확인하고 Enter를 누르세요.',
+    )
+    expect((await run($, 'send')).text).toBe('개선안을 보냈습니다.')
+    expect((await run($, 'raw')).text).toBe('원문을 그대로 보냈습니다.')
+    expect((await run($, 'cancel')).text).toBe('개선 작업을 취소했습니다.')
+  })
+
+  test('a refused cancel answers with the controller reason, not a success', async ($, on) => {
+    // A cancel during a transfer is refused by the controller; the command must
+    // relay that reason instead of its blanket "취소했습니다." line.
+    const r = rig({ results: { cancel: { ok: false, reason: '전송 중이라 취소할 수 없습니다' } } })
+    wire(on, r)
+    const result = await run($, 'cancel')
+    expect(r.calls).toEqual(['cancel'])
+    expect(result.text).toBe('전송 중이라 취소할 수 없습니다')
+  })
+
+  test('a refused accept, send and raw each answer with the controller reason', async ($, on) => {
+    const r = rig({
+      results: {
+        accept: { ok: false, reason: '입력창이 개선안을 거부했습니다' },
+        sendDraft: { ok: false, reason: '전송이 차단되었습니다: no target' },
+        sendOriginal: { ok: false, reason: '전송에 실패했습니다: boom' },
+      },
+    })
+    wire(on, r)
+    expect((await run($, 'accept')).text).toBe('입력창이 개선안을 거부했습니다')
+    expect((await run($, 'send')).text).toBe('전송이 차단되었습니다: no target')
+    expect((await run($, 'raw')).text).toBe('전송에 실패했습니다: boom')
   })
 
   test('retry passes the instruction, or none when absent', async ($, on) => {
