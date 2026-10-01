@@ -23,7 +23,8 @@ export function estimatedCompactRows(viewport: RenderViewport): number {
   // At 80×24, main-screen has 11 rows and fullscreen has 6; at 80×20
   // they have 7 and 4. Main-screen 100×24 also has 11, fullscreen 6.
   // An unknown fullscreen flag uses the conservative fullscreen estimate.
-  // Below four available rows, preview plus three control rows cannot fit.
+  // Clamp to at least four even on shorter screens, so the preview and three
+  // control rows may extend below the first view when fewer rows are available.
   const estimate = viewport.isFullscreen === false
     ? viewport.rows - 13
     : Math.floor((viewport.rows - 12) / 2)
@@ -92,14 +93,19 @@ function cellWidth(char: string): number {
   ) ? 2 : 1
 }
 
-/** Hard-wrap by cells before rendering: each returned Text occupies one row. */
-export function hardWrapPreview(value: string, columns: number, maxLines: number): string[] {
-  if (columns < 1 || maxLines < 1) return []
-  const sourceLines = value.replace(/\r\n?/g, '\n').split('\n')
-    .map(sourceLine => sourceLine.replace(/[^\S\n]+/g, ' ').trim())
-    .filter(Boolean)
+/** Hard-wrap by cells; report overflow, replacement, and whitespace changes. */
+export function hardWrapPreviewWithStatus(value: string, columns: number, maxLines: number): { lines: string[]; truncated: boolean; altered: boolean } {
+  if (columns < 1 || maxLines < 1) return { lines: [], truncated: Boolean(value), altered: false }
   const lines: string[] = []
-  for (const sourceLine of sourceLines) {
+  let truncated = false
+  let altered = false
+  // Empty source rows are omitted to reserve the compact first view for its
+  // controls. The full text keeps its original paragraphs below or in the band.
+  const sourceLines = value.replace(/\r\n?/g, '\n').split('\n')
+  outer: for (const rawLine of sourceLines) {
+    const sourceLine = rawLine.replace(/[^\S\n]+/g, ' ').trim()
+    if (rawLine !== sourceLine || (!sourceLine && sourceLines.length > 1)) altered = true
+    if (!sourceLine) continue
     let line = ''
     let used = 0
     for (const char of sourceLine) {
@@ -107,29 +113,42 @@ export function hardWrapPreview(value: string, columns: number, maxLines: number
       if (used + width > columns) {
         if (!line) { // Replace an unfit wide glyph; continue with the next.
           lines.push('…')
+          truncated = true
+          if (lines.length > maxLines) break outer
           continue
         }
         lines.push(line)
+        if (lines.length > maxLines) { truncated = true; break outer }
         line = ''
         used = 0
         if (width > columns) {
           lines.push('…')
+          truncated = true
+          if (lines.length > maxLines) break outer
           continue
         }
       }
       line += char
       used += width
     }
-    if (line) lines.push(line)
+    if (line) {
+      lines.push(line)
+      if (lines.length > maxLines) { truncated = true; break }
+    }
   }
   if (lines.length > maxLines) {
     const visible = lines.slice(0, maxLines)
     const last = Array.from(visible[maxLines - 1] ?? '')
     while (last.reduce((sum, char) => sum + cellWidth(char), 0) + 1 > columns) last.pop()
     visible[maxLines - 1] = `${last.join('').trimEnd()}…`
-    return visible
+    return { lines: visible, truncated: true, altered }
   }
-  return lines
+  return { lines, truncated, altered }
+}
+
+/** Each returned Text occupies one row; retain the existing array API. */
+export function hardWrapPreview(value: string, columns: number, maxLines: number): string[] {
+  return hardWrapPreviewWithStatus(value, columns, maxLines).lines
 }
 
 /** Escape and the pane close mark both arrive with origin `person`. */
@@ -153,14 +172,16 @@ export function registerUi(
 ): void {
   let showOriginal = false
   let renderedWorkflowId: string | undefined
-  let panePlacement: 'inline' | 'dock' | undefined
+  const panePlacements = new Map<string, 'inline' | 'dock'>()
+  let paneClosed = false
   const drawnBands = new Set<string>()
   const bandKey = (id: string, surface: string) => `${id}:${surface}`
   const observeWorkflow = (workflow: Workflow | null): void => {
     if (renderedWorkflowId === workflow?.id) return
     renderedWorkflowId = workflow?.id
     showOriginal = false
-    panePlacement = undefined
+    panePlacements.clear()
+    paneClosed = false
     drawnBands.clear()
   }
 
@@ -169,7 +190,8 @@ export function registerUi(
     observeWorkflow(workflow)
     const eligible = workflow && !e.props.hasSurvey && !e.props.view.agentId
       && (e.surface === 'terminal' || e.surface === 'desktop')
-      && !(workflow.ui === 'pane' && panePlacement === 'inline' && isCompactViewport(e.viewport))
+      && !(workflow.ui === 'pane' && !paneClosed && isCompactViewport(e.viewport)
+        && panePlacements.get(e.surface) !== 'dock')
     const key = workflow ? bandKey(workflow.id, e.surface) : undefined
     if (!eligible || !workflow || !key) {
       if (key && drawnBands.delete(key)) $.ui.invalidate('ui.render')
@@ -207,10 +229,11 @@ export function registerUi(
     const Input = 'Input' in elements ? elements.Input : undefined
     const workflow = controller.getState().workflow
     observeWorkflow(workflow)
-    if (workflow?.ui === 'pane' && panePlacement !== e.props.placement) {
-      panePlacement = e.props.placement
+    if (workflow?.ui === 'pane' && panePlacements.get(e.surface) !== e.props.placement) {
+      panePlacements.set(e.surface, e.props.placement)
       $.ui.invalidate('ui.render')
     }
+    if (workflow?.ui === 'pane') paneClosed = false
     if (!workflow) return <Text>진행 중인 개선 작업이 없습니다</Text>
     if (workflow.ui === 'composer') return <Text>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
 
@@ -252,9 +275,12 @@ export function registerUi(
       const estimatedRows = estimatedCompactRows(e.viewport!)
       const previewLines = Math.max(1, estimatedRows - 3)
       const previewColumns = Math.max(1, e.props.bodyColumns - 2)
-      const preview = workflow.draft.trim()
+      const draftPreview = workflow.draft.trim()
+      const preview = draftPreview
         || (workflow.lastError ? `오류: ${workflow.lastError}` : '')
         || (busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
+      const { lines: wrappedPreview, truncated: previewTruncated, altered: previewAltered } = hardWrapPreviewWithStatus(preview, previewColumns, previewLines)
+      const previewNeedsFullText = previewTruncated || previewAltered || Boolean(draftPreview && workflow.draft !== draftPreview)
       const compactInstruction = retryReady
         ? typeof Input === 'function'
           ? <Input key={KEYS.instruction} label="보완" placeholder="보완 내용" onSubmit={() => undefined} />
@@ -264,7 +290,7 @@ export function registerUi(
         ? workflow.original : `${originalChars.slice(0, 180).join('')}…`
       return (
         <Box flexDirection="column" paddingX={1}>
-          {hardWrapPreview(preview, previewColumns, previewLines).map((line, index) =>
+          {wrappedPreview.map((line, index) =>
             <Text key={`preview:${index}`} wrap="truncate-end">{line}</Text>)}
           {draftReady
             ? <Button key={KEYS.accept} hotkey="1" label="넣기" plain autoFocus onPress={() => undefined} />
@@ -283,7 +309,11 @@ export function registerUi(
               pane from shrinking to the compact controls and preserves context. */}
           <Box marginTop={1} flexDirection="column">
             <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
-            {message && preview !== message && <Box flexDirection="column">
+            {draftPreview && previewNeedsFullText && <Box flexDirection="column">
+              <Text bold>개선안 전문</Text>
+              <Text wrap="wrap">{workflow.draft}</Text>
+            </Box>}
+            {message && (previewNeedsFullText || preview !== message) && <Box flexDirection="column">
               <Text bold>옵티마이저 메시지</Text>
               <Text wrap="wrap">{message}</Text>
             </Box>}
@@ -292,7 +322,7 @@ export function registerUi(
             {originalChars.length > 180 && (busy
               ? <Text dimColor>0: {originalToggleLabel} (사용 불가)</Text>
               : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />)}
-            {workflow.lastError && preview !== `오류: ${workflow.lastError}` &&
+            {workflow.lastError && (previewNeedsFullText || preview !== `오류: ${workflow.lastError}`) &&
               <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
           </Box>
         </Box>
@@ -457,6 +487,11 @@ export function registerUi(
 
   on('ui.close', { id: PANE_ID }, async ($, e, next) => {
     await handlePaneClose(controller, portsOf($), e.origin.kind)
+    // PaneCloseInput has no surface. Forget all placements so a workflow that
+    // survives the close can show its band until a pane renders again.
+    panePlacements.clear()
+    paneClosed = true
+    $.ui.invalidate('ui.render')
     return next(e)
   })
 }
