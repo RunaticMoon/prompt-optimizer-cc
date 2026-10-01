@@ -33,7 +33,7 @@
 
 | 항목 | 값 | 근거 |
 |---|---|---|
-| Claude Code | 2.1.285 이상 | 이 저장소에서 검증·타입 생성에 사용한 버전: `2.1.285` |
+| Claude Code | 2.1.285 이상 | 이 저장소에서 검증·타입 생성에 사용한 버전: `2.1.285`. 바로 전송을 사용자 본인의 말로 보내는 `asUser`는 2.1.286에서 확인했다. 그보다 낮은 버전에서 바로 전송에 "plugin sent a message" 틀이 붙으면 CLI를 업데이트한다. |
 | Mod(함수 훅) 지원 | early access | 플래그 없이는 훅 모듈이 켜지지 않는다 |
 | 필수 환경 변수 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | 없으면 `claude plugin test`가 "hooks modules are not turned on in this build yet (early access)"로 거부 |
 | 개발용 | Node.js + npm | `scripts/*.mjs`, `claude plugin test` 실행에 필요 |
@@ -358,7 +358,7 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 - **진행 중 턴·대기 제출**: `turnId`가 있거나 `wait === true`인 제출은 메인 세션의 큐에 그대로 맡긴다.
 - **슬래시 명령·셸 입력**: `/` 또는 `!`로 시작하는 입력은 가로채지 않는다(명령은 `command.run`이 처리).
 - **너무 긴 원문**: 원문이 6000자(`MAX_ORIGINAL_CHARS`)를 넘으면 개선하지 않고 그대로 통과시킨다.
-- **명시적 전송의 문맥 손실(Mod 훅에 한함)**: "개선안 바로 전송"·`/optimize send`·`/optimize raw`는 `$.prompt.submit({ text })`만 호출한다. 엔진의 `PromptSubmitArgs`에는 `context` 필드가 없어서, 처음 제출 때 이 플러그인보다 위의 Mod 훅이 `context`로 붙였을 수 있는 블록은 명시 전송 때 다시 붙지 않는다. 반면 classic 훅(settings/플러그인 `hooks.json`)은 명시 전송 때 다시 실행되므로 장기 기억 주입은 유지된다(실측 2.1.286). 입력창으로 복원한 뒤 사용자가 직접 Enter 하는 기본 경로에는 영향이 없다(그 경로는 원래 제출 문맥이 아니라 사용자가 입력창에 든 최종 텍스트를 보낸다).
+- **명시적 전송의 문맥 손실(Mod 훅에 한함)**: "개선안 바로 전송"·`/optimize send`·`/optimize raw`는 `$.prompt.submit({ text, asUser: true })`만 호출한다. 엔진의 `PromptSubmitArgs`에는 `context` 필드가 없어서, 처음 제출 때 이 플러그인보다 위의 Mod 훅이 `context`로 붙였을 수 있는 블록은 명시 전송 때 다시 붙지 않는다. 반면 classic 훅(settings/플러그인 `hooks.json`)은 명시 전송 때 다시 실행되므로 장기 기억 주입은 유지된다(실측 2.1.286). 입력창으로 복원한 뒤 사용자가 직접 Enter 하는 기본 경로에는 영향이 없다(그 경로는 원래 제출 문맥이 아니라 사용자가 입력창에 든 최종 텍스트를 보낸다).
 - **취소 거부**: 이미 입력창으로 옮기는 중(`transferring`)이거나 전송 중(`sending`)이면 취소가 거부된다(각각 `입력창으로 옮기는 중이라 취소할 수 없습니다`, `전송 중이라 취소할 수 없습니다`). 진행 중 호출을 중단하는 시점(`collecting`/`generating`/`reviewing`/`failed`)에는 정상적으로 취소된다.
 - **빈 raw 제출 드롭**: `rawPrefix` 뒤가 비었거나 공백뿐이면 `보낼 내용이 없습니다.`와 함께 드롭된다. 접두어가 메인 세션으로 전달되지 않는다.
 - **패인 닫기 = 취소**: 패인에서 Esc/닫기를 하면(origin `person`) 진행 중 작업을 취소하고 원문을 복원한다.
