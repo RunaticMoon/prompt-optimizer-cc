@@ -18,6 +18,10 @@ Full flow (based on the code):
 6. Each time the user refines in the pane/prompt box, one round is added (3 rounds maximum by default).
 7. "입력창으로 가져오기" (Bring to prompt box) runs `prompt.fill` with the improved draft and issues a one-shot bypass. When the user edits it and presses Enter, only that draft passes through interception and goes to the main session.
 
+**What it refines**
+
+The optimizer classifies the request by type before refining it. A change is judged by the requested change and the verification result, a diagnosis by the cause, evidence, and unconfirmed points, research by a sourced answer, and writing by text in the requested format; a long-output requirement is checked as well. When a problem description, question, idea, or plan contains no change request, it is treated as a diagnosis and refined into a request that reports only the cause and evidence without modifying anything; an explicit change request is kept as a change. A short, clear request with a single goal and a simple deliverable is kept as a natural sentence, while one with several conditions, inputs, or steps, or a long-output requirement, is organized into the four fields goal/context/scope/done criteria. The add-on guidance matched to the main session model is described in 5.4.
+
 **Why and how it is separated from the main session**
 
 - The improvement dialogue lives only in the plugin's own state (`RuntimeState`) and is not recorded in the main transcript.
@@ -168,7 +172,7 @@ Command name `optimize`, description `프롬프트 옵티마이저: 개선 시�
 | `/optimize raw` | Reserves a send of the original text. The reservation conditions are the same as `send`. |
 | `/optimize retry [instruction]` | Refines again with the refinement (or the last refinement if none). |
 | `/optimize cancel` | Cancels the improvement job. |
-| `/optimize status` | Shows the configuration, the current stage, and this session's usage (including whether long-term memory context is on or off). |
+| `/optimize status` | Shows the configuration, the current stage, and this session's usage. It includes `옵티마이저 모델:` (optimizer model), `모델별 지침: 켜짐`/`꺼짐(공통 지침만 사용)` (model-specific guidance on/off, off keeps common guidance only), the target model applied to the last optimization (5.4), and `장기 기억 문맥: 켬`/`끔` (long-term memory context on/off). |
 | `/optimize model <alias-or-id>` | Changes the optimizer model. |
 | `/optimize -- <text>` | Starts improvement even for a sentence that begins with a reserved word. |
 | `/optimize help` | Shows command help. |
@@ -202,6 +206,7 @@ The source of truth for configuration is `userConfig` in `plugin.json`, and the 
 | Key | Type | Default | Allowed range | Description |
 |---|---|---|---|---|
 | `enabled` | boolean | `true` | — | Whether to intercept eligible submissions |
+| `modelGuidance` | boolean | `true` | — | Whether to detect the main session model and apply that model's add-on editing guidance. Off keeps the common guidance only (5.4) |
 | `triggerMode` | string | `always` | `always` \| `prefix` | `always` improves every target submission, `prefix` only submissions that have the prefix |
 | `triggerPrefix` | string | `?? ` | reverts to the default in prefix mode when empty | Trigger prefix for prefix mode |
 | `rawPrefix` | string | `::raw ` | — | Starting with this prefix strips it and passes the rest through unchanged |
@@ -223,6 +228,7 @@ The `config.set` handler in `register.ts` handles keys starting with the `<plugi
 
 ```text
 prompt-optimizer.enabled
+prompt-optimizer.modelGuidance
 prompt-optimizer.triggerMode
 prompt-optimizer.triggerPrefix
 prompt-optimizer.rawPrefix
@@ -260,6 +266,68 @@ Changing a value here is reflected in the base configuration, and any session-on
 - Recommended location: `~/.claude/prompt-optimizer/system-prompt.md`.
 - This file is read only once at the start of a job (workflow) and cached for that job. It is read again when a new job/session starts.
 
+### 5.4 Model-specific prompting guidance
+
+What the optimizer produces is **the user message to be sent to the main session model**; the `model` setting (default `haiku`) is a separate model that edits that message. So the two are not confused, status labels the optimizer's own model `옵티마이저 모델:` (Korean for "Optimizer model:").
+
+- **Re-read on every optimization.** Right before the request is assembled in every round — the first call, a retry, and a refinement (`retry`/`refine`) alike — it reads the main session model with `$.session.model()` and adds that model's short add-on guidance to the optimizer's system prompt. After `/model`, the next optimization reflects the new model. A draft already placed in the prompt box is not rewritten automatically.
+- **If the model cannot be read within 500 ms or the read fails**, only the common guidance applies and the optimization proceeds as usual. Timeout, rejection, a synchronous throw, an empty value, and a missing port all fall back to common and never become an optimization failure or a change to the existing model settings.
+- **The optimizer's own model and effort do not change.** `model` (default `haiku`) and effort `low` stay as they are, and `/optimize model` changes only the optimizer model. The main conversation and the main model settings are untouched. There is no effort-based branching (the plugin cannot read the current effort).
+- **Only what takes effect as request wording is distilled.** API/harness settings such as effort, thinking, and max_tokens are excluded from the guidance; only the parts expressible as the request's goal, scope, and completion criteria are kept.
+
+**Supported models**
+
+The raw string from `$.session.model()` is preserved exactly; only a lookup copy is trimmed, lowercased, and stripped of a single trailing `[1m]` and a single trailing `-YYYYMMDD` date. Model-specific guidance is used only when the whole string matches the allowlist exactly; partial matches never map (`hooks/target-model.ts`).
+
+| Model ID | Applied profile |
+|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1` | `fable-5-1` |
+| `claude-fable-5`, `claude-mythos-5` | `fable-5` |
+| `claude-opus-5-5` | `opus-5-5` |
+| `claude-opus-5` | `opus-5` |
+| `claude-opus-4-8` | `opus-4-8` |
+| `claude-sonnet-5-5` | `sonnet-5-5` |
+| `claude-sonnet-5` | `sonnet-5` |
+| Haiku 4.5 (`claude-haiku-4-5-...`), every other model, alias-only values (`opus`, `sonnet`, …) | `common` (common guidance only) |
+
+- `[1m]` and date suffixes are ignored. For example, `claude-opus-5-5[1m]` and `claude-opus-5-5-20260901[1m]` → `claude-opus-5-5`.
+- A version-less alias, a new version outside the allowlist, an empty value, or a non-string value uses the common guidance. It never falls back to a nearby version.
+- IDs returned by other providers such as Bedrock, Vertex, and gateways have not been observed, so they use the common guidance.
+
+**Status display**
+
+`/optimize status` does not read the current model at query time; it shows only the detection result applied to the last request actually sent. Example values of `마지막 최적화 대상:` ("last optimization target"):
+
+```text
+아직 감지하지 않음
+claude-opus-5-5[1m] · 적용: opus-5-5
+미확인 · 적용: common (timeout)
+감지 생략 · 적용: common (disabled)
+```
+
+- `아직 감지하지 않음` ("not detected yet"): no optimization has been detected or sent in this session yet (including session start/reset).
+- `<raw> · 적용: <profile>` ("applied: <profile>"): detection succeeded. When it is `common`, the reason is shown too, as `· 적용: common (<reason>)`.
+- `미확인 · 적용: common (<reason>)` ("unconfirmed"): the value could not be read (timeout, error, …) and the common guidance was applied.
+- `감지 생략 · 적용: common (disabled)` ("detection skipped"): `modelGuidance` is off, so no lookup was made at all.
+
+Right after a setting change, the current toggle and the last round's applied value can differ; the `마지막 최적화 대상` ("last optimization target") label keeps them distinct.
+
+**System prompt assembly order**
+
+`composeSystemPrompt` in `hooks/system-prompt.ts` assembles the final text in this order.
+
+1. The built-in prompt (`BASE_SYSTEM_PROMPT`, which already contains the common editing guidance)
+2. The target model's add-on block — omitted when the profile is `common`. Its heading names only the code-defined profile, e.g. `[대상 모델 편집 지침: opus-5-5]` ("[Target-model editing guidance: opus-5-5]"); no raw model string is added.
+3. The user's extra instructions (`systemPromptFile`, 5.3) — added under `[추가 지침]` ("[Additional instructions]") only when non-blank after trimming.
+4. The fixed contract (`[고정 계약]`, "[Fixed contract]") — always last. It restates the role limits and the JSON output contract, and no additional instruction can override it.
+
+Turning `modelGuidance` off still keeps the common editing guidance, and the fixed contract is always appended last.
+
+**Sources**
+
+- The recommendations in [Anthropic's prompt engineering best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) and the per-model pages (Fable, Opus, Sonnet) were distilled into request wording. The source text is not downloaded at runtime or included in the repository.
+- The request classification, the four-field goal/context/scope/done-criteria structure, and the idea of resolving referents came from the `fable-prompt` skill in [oh-my-fable](https://github.com/Junhan2/oh-my-fable) (MIT). That skill's "execute after improving" procedure and its rule of copying the blocks verbatim are not adopted.
+
 ## 6. Cost and privacy
 
 - **Call count**: exactly one `$.model.complete` per round. At most `maxRounds` (default 3) per job. There is no automatic retry, higher-model fallback, or fork.
@@ -290,6 +358,9 @@ Changing a value here is reflected in the base configuration, and any session-on
 - **The optimizer does not newly retrieve memory for the current prompt**: the UserPromptSubmit memory in the long-term memory context (4.7) is what was retrieved for the prompt that last went to the main session; it is not newly retrieved for the prompt being refined now (at interception time that hook has not run yet).
 - **Usage is memory-only**: this session's usage is only in plugin memory (`RuntimeState.usage`) and is not saved to `$.store`. It disappears when the session ends.
 - **System prompt file fallback notification**: if `systemPromptFile` cannot be read, a `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: <사유>` notification ("Could not read the system prompt file, so the default prompt is used: <reason>") is shown once for that job, and the built-in prompt is used.
+- **The real effect of the model-specific guidance is unverified**: whether the guidance improves the actual model response depends on the model's response. There is no automated quality evaluation in this repository; the tests guarantee only the normalization, selection, and assembly contract (5.4).
+- **500 ms model-detection limit**: reading the main session model must finish within 500 ms (`TARGET_MODEL_TIMEOUT_MS`). If it does not, that round uses only the common guidance and the optimization continues. The `마지막 최적화 대상` ("last optimization target") in `/optimize status` is the last request actually sent, not the current model at query time.
+- **Provider-specific model IDs**: ID formats returned by other providers such as Bedrock, Vertex, and gateways have not been observed, so only the common guidance applies.
 - **early-access API**: the Mod contract can change (there is a return-shape change history from 2.1.277 → 2.1.285).
 - **Real terminal screen verification status**: in this repository's history, the actual terminal behavior of pane layout, focus, and fill has not yet been verified (network errors in the development environment). Verification is planned with the procedure in `docs/smoke.md`, and until then the screen behavior is **unverified**. The automated tests guarantee only the contract on the mock engine.
 
@@ -320,7 +391,7 @@ File structure:
 
 ```text
 .claude-plugin/
-  plugin.json          # manifest: name and the 13 userConfig keys
+  plugin.json          # manifest: name and the 14 userConfig keys
   marketplace.json     # Marketplace definition (name, owner, plugins)
   types/               # generated by the CLI, gitignored, do not commit
 hooks/
@@ -331,7 +402,10 @@ hooks/
   eligibility.ts       # submission classification rules
   context.ts           # context snapshot collection
   memory.ts            # stores and renders the injected long-term memory
+  model-guidance.ts    # common and per-model editing guidance strings
   system-prompt.ts     # built-in prompt + fixed contract
+  target-model.ts      # main model string → guidance profile normalization
+  resolve-target-model.ts # 500 ms bounded target-model lookup (common on failure)
   model.ts             # single-completion request/response mapping
   state.ts             # pure reducer
   delivery.ts          # prompt-box restore (prompt.fill) and explicit send (prompt.submit)

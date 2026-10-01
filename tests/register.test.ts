@@ -374,4 +374,49 @@ describe('register — the wired module', () => {
       expect(submits.map(s => s.text)).toEqual([boxText])
     },
   )
+
+  // The register-level wiring: the submit hook's scheduled round reads the main
+  // session's model through `portsOf`'s `$.session.model()` closure and selects
+  // the block. A later round re-reads it; an unlisted (haiku) model drops the
+  // block. The optimizer's own model and effort never move.
+  test(
+    'model guidance: the wired submit path selects the main model block each round',
+    { options: { uiMode: 'composer' } },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const modelCalls: ModelCompleteRequest[] = []
+      let modelValue = 'claude-opus-5-5[1m]'
+      let modelReads = 0
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('session.model', () => {
+        modelReads += 1
+        return { value: modelValue }
+      })
+      on('model.complete', (_$, e) => {
+        modelCalls.push(e)
+        return { value: answered(DRAFT) }
+      })
+      on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+
+      await $.session.start(SESSION_START)
+
+      await $.prompt.submit({ text: '로그인 버그 고쳐줘', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+      expect(modelCalls).toHaveLength(1)
+      expect(modelCalls[0]?.system ?? '').toContain('[대상 모델 편집 지침: opus-5-5]')
+      expect(modelCalls[0]?.model).toBe('haiku')
+      expect(modelCalls[0]?.effort).toBe('low')
+
+      // The next round re-reads the getter; haiku stays on common guidance.
+      modelValue = 'claude-haiku-4-5-20251001'
+      await $.prompt.submit({ text: '더 짧게', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+      expect(modelCalls).toHaveLength(2)
+      expect(modelCalls[1]?.system ?? '').not.toContain('[대상 모델 편집 지침:')
+      expect(modelCalls[1]?.model).toBe('haiku')
+      expect(modelCalls[1]?.effort).toBe('low')
+      expect(modelReads).toBe(2)
+    },
+  )
 })

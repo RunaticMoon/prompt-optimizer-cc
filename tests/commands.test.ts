@@ -2,7 +2,13 @@ import type { CommandRunResult, On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { describe, expect, test } from 'claude-code/testing'
 
-import type { OptimizerConfig, RuntimeState, Workflow } from '../hooks/contracts'
+import type {
+  GuidanceStatus,
+  OptimizerConfig,
+  RuntimeState,
+  TargetModelSnapshot,
+  Workflow,
+} from '../hooks/contracts'
 import { DEFAULT_CONFIG } from '../hooks/contracts'
 import type { ActionResult } from '../hooks/controller'
 import {
@@ -58,6 +64,24 @@ function liveState(over: Partial<RuntimeState> = {}): RuntimeState {
       updatedAt: 0,
     },
     ...over,
+  }
+}
+
+/** One last-applied guidance snapshot, with a matched model unless overridden. */
+function guidance(
+  target: Partial<TargetModelSnapshot> = {},
+  over: Partial<Pick<GuidanceStatus, 'workflowId' | 'round'>> = {},
+): GuidanceStatus {
+  return {
+    workflowId: over.workflowId ?? 'wf-1',
+    round: over.round ?? 1,
+    target: {
+      raw: 'claude-opus-5-5[1m]',
+      normalizedId: 'claude-opus-5-5',
+      profile: 'opus-5-5',
+      reason: 'matched',
+      ...target,
+    },
   }
 }
 
@@ -128,7 +152,7 @@ describe('formatStatus', () => {
     )
     expect(text).toContain('꺼짐')
     expect(text).toContain('접두어 "?? "')
-    expect(text).toContain('모델: sonnet')
+    expect(text).toContain('옵티마이저 모델: sonnet')
     expect(text).toContain('시스템 프롬프트 파일: ~/p.md')
     expect(text).toContain('장기 기억 문맥: 켬')
     expect(text).toContain('진행 중인 개선 작업: wf-1')
@@ -151,6 +175,84 @@ describe('formatStatus', () => {
     expect(text).toContain('트리거: 항상')
     expect(text).not.toContain('시스템 프롬프트 파일')
     expect(formatStatus(config({ memoryContext: false }), liveState({ workflow: null }))).toContain('장기 기억 문맥: 끔')
+  })
+
+  test('separates the optimizer model from the model-guidance toggle', () => {
+    const on = formatStatus(config({ model: 'haiku', modelGuidance: true }), liveState())
+    expect(on).toContain('옵티마이저 모델: haiku · 최대 토큰')
+    expect(on).toContain('모델별 지침: 켜짐')
+
+    const off = formatStatus(config({ modelGuidance: false }), liveState())
+    expect(off).toContain('모델별 지침: 꺼짐(공통 지침만 사용)')
+  })
+
+  test('reads no target before the first detection or after a reset', () => {
+    expect(formatStatus(config(), liveState(), null)).toContain('마지막 최적화 대상: 아직 감지하지 않음')
+    // An omitted third argument (a legacy caller) reads the same way.
+    expect(formatStatus(config(), liveState())).toContain('마지막 최적화 대상: 아직 감지하지 않음')
+  })
+
+  test('shows a matched model and the applied profile', () => {
+    const text = formatStatus(config(), liveState(), guidance())
+    expect(text).toContain('마지막 최적화 대상: claude-opus-5-5[1m] · 적용: opus-5-5')
+  })
+
+  test('shows common and its reason for an unlisted model', () => {
+    const text = formatStatus(
+      config(),
+      liveState(),
+      guidance({ raw: 'claude-haiku-4-5-20251001', normalizedId: 'claude-haiku-4-5', profile: 'common', reason: 'unlisted' }),
+    )
+    expect(text).toContain('마지막 최적화 대상: claude-haiku-4-5-20251001 · 적용: common (unlisted)')
+  })
+
+  test('shows common and its reason for a bare alias', () => {
+    const text = formatStatus(
+      config(),
+      liveState(),
+      guidance({ raw: 'opus', normalizedId: null, profile: 'common', reason: 'alias' }),
+    )
+    expect(text).toContain('마지막 최적화 대상: opus · 적용: common (alias)')
+  })
+
+  test('shows a skipped detection when guidance was off', () => {
+    const text = formatStatus(
+      config({ modelGuidance: false }),
+      liveState(),
+      guidance({ raw: null, normalizedId: null, profile: 'common', reason: 'disabled' }),
+    )
+    expect(text).toContain('마지막 최적화 대상: 감지 생략 · 적용: common (disabled)')
+  })
+
+  test('shows a failed detection as unconfirmed with its reason', () => {
+    const text = formatStatus(
+      config(),
+      liveState(),
+      guidance({ raw: null, normalizedId: null, profile: 'common', reason: 'timeout' }),
+    )
+    expect(text).toContain('마지막 최적화 대상: 미확인 · 적용: common (timeout)')
+  })
+
+  test('treats a stored blank raw as unconfirmed, not as a model name', () => {
+    const text = formatStatus(
+      config(),
+      liveState(),
+      guidance({ raw: '   ', normalizedId: null, profile: 'common', reason: 'empty' }),
+    )
+    expect(text).toContain('마지막 최적화 대상: 미확인 · 적용: common (empty)')
+  })
+
+  test('flattens control characters and caps a long raw at 100 chars plus an ellipsis', () => {
+    const raw = `${'a'.repeat(50)}\n${'b'.repeat(149)}`
+    const text = formatStatus(
+      config(),
+      liveState(),
+      guidance({ raw, profile: 'common', reason: 'unknown' }),
+    )
+    const shown = `${'a'.repeat(50)} ${'b'.repeat(49)}…`
+    expect(text).toContain(`마지막 최적화 대상: ${shown} · 적용: common (unknown)`)
+    // The raw newline never splits the status line.
+    expect(text.split('\n').filter(line => line.startsWith('마지막 최적화 대상:'))).toHaveLength(1)
   })
 })
 
@@ -188,6 +290,11 @@ function rig(
     configSetResult?: { value?: unknown; deny?: string }
     configSetError?: unknown
     results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult>>
+    /**
+     * When the key is present, the controller exposes `getGuidanceStatus`
+     * (returning this value); when absent, the controller is the legacy facade.
+     */
+    guidance?: Readonly<GuidanceStatus> | null
   } = {},
 ): Rig {
   const calls: string[] = []
@@ -236,6 +343,13 @@ function rig(
       calls.push('cancel')
       return results.cancel
     },
+  }
+  if ('guidance' in opts) {
+    const stored = opts.guidance ?? null
+    controller.getGuidanceStatus = () => {
+      calls.push('getGuidanceStatus')
+      return stored
+    }
   }
 
   const settings: SettingsPort = {
@@ -309,6 +423,20 @@ function wire(on: On, r: Rig): void {
           r.configSets.push([input.key, input.value])
           if (r.configSetError !== undefined) throw r.configSetError
           return r.configSetResult ?? { value: input.value }
+        },
+      },
+      // Spies that would record a port read if `status` (or any intent) made
+      // one. `status` must answer without touching the model ports.
+      session: {
+        model: () => {
+          r.calls.push('session.model')
+          return 'spy-model'
+        },
+      },
+      model: {
+        complete: () => {
+          r.calls.push('model.complete')
+          return Promise.resolve({})
         },
       },
       // The deferred send path reads these; a callback is queued, never run,
@@ -427,10 +555,42 @@ describe('registerCommands — settings intents', () => {
     const r = rig({ config: config({ model: 'sonnet' }) })
     wire(on, r)
     const result = await run($, 'status')
-    expect(result.text).toContain('모델: sonnet')
+    expect(result.text).toContain('옵티마이저 모델: sonnet')
     expect(result.text).toContain('진행 중인 개선 작업: wf-1')
+    expect(result.text).toContain('마지막 최적화 대상: 아직 감지하지 않음')
     expect(r.sets).toEqual([])
+    // A controller without `getGuidanceStatus` (the legacy facade) still works.
     expect(r.calls).toEqual([])
+  })
+
+  test('status shows the last applied target from the stored guidance', async ($, on) => {
+    const r = rig({ guidance: guidance() })
+    wire(on, r)
+    const result = await run($, 'status')
+    expect(result.text).toContain('마지막 최적화 대상: claude-opus-5-5[1m] · 적용: opus-5-5')
+    expect(r.sets).toEqual([])
+    // One stored-state read; no session.model or model.complete call.
+    expect(r.calls).toEqual(['getGuidanceStatus'])
+  })
+
+  test('status shows a skipped detection when the stored snapshot is disabled', async ($, on) => {
+    const r = rig({
+      config: config({ modelGuidance: false }),
+      guidance: guidance({ raw: null, normalizedId: null, profile: 'common', reason: 'disabled' }),
+    })
+    wire(on, r)
+    const result = await run($, 'status')
+    expect(result.text).toContain('모델별 지침: 꺼짐(공통 지침만 사용)')
+    expect(result.text).toContain('마지막 최적화 대상: 감지 생략 · 적용: common (disabled)')
+    expect(r.calls).toEqual(['getGuidanceStatus'])
+  })
+
+  test('status treats a null stored guidance as not yet detected', async ($, on) => {
+    const r = rig({ guidance: null })
+    wire(on, r)
+    const result = await run($, 'status')
+    expect(result.text).toContain('마지막 최적화 대상: 아직 감지하지 않음')
+    expect(r.calls).toEqual(['getGuidanceStatus'])
   })
 
   test('help lists the commands without touching controller or settings', async ($, on) => {

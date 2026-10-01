@@ -27,11 +27,13 @@ import { collectContext } from './context'
 import { sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { buildModelRequest, completeRewrite } from './model'
+import { resolveTargetModel } from './resolve-target-model'
 import { canStartRound, initialState, isStale, reduce } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import type {
   ContextSnapshot,
   EnginePorts,
+  GuidanceStatus,
   ModelUsage,
   OptimizerConfig,
   OptimizerEvent,
@@ -105,6 +107,12 @@ export type ActionResult = { ok: true } | { ok: false; reason: string }
 /** The controller's public surface, as commands (J) and the UI (K) call it. */
 export interface OptimizerController {
   getState(): Readonly<RuntimeState>
+  /**
+   * The target model applied to the last request actually sent, or `null`
+   * before one is sent and after a session start/end. Reads stored state only:
+   * it never calls the model getter or any other port.
+   */
+  getGuidanceStatus(): Readonly<GuidanceStatus> | null
   onSubmit(ports: EnginePorts, e: PromptSubmitInput, ui: 'pane' | 'composer'): Promise<SubmitOutcome>
   startExplicit(ports: EnginePorts, text: string | undefined, ui: 'pane' | 'composer'): Promise<void>
   refine(ports: EnginePorts, instruction: string): Promise<void>
@@ -143,9 +151,10 @@ function refusalNotice(reason: TransferRefusal): string {
  * Builds a controller bound to one session's runtime.
  *
  * The returned object owns the serializable {@link RuntimeState}, an
- * `AbortController` per in-flight workflow (keyed by workflow id) and the
- * cached system prompt for the current run. None of it is shared between
- * sessions; `onSessionStart`/`onSessionEnd` tear it all down.
+ * `AbortController` per in-flight workflow (keyed by workflow id), the run's
+ * cached extra system-prompt text and the last applied {@link GuidanceStatus}.
+ * None of it is shared between sessions; `onSessionStart`/`onSessionEnd` tear
+ * it all down.
  *
  * `Workflow.generation` stays `0` for a run's whole life: ids from `newId` only
  * increase within a session and never repeat, so {@link isStale} still tells a
@@ -154,7 +163,10 @@ function refusalNotice(reason: TransferRefusal): string {
 export function createController(deps: ControllerDeps): OptimizerController {
   let state: RuntimeState = initialState('')
   const rounds = new Map<string, Round>()
-  let system: string | null = null
+  /** The run's extra system-prompt text; read once per run, `null` before that. */
+  let extra: string | null = null
+  /** The target model applied to the last request actually sent, or `null`. */
+  let lastGuidance: Readonly<GuidanceStatus> | null = null
 
   /** Folds one event in and repaints when the state actually moved. */
   function apply(event: OptimizerEvent): void {
@@ -194,9 +206,20 @@ export function createController(deps: ControllerDeps): OptimizerController {
     rounds.clear()
   }
 
-  /** Locks in the run's captured settings before the first completion. */
-  function resetSystemPrompt(): void {
-    system = null
+  /** Removes a round entry only when it is still this round's own. */
+  function releaseRound(workflowId: string, controller: AbortController): void {
+    if (rounds.get(workflowId)?.controller === controller) rounds.delete(workflowId)
+  }
+
+  /** Drops the run's cached extra prompt; the next run reads the file afresh. */
+  function resetExtra(): void {
+    extra = null
+  }
+
+  /** Clears the run cache and the last-applied guidance on a session change. */
+  function resetGuidance(): void {
+    extra = null
+    lastGuidance = null
   }
 
   function makeWorkflow(
@@ -300,40 +323,63 @@ export function createController(deps: ControllerDeps): OptimizerController {
     const controller = new AbortController()
     rounds.set(workflowId, { controller })
 
-    if (system === null) {
-      let extra = ''
+    // The extra file is read once per run. Only a live owner may cache it: a
+    // cancel or a new run during the read must not be overwritten by this one.
+    if (extra === null) {
+      let loadedText = ''
       let warning: string | undefined
       try {
         const loaded = await loadSystemPromptExtra(ports, config)
-        extra = loaded.text
+        loadedText = loaded.text
         warning = loaded.warning
       } catch {
         // A missing extra file falls back to the built-in prompt, already the
-        // empty `extra`; `loadSystemPromptExtra` reports its own warning when it
-        // can, but an unexpected throw here leaves none to relay.
-        extra = ''
+        // empty `loadedText`; `loadSystemPromptExtra` reports its own warning
+        // when it can, but an unexpected throw here leaves none to relay.
+        loadedText = ''
       }
-      system = composeSystemPrompt(extra)
+      // After the await, a stale or aborted round must not write the cache or
+      // notify: its result belongs to a run the person already left.
+      if (isStale(state, workflowId, generation) || controller.signal.aborted) {
+        releaseRound(workflowId, controller)
+        return
+      }
+      extra = loadedText
       // The prompt is loaded once per run, so this is the run's one warning
       // notice; the warning text itself names the file and the reason. Only a
       // missing/unreadable file leaves `extra` empty and falls back to the
       // built-in prompt; a truncation warning keeps the loaded text.
       if (warning !== undefined && warning !== '') {
         notify(
-          extra === ''
+          loadedText === ''
             ? `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${warning}`
             : `시스템 프롬프트 파일 안내: ${warning}`,
         )
       }
     }
 
-    const current = state.workflow
-    if (current === null || current.id !== workflowId) {
-      rounds.delete(workflowId)
+    // The main session's model is read afresh on every round (the first call,
+    // retry and refine alike), just before the request is assembled.
+    const target = await resolveTargetModel(ports, config.modelGuidance, controller.signal)
+
+    // A cancel during detection must not send or record anything: a `cancelled`
+    // snapshot is not permission to complete.
+    if (isStale(state, workflowId, generation) || controller.signal.aborted) {
+      releaseRound(workflowId, controller)
       return
     }
 
+    const current = state.workflow
+    if (current === null || current.id !== workflowId) {
+      releaseRound(workflowId, controller)
+      return
+    }
+
+    const system = composeSystemPrompt(extra, target.profile)
     const request = buildModelRequest(current, config, system, instruction)
+
+    // Record the model this request actually targets, just before sending.
+    lastGuidance = { workflowId, round: current.rounds + 1, target }
 
     let result: RewriteResult
     try {
@@ -342,7 +388,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       result = { kind: 'failed', reason: 'rejected', message: describeError(cause), usage: ZERO_USAGE }
     }
     // Only drop the entry this round put there (a cancel already removed it).
-    if (rounds.get(workflowId)?.controller === controller) rounds.delete(workflowId)
+    releaseRound(workflowId, controller)
 
     // The reducer folds a stale result's usage without touching the run; the
     // UI must not react either. `reply`/`failed` carry the usage, so no second
@@ -448,7 +494,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       case 'optimize': {
         let workflow: Workflow | null = null
         try {
-          resetSystemPrompt()
+          resetExtra()
           workflow = makeWorkflow(decision.text, e.context ?? [], ui)
           apply({ type: 'start', workflow })
           scheduleTask(
@@ -492,7 +538,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
 
     try {
-      resetSystemPrompt()
+      resetExtra()
       const workflow = makeWorkflow(source, [], ui)
       apply({ type: 'start', workflow })
       scheduleTask(
@@ -659,7 +705,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       entry.controller.abort()
       rounds.delete(workflow.id)
     }
-    resetSystemPrompt()
+    resetExtra()
     // Drop the run before restoring: a late completion then finds it stale and
     // cannot run a second restore or repaint the dialogue.
     apply({ type: 'cancel', workflowId: workflow.id })
@@ -694,18 +740,19 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
   function onSessionStart(sessionId: string): void {
     abortAll()
-    resetSystemPrompt()
+    resetGuidance()
     apply({ type: 'reset', sessionId })
   }
 
   function onSessionEnd(): void {
     abortAll()
-    resetSystemPrompt()
+    resetGuidance()
     apply({ type: 'reset', sessionId: state.sessionId })
   }
 
   return {
     getState: () => state,
+    getGuidanceStatus: () => lastGuidance,
     onSubmit,
     startExplicit,
     refine,
