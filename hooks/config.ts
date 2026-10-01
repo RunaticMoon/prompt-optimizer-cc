@@ -153,6 +153,13 @@ function validateKey(key: ConfigKey, raw: unknown): KeyResult {
       }
       return { value: raw }
     }
+    case 'memoryContext': {
+      const parsed = toBoolean(raw)
+      if (parsed === undefined) {
+        return { value: DEFAULT_CONFIG.memoryContext, warning: `"memoryContext" must be a boolean; using default ${DEFAULT_CONFIG.memoryContext}` }
+      }
+      return { value: parsed }
+    }
   }
 }
 

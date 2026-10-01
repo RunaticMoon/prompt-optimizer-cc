@@ -658,6 +658,58 @@ describe('accept and send', () => {
     expect(h.submits[0]?.text).toBe('원문')
   })
 
+  test('sendDraft sends when the captured workflow id still matches', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    const id = h.controller.getState().workflow?.id
+    expect(id).toBeDefined()
+
+    const result = await h.controller.sendDraft(h.ports, id)
+
+    expect(result).toEqual({ ok: true })
+    expect(h.calls.submit).toBe(1)
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('sendDraft refuses a run that replaced the captured workflow id', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const result = await h.controller.sendDraft(h.ports, 'wf-stale')
+
+    expect(result).toEqual({ ok: false, reason: '개선 작업이 바뀌어 전송하지 않았습니다.' })
+    expect(h.calls.submit).toBe(0)
+    expect(h.notices.filter(n => n === '개선 작업이 바뀌어 전송하지 않았습니다.')).toHaveLength(1)
+    // The current run is untouched, so the person can still act on it.
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+  })
+
+  test('sendOriginal refuses a replaced workflow id too', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const result = await h.controller.sendOriginal(h.ports, 'wf-stale')
+
+    expect(result).toEqual({ ok: false, reason: '개선 작업이 바뀌어 전송하지 않았습니다.' })
+    expect(h.calls.submit).toBe(0)
+  })
+
+  test('sendDraft without a workflow id keeps the previous behavior', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(await h.controller.sendDraft(h.ports)).toEqual({ ok: true })
+    expect(h.calls.submit).toBe(1)
+  })
+
   test('a dropped send returns to review with a notice', async () => {
     const h = harness({ submit: () => ({ drop: 'blocked' }) })
     h.controller.onSessionStart('sess-1')
@@ -923,5 +975,84 @@ describe('scheduled work', () => {
     await h.flush()
 
     expect(h.notices).toContain('보완 요청을 처리하지 못했습니다: repaint failed')
+  })
+})
+
+describe('readMemory — long-term memory folded into the snapshot', () => {
+  test('reads the rendered memory once per run and folds it into the first snapshot', async () => {
+    let reads = 0
+    const h = harness({
+      deps: {
+        readMemory: () => {
+          reads += 1
+          return '### Injected at session start\n세션 기억'
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(reads).toBe(1)
+    const context = h.controller.getState().workflow?.context
+    expect(context?.memory).toContain('세션 기억')
+    expect(context?.text).toContain('## Long-term memory')
+    expect(context?.text).toContain('세션 기억')
+    expect(h.completes[0]?.prompt).toContain('## Long-term memory')
+    expect(h.completes[0]?.prompt).toContain('세션 기억')
+
+    // The snapshot is read once: a later round reuses it, never re-reads.
+    await h.controller.refine(h.ports, '더 짧게')
+    expect(reads).toBe(1)
+  })
+
+  test('omits the memory when memoryContext is off', async () => {
+    let reads = 0
+    const h = harness({
+      config: { memoryContext: false },
+      deps: {
+        readMemory: () => {
+          reads += 1
+          return '숨겨야 할 기억'
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(reads).toBe(1)
+    expect(h.controller.getState().workflow?.context?.memory).toBe('')
+    expect(h.completes[0]?.prompt).not.toContain('숨겨야 할 기억')
+    expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
+  })
+
+  test('treats a throwing reader as no memory and keeps the round going', async () => {
+    const h = harness({
+      deps: {
+        readMemory: () => {
+          throw new Error('memory unavailable')
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.messages).toBe(1)
+    expect(h.calls.complete).toBe(1)
+    const workflow = h.controller.getState().workflow
+    expect(workflow?.phase).toBe('reviewing')
+    expect(workflow?.context?.memory).toBe('')
+  })
+
+  test('an absent reader leaves the memory section off the snapshot', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.controller.getState().workflow?.context?.memory).toBe('')
+    expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
   })
 })

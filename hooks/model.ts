@@ -84,10 +84,27 @@ interface PromptParts {
   instruction: string
 }
 
+/**
+ * Replaces the `<` of a section tag inside captured text with `‹` (U+2039), so
+ * a stray `</context>` (or another section tag) cannot close the section early
+ * and make the following text read as a top-level instruction. Matching is
+ * case-insensitive, tolerates whitespace after `<` and around the `/`, and
+ * requires a word boundary after the tag name; every other `<` is left alone.
+ */
+export function neutralizeTags(text: string): string {
+  return text.replace(
+    /<(\s*\/?\s*(?:context|original_prompt|current_draft|dialogue|instruction)\b)/gi,
+    '‹$1',
+  )
+}
+
 /** Renders the tagged prompt; the selected dialogue stays in time order. */
 function renderPrompt(parts: PromptParts): string {
   const blocks: string[] = []
-  if (parts.context !== '') blocks.push(`<context>\n${parts.context}\n</context>`)
+  // Only the context is neutralized: it can carry other sources' memory text.
+  // The original/draft/dialogue/instruction are the user's own text, and changing
+  // their tags could leak the replacement character into an improved draft.
+  if (parts.context !== '') blocks.push(`<context>\n${neutralizeTags(parts.context)}\n</context>`)
   blocks.push(`<original_prompt>\n${parts.original}\n</original_prompt>`)
   if (parts.draft !== null) blocks.push(`<current_draft>\n${parts.draft}\n</current_draft>`)
   if (parts.dialogue.length > 0) {

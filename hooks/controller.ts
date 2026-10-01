@@ -52,7 +52,7 @@ const OPTIMIZE_NOTICE = '프롬프트를 다듬는 중입니다.'
 const LIMIT_NOTICE = '개선 횟수 한도에 도달했습니다'
 const ACCEPT_NOTICE = '개선안을 입력창에 넣었습니다. Enter 로 전송하세요.'
 /** Result reason for an action refused while its run is mid-flight. */
-const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
+export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
 
 /** A token count with every field at zero, for arms that spent nothing. */
 const ZERO_USAGE: ModelUsage = {
@@ -86,6 +86,8 @@ export interface ControllerDeps {
   getConfig(): OptimizerConfig
   /** A state change or notification; the UI (K) subscribes. */
   onChange(state: Readonly<RuntimeState>, notice?: string): void
+  /** Rendered long-term memory for the snapshot; absent reads none. */
+  readMemory?(): string
 }
 
 /** What a submit hook should do with one submission. */
@@ -108,8 +110,8 @@ export interface OptimizerController {
   refine(ports: EnginePorts, instruction: string): Promise<void>
   retry(ports: EnginePorts, instruction?: string): Promise<void>
   accept(ports: EnginePorts): Promise<ActionResult>
-  sendDraft(ports: EnginePorts): Promise<ActionResult>
-  sendOriginal(ports: EnginePorts): Promise<ActionResult>
+  sendDraft(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
+  sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   cancel(ports: EnginePorts): Promise<ActionResult>
   onPromptEdit(text: string): void
   onSessionStart(sessionId: string): void
@@ -272,11 +274,19 @@ export function createController(deps: ControllerDeps): OptimizerController {
     // The snapshot is read once, on the first round.
     if (workflow.phase === 'idle') {
       apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
+      // The memory read is kept out of the snapshot's own try: a throwing
+      // reader is treated as no memory, so collection still happens. A snapshot
+      // failure is not a round failure either: continue without it.
+      let memory = ''
+      try {
+        memory = deps.readMemory?.() ?? ''
+      } catch {
+        memory = ''
+      }
       let context: ContextSnapshot | null = null
       try {
-        context = await collectContext(ports, config)
+        context = await collectContext(ports, config, memory)
       } catch {
-        // A snapshot failure is not a round failure: continue without it.
         context = null
       }
       if (context !== null) apply({ type: 'context', workflowId, generation, context })
@@ -563,11 +573,22 @@ export function createController(deps: ControllerDeps): OptimizerController {
     return { ok: false, reason }
   }
 
-  async function send(ports: EnginePorts, source: 'draft' | 'original'): Promise<ActionResult> {
+  async function send(
+    ports: EnginePorts,
+    source: 'draft' | 'original',
+    workflowId?: string,
+  ): Promise<ActionResult> {
     const workflow = state.workflow
     if (workflow === null) {
       notify('전송할 개선 작업이 없습니다.')
       return { ok: false, reason: '전송할 개선 작업이 없습니다.' }
+    }
+    // A caller that captured an id before deferring (the `/optimize send`
+    // command) must not send a different run that replaced it meanwhile.
+    if (workflowId !== undefined && workflow.id !== workflowId) {
+      const reason = '개선 작업이 바뀌어 전송하지 않았습니다.'
+      notify(reason)
+      return { ok: false, reason }
     }
     if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
       return { ok: false, reason: IN_FLIGHT_REASON }
@@ -690,8 +711,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
     refine,
     retry,
     accept,
-    sendDraft: ports => send(ports, 'draft'),
-    sendOriginal: ports => send(ports, 'original'),
+    sendDraft: (ports, workflowId) => send(ports, 'draft', workflowId),
+    sendOriginal: (ports, workflowId) => send(ports, 'original', workflowId),
     cancel,
     onPromptEdit,
     onSessionStart,
