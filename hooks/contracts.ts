@@ -351,10 +351,70 @@ export const SYSTEM_PROMPT_MAX_CHARS = 4000
  * from `$.noun.method(...)` closures and hands it to the helpers instead.
  */
 export type EnginePorts = {
-  session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'>
+  session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'> &
+    Partial<Pick<EngineInterface['session'], 'model'>>
+  /** Optional so older hosts and tests without a timer degrade to common guidance. */
+  clock?: Pick<EngineInterface['clock'], 'sleep'>
   fs: Pick<EngineInterface['fs'], 'stat' | 'read'>
   env: Pick<EngineInterface['env'], 'get'>
   model: Pick<EngineInterface['model'], 'complete'>
   prompt: Pick<EngineInterface['prompt'], 'read' | 'fill' | 'submit'>
   ui: Pick<EngineInterface['ui'], 'close'>
 }
+
+/**
+ * Guidance profile chosen from the main session's model (DESIGN-model-guidance §5).
+ * `common` applies the shared rewrite guidance only.
+ */
+export type GuidanceProfile =
+  | 'common'
+  | 'fable-5-1'
+  | 'fable-5'
+  | 'opus-5-5'
+  | 'opus-5'
+  | 'opus-4-8'
+  | 'sonnet-5-5'
+  | 'sonnet-5'
+
+/** Why a target-model snapshot ended up with its profile. */
+export type ModelResolutionReason =
+  | 'matched'
+  | 'alias'
+  | 'unlisted'
+  | 'unknown'
+  | 'empty'
+  | 'disabled'
+  | 'unavailable'
+  | 'error'
+  | 'timeout'
+  | 'cancelled'
+
+/** The main session's model as read for one optimizer round. */
+export interface TargetModelSnapshot {
+  /** The getter's string exactly as returned; null when nothing was read. */
+  readonly raw: string | null
+  /** Lookup key (no `[1m]`, no date suffix); null when not a versioned model. */
+  readonly normalizedId: string | null
+  readonly profile: GuidanceProfile
+  readonly reason: ModelResolutionReason
+}
+
+/** The target model applied to the last request actually sent. */
+export interface GuidanceStatus {
+  readonly workflowId: string
+  /** `current.rounds + 1` at the time the request was sent. */
+  readonly round: number
+  readonly target: TargetModelSnapshot
+}
+
+/** How long one round waits for `session.model()` before using common guidance. */
+export const TARGET_MODEL_TIMEOUT_MS = 500
+
+/** Cap for the shared rewrite guidance text. */
+export const COMMON_GUIDANCE_MAX_CHARS = 1500
+
+/** Cap for one model-specific guidance block. */
+export const MODEL_GUIDANCE_MAX_CHARS = 800
+
+/** Cap for the assembled optimizer system prompt with the largest extra file. */
+export const GUIDANCE_SYSTEM_MAX_CHARS = 7600
