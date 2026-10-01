@@ -1,0 +1,96 @@
+# Version bump on merged PRs to main.
+# Bumps the plugin version with scripts/bump-version.mjs, then commits and tags the release.
+# Level labels: "semver:major" -> major, "semver:minor" -> minor, otherwise patch.
+# A "skip-release" label (or a closed-but-unmerged PR) skips the job entirely.
+#
+# No infinite loop: a push made with GITHUB_TOKEN does not trigger new workflows, and this
+# workflow only reacts to the pull_request_target "closed" event, so its own tag/commit push
+# cannot re-run it.
+name: Version bump
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+# Needed to push the release commit and tag back to main.
+permissions:
+  contents: write
+
+# Serialize releases so back-to-back merges are processed one at a time.
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true && !contains(github.event.pull_request.labels.*.name, 'skip-release')
+    steps:
+      - name: Check out main
+        # Never check out the PR head: pull_request_target runs with a write token,
+        # so we only ever build/tag this repository's trusted main branch.
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump, commit, tag and push
+        id: bump
+        env:
+          LEVEL: ${{ contains(github.event.pull_request.labels.*.name, 'semver:major') && 'major' || contains(github.event.pull_request.labels.*.name, 'semver:minor') && 'minor' || 'patch' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2 3; do
+            echo "::group::Attempt ${attempt} of 3"
+
+            # Re-sync main in case another commit landed while we were working.
+            git fetch origin main --tags
+            git reset --hard origin/main
+
+            V="$(node scripts/bump-version.mjs "${LEVEL}")"
+
+            # Refuse to overwrite an existing tag on the remote or locally.
+            if git rev-parse -q --verify "refs/tags/v${V}" >/dev/null || [ -n "$(git ls-remote --tags origin "refs/tags/v${V}")" ]; then
+              echo "::error::Tag v${V} already exists; refusing to release."
+              exit 1
+            fi
+
+            git commit -am "chore(release): v${V}" -m "Bump ${LEVEL} after #${PR_NUMBER}"
+            git tag -a "v${V}" -m "v${V}"
+
+            if git push --atomic origin HEAD:main "refs/tags/v${V}"; then
+              echo "Released v${V}"
+              echo "version=${V}" >> "$GITHUB_OUTPUT"
+              echo "::endgroup::"
+              break
+            fi
+
+            echo "::endgroup::"
+            echo "Push rejected (main moved?); cleaning up and retrying."
+
+            # Drop the local tag so the next attempt can recreate it.
+            git tag -d "v${V}" || true
+
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::Could not push the version bump after 3 attempts."
+              exit 1
+            fi
+
+            sleep $((attempt * 5))
+          done
+
+      - name: Write job summary
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          LEVEL: ${{ contains(github.event.pull_request.labels.*.name, 'semver:major') && 'major' || contains(github.event.pull_request.labels.*.name, 'semver:minor') && 'minor' || 'patch' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "Released v${VERSION} (${LEVEL}) from #${PR_NUMBER}" >> "$GITHUB_STEP_SUMMARY"
