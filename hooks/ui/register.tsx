@@ -115,6 +115,7 @@ export function registerUi(
     const originalSummary = originalChars.length > 180
       ? `${originalChars.slice(0, 180).join('')}…`
       : workflow.original
+    const originalToggleLabel = showOriginal ? '원문 접기' : '원문 전체 보기'
     const message = latestOptimizerMessage(workflow)
 
     // A surface without Button needs command text; mobile can still use its Button table.
@@ -184,8 +185,8 @@ export function registerUi(
             <Text bold>원문</Text>
             <Text wrap="wrap">{showOriginal ? workflow.original : previewText(workflow.original, Math.max(24, bodyColumns - 4), '…')}</Text>
             {originalChars.length > 24 && (busy
-              ? <Text dimColor>[0: 원문 전체 보기 · 사용 불가]</Text>
-              : <Button key={KEYS.original} hotkey="0" label={showOriginal ? '원문 접기' : '원문 전체 보기'} plain onPress={() => undefined} />)}
+              ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />)}
           </Box>
           {message && <Text wrap="wrap">{`옵티마이저: ${previewText(message, Math.max(32, bodyColumns - 4) * 2, '…')}`}</Text>}
           {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
@@ -202,8 +203,8 @@ export function registerUi(
           <Text wrap="wrap">{showOriginal ? workflow.original : originalSummary}</Text>
           {originalChars.length > 180 && (
             busy
-              ? <Text dimColor>[0: 원문 전체 보기 · 사용 불가]</Text>
-              : <Button key={KEYS.original} hotkey="0" label={showOriginal ? '원문 접기' : '원문 전체 보기'} plain onPress={() => undefined} />
+              ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />
           )}
         </Box>
         <Box marginTop={1} flexDirection="column">
