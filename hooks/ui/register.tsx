@@ -126,7 +126,12 @@ export function registerUi(
           <Text wrap="wrap">{workflow.original}</Text>
           <Text bold>현재 개선안</Text>
           <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
-          {message && <Text wrap="wrap">{`옵티마이저: ${message}`}</Text>}
+          {message && (
+            <Box marginTop={1} flexDirection="column">
+              <Text bold>옵티마이저 메시지</Text>
+              <Text wrap="wrap">{message}</Text>
+            </Box>
+          )}
           {workflow.lastError && <Text wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
           {busy && <Text>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
           <Text wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
@@ -147,11 +152,30 @@ export function registerUi(
           : <Text dimColor>[3: 원문 그대로 전송 · 사용 불가]</Text>}
       </Box>
     )
-    const keyHint = (
-      <Text dimColor wrap="wrap">{e.props.isFocused
-        ? 'Enter 입력창 · Tab/↑↓ 이동 · 2 바로 전송 · 3 원문 전송 · Esc 닫기'
-        : 'ctrl+x tab 포커스 · Tab 이동 · 1/2/3 선택 · Esc 닫기'}</Text>
-    )
+    // Arrows move focus on some hosts but scroll the pane body on others, so the
+    // hint teaches Tab instead. Only keys that actually work this phase are
+    // advertised: a busy run cannot accept or send, and a run without a draft
+    // has no Enter/2 to offer.
+    const transferring = workflow.phase === 'transferring' || workflow.phase === 'sending'
+    const keyHintText = transferring
+      ? '전송 중입니다'
+      : busy
+        ? '생성 중에는 Esc로 취소할 수 있습니다'
+        : e.props.isFocused
+          ? [
+              ...(draftReady ? ['Enter 입력창'] : []),
+              'Tab 이동',
+              ...(draftReady ? ['2 바로 전송'] : []),
+              '3 원문 전송',
+              'Esc 닫기',
+            ].join(' · ')
+          : [
+              'ctrl+x tab 포커스',
+              'Tab 이동',
+              draftReady ? '1/2/3 선택' : '3 선택',
+              'Esc 닫기',
+            ].join(' · ')
+    const keyHint = <Text dimColor wrap="wrap">{keyHintText}</Text>
     const instruction = retryReady
       ? typeof Input === 'function'
         ? <Input key={KEYS.instruction} label="보완 내용" placeholder="수정하거나 확인할 내용을 입력하세요" submitLabel="Enter로 다시 다듬기" onSubmit={() => undefined} />
