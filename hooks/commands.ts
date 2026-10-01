@@ -28,7 +28,7 @@ import type {
   OptimizerConfig,
   RuntimeState,
 } from './contracts'
-import type { ActionResult } from './controller'
+import { IN_FLIGHT_REASON, type ActionResult } from './controller'
 import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
@@ -79,9 +79,9 @@ export interface CommandController {
   /** Restores the draft into the composer. */
   accept(ports: EnginePorts): Promise<ActionResult>
   /** Sends the improved draft now. */
-  sendDraft(ports: EnginePorts): Promise<ActionResult>
+  sendDraft(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   /** Sends the stored original. */
-  sendOriginal(ports: EnginePorts): Promise<ActionResult>
+  sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   /** Cancels the active run. */
   cancel(ports: EnginePorts): Promise<ActionResult>
 }
@@ -223,6 +223,7 @@ export function formatStatus(
     `모델별 지침: ${config.modelGuidance ? '켜짐' : '꺼짐(공통 지침만 사용)'}`,
     `마지막 최적화 대상: ${describeLastTarget(guidance)}`,
     `문맥: 최근 ${config.contextTurns}턴 · 최대 ${config.contextMaxChars}자 · raw 접두어 "${config.rawPrefix}"`,
+    `장기 기억 문맥: ${config.memoryContext ? '켬' : '끔'}`,
   ]
   if (config.systemPromptFile !== '') lines.push(`시스템 프롬프트 파일: ${config.systemPromptFile}`)
 
@@ -279,7 +280,14 @@ function displayRaw(raw: string): string {
  */
 export function registerCommands(on: On, deps: CommandDeps): void {
   on('command.run', { command: OPTIMIZE_COMMAND.name }, async ($, e) => {
-    const outcome = await runCommand(deps, portsOf($), uiPortsOf($), e.args)
+    // A send's `$.prompt.submit` is refused while this hook still holds the
+    // turn ("submit from a later event"), so it is deferred through this
+    // `$.clock.after` callback, which runs once the hook has returned. `$` is
+    // used at its call site here (the loader refuses a passed-around `$`).
+    const schedule = (fn: () => void): void => {
+      $.clock.after(0, fn)
+    }
+    const outcome = await runCommand(deps, portsOf($), uiPortsOf($), e.args, schedule)
     if (outcome.persist === undefined) return { text: outcome.text }
 
     // Mirror the in-memory change into persistent settings, best effort. The
@@ -354,10 +362,11 @@ async function runCommand(
   ports: EnginePorts,
   ui: UiPorts,
   args: string,
+  schedule: (fn: () => void) => void,
 ): Promise<CommandOutcome> {
   const parsed = parseOptimizeArgs(args)
   try {
-    return await dispatch(deps, ports, ui, parsed)
+    return await dispatch(deps, ports, ui, parsed, schedule)
   } catch (error) {
     // A failing controller method (or a refused UI choice) becomes one line,
     // never an exception escaping the command hook.
@@ -371,6 +380,7 @@ async function dispatch(
   ports: EnginePorts,
   ui: UiPorts,
   command: ParsedCommand,
+  schedule: (fn: () => void) => void,
 ): Promise<CommandOutcome> {
   switch (command.kind) {
     case 'on':
@@ -433,11 +443,11 @@ async function dispatch(
     }
     case 'send': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      return actionOutcome(await deps.controller.sendDraft(ports), '개선안을 보냈습니다.')
+      return scheduleSend(deps, ports, ui, 'draft', schedule)
     }
     case 'raw': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      return actionOutcome(await deps.controller.sendOriginal(ports), '원문을 그대로 보냈습니다.')
+      return scheduleSend(deps, ports, ui, 'original', schedule)
     }
     case 'cancel': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
@@ -470,6 +480,63 @@ function hasWorkflow(deps: CommandDeps): boolean {
  */
 function actionOutcome(result: ActionResult, success: string): CommandOutcome {
   return { text: result.ok ? success : result.reason }
+}
+
+/**
+ * Answers a `send`/`raw` intent, deferring the controller call to `schedule`.
+ *
+ * `controller.send` ends in `$.prompt.submit`, which the host refuses while a
+ * `command.run` hook still owns the turn ("submit from a later event,
+ * turn.complete"). The synchronous pre-check reports the refusals the
+ * controller would answer with anyway; an accepted call is handed to
+ * `schedule`, which runs it once the hook has returned and released the turn.
+ * The active run's id is captured now and passed back, so the deferred call
+ * refuses a different run that replaced it before it ran.
+ */
+function scheduleSend(
+  deps: CommandDeps,
+  ports: EnginePorts,
+  ui: UiPorts,
+  source: 'draft' | 'original',
+  schedule: (fn: () => void) => void,
+): CommandOutcome {
+  const state = deps.controller.getState()
+  const blocker = sendBlocker(state, source)
+  if (blocker !== null) return { text: blocker }
+  const workflowId = state.workflow?.id
+
+  schedule(() => {
+    const sending =
+      source === 'draft'
+        ? deps.controller.sendDraft(ports, workflowId)
+        : deps.controller.sendOriginal(ports, workflowId)
+    void sending
+      .then(result => {
+        // The controller notifies every failure except the in-flight refusal,
+        // which it returns silently; toast only that one, never twice.
+        if (!result.ok && result.reason === IN_FLIGHT_REASON) ui.toast(result.reason)
+      })
+      .catch(error => ui.toast(`전송에 실패했습니다: ${describeError(error)}`))
+      .catch(() => {
+        // A throwing toast sink must not itself become an unhandled rejection,
+        // the same double catch `controller`'s `scheduleTask` uses.
+      })
+  })
+  return { text: source === 'draft' ? '개선안 전송을 예약했습니다.' : '원문 전송을 예약했습니다.' }
+}
+
+/**
+ * Why a `send`/`raw` cannot proceed now, or `null` when it can. Pure and
+ * synchronous, so the command can refuse before scheduling; the guards mirror
+ * the controller's own `send`.
+ */
+function sendBlocker(state: Readonly<RuntimeState>, source: 'draft' | 'original'): string | null {
+  const workflow = state.workflow
+  if (workflow === null) return NO_WORKFLOW
+  if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') return IN_FLIGHT_REASON
+  const text = source === 'draft' ? workflow.draft : workflow.original
+  if (text === '') return source === 'draft' ? '전송할 개선안이 없습니다.' : '전송할 원문이 없습니다.'
+  return null
 }
 
 /**

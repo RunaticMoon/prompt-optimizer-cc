@@ -138,6 +138,10 @@ interface World {
   /** The simulated composer's current text. */
   box(): string
   setBox(text: string): void
+  /** The additionalContext the bottom `classic.SessionStart` hook returns. */
+  setSessionStartContext(entries: readonly string[] | undefined): void
+  /** The additionalContext the bottom `classic.UserPromptSubmit` hook returns. */
+  setPromptSubmitContext(entries: readonly string[] | undefined): void
   /** Starts the session (the plugin wires itself on this). */
   start(): Promise<void>
   /** A composer submission, with the emulated engine starting a turn on a pass. */
@@ -154,6 +158,8 @@ interface World {
   waitFor(predicate: () => boolean, spins?: number): Promise<void>
   endSession(): Promise<void>
   restartSession(id: string): Promise<void>
+  /** The harness session's id, i.e. what `$.session.id()` answers. */
+  sessionId(): string
 }
 
 /**
@@ -176,6 +182,8 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
   let sectionHooks = 0
   let sessionId = 'sess-1'
   let boxText = ''
+  let ssContext: readonly string[] | undefined
+  let upsContext: readonly string[] | undefined
   let behavior: ModelBehavior = () => answered(DRAFT)
   let fillFn: ((input: PromptFillInput) => { isFilled: boolean; refusal?: 'no_composer' | 'dialog' }) | null = null
   // The main session's model as the bottom `session.model` hook answers it. The
@@ -256,6 +264,15 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     return { text: e.text }
   })
 
+  // The bottom classic hooks: the loaded plugin's `classic.*` hooks sit above
+  // them and observe their `additionalContext` through `next(e)`.
+  on('classic.SessionStart', () => ({
+    additionalContext: ssContext === undefined ? undefined : [...ssContext],
+  }))
+  on('classic.UserPromptSubmit', () => ({
+    additionalContext: upsContext === undefined ? undefined : [...upsContext],
+  }))
+
   const turnStart = async (): Promise<void> => {
     await $.turn.start({ text: '', turnId: `turn-${turns + 1}` })
   }
@@ -299,6 +316,12 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     box: () => boxText,
     setBox: text => {
       boxText = text
+    },
+    setSessionStartContext(entries) {
+      ssContext = entries === undefined ? undefined : [...entries]
+    },
+    setPromptSubmitContext(entries) {
+      upsContext = entries === undefined ? undefined : [...entries]
     },
     async start() {
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
@@ -346,6 +369,7 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
       sessionId = id
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
     },
+    sessionId: () => sessionId,
   }
 }
 
@@ -364,22 +388,14 @@ function mountPane($: Engine) {
 }
 
 /**
- * Known product bugs, written as EXPECTED-behavior checks.
+ * Invariant 5 through the command path: `/optimize send` and `/optimize raw`
+ * deliver, once each.
  *
- * The kit's `claude-code/testing` module exports only `describe`, `expect`,
- * `mock`, `test` and `tier`; neither `test.skip`/`test.todo` nor a `{ skip }` /
- * `{ todo }` test option is honoured here, so these cannot be registered as
- * skipped tests. Each body below is kept unregistered (and the reproduction is
- * in the task report) so the suite stays green while the defect is open.
- *
- * - INV5 (P1): `/optimize send` and `/optimize raw` never deliver. The
- *   `command.run` hook calls `sendApproved`, whose `$.prompt.submit` the host
- *   refuses with: "prompt.submit: called from a command.run hook, it would wait
- *   on the turn this hook is holding; submit from a later event (turn.complete)
- *   (host check)". The pane's send/raw buttons are unaffected — see the
- *   INV5(UI) tests, which pass.
+ * The plugin defers the controller call through a `$.clock.after(0)` callback,
+ * so the submission happens after `command.run` returns (the host refuses a
+ * submit made from inside the hook); the test advances the mock clock to run it.
  */
-async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
+async function assertInv5CommandDelivery($: Engine, on: On): Promise<void> {
   const w = setup($, on)
   await w.start()
   w.setModel((_request, call) => answered(`초안${call}`))
@@ -389,7 +405,10 @@ async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
   await w.submit('더 짧게')
   await w.advance(1)
 
-  await w.run('send')
+  expect(await w.run('send')).toBe('개선안 전송을 예약했습니다.')
+  // Nothing delivered yet: the command has only queued the deferred send.
+  expect(w.submits).toHaveLength(0)
+  await w.advance(0)
   expect(w.submits).toHaveLength(1)
   expect(w.submits[0]?.text).toBe('초안2')
   expect(w.submits[0]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
@@ -397,14 +416,13 @@ async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
   w.setBox('')
   await w.submit('원문B')
   await w.advance(1)
-  await w.run('raw')
+  expect(await w.run('raw')).toBe('원문 전송을 예약했습니다.')
+  expect(w.submits).toHaveLength(1)
+  await w.advance(0)
   expect(w.submits).toHaveLength(2)
   expect(w.submits[1]?.text).toBe('원문B')
   expect(w.submits[1]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
 }
-
-/** The listed, unregistered expectations above, so they are not dead code. */
-const KNOWN_PRODUCT_BUGS = [{ invariant: 'INV5', expected: expectedInv5CommandDelivery }] as const
 
 describe('integration — session isolation and delivery accuracy', () => {
   // Invariant 1: a plain composer submission is dropped; nothing reaches main.
@@ -482,6 +500,12 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(w.submits).toHaveLength(1)
     expect(w.submits[0]?.text).toBe(edited)
     expect(w.completes).toHaveLength(1)
+  })
+
+  // Invariant 5, command path: `/optimize send` and `/optimize raw` deliver
+  // once, from the deferred callback (after the command hook released its turn).
+  test('INV5(command) · /optimize send·raw가 command 반환 뒤 1회 전달한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    await assertInv5CommandDelivery($, on)
   })
 
   // Invariant 5, working path: the pane's send button submits once (the host
@@ -775,6 +799,274 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(request?.system ?? '').toContain('JSON')
     expect((request?.prompt.length ?? 0) + (request?.system?.length ?? 0)).toBeLessThanOrEqual(16000)
     expect(request?.model).toBe('haiku')
+  })
+
+  // Long-term memory capture: the plugin's `classic.SessionStart` and
+  // `classic.UserPromptSubmit` hooks copy other plugins' `additionalContext`
+  // into the snapshot, and a fresh SessionStart clears the previous-prompt ones.
+  //
+  // The classic envelope's `session_id` is given explicitly and made to match
+  // `$.session.id()` (`w.sessionId()`, the value the harness's `session.id` hook
+  // answers). The kit stamps a classic call with the test session's own UUID
+  // otherwise, which no `session.id` hook can name; in the real engine both
+  // name the same session (the transcript file's name), which is the memory
+  // store's key.
+  test('MEM · classic 메모리 포착이 옵티마이저 스냅샷에 실린다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // 1. A SessionStart context lands in the first request's snapshot.
+    w.setSessionStartContext(['MEM-SS-1'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const first = w.completes[0]?.prompt ?? ''
+    expect(first).toContain('## Long-term memory')
+    expect(first).toContain('### Injected at session start')
+    expect(first).toContain('MEM-SS-1')
+
+    // 2. A later UserPromptSubmit context joins the next run's snapshot, beside
+    //    the session-start one.
+    await w.run('cancel')
+    w.setPromptSubmitContext(['MEM-UPS-1'])
+    await $.classic.UserPromptSubmit({ prompt: '이전 프롬프트', session_id: w.sessionId() })
+    await w.run('두번째 원문')
+    await w.advance(1)
+    const second = w.completes[1]?.prompt ?? ''
+    expect(second).toContain('MEM-SS-1')
+    expect(second).toContain('### Injected for the previous prompt')
+    expect(second).toContain('MEM-UPS-1')
+
+    // 3. A fresh SessionStart clears the previous-prompt entries.
+    await w.run('cancel')
+    w.setSessionStartContext(['MEM-SS-2'])
+    await $.classic.SessionStart({ source: 'clear', session_id: w.sessionId() })
+    await w.run('세번째 원문')
+    await w.advance(1)
+    const third = w.completes[2]?.prompt ?? ''
+    expect(third).toContain('MEM-SS-2')
+    expect(third).not.toContain('MEM-UPS-1')
+    expect(third).not.toContain('### Injected for the previous prompt')
+  })
+
+  // L-2 regression: the memory store is session-scoped. Memory captured for
+  // session A must not leak into a new session (different id) that never sees
+  // its own classic SessionStart.
+  test('MEM · 새 세션은 classic SessionStart 없이 이전 세션 기억을 물려받지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-SS-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-SS-A')
+
+    // End session A and start session B without any classic SessionStart.
+    await w.run('cancel')
+    await w.endSession()
+    await w.restartSession('sess-2')
+
+    await w.submit('새 세션 원문')
+    await w.advance(1)
+    const next = w.completes[1]?.prompt ?? ''
+    expect(next).not.toContain('MEM-SS-A')
+    expect(next).not.toContain('## Long-term memory')
+  })
+
+  // L-2 follow-up: an ending session must not wipe a next session's memory that
+  // a classic SessionStart already captured before the end arrived (e.g. a
+  // `/clear` whose new session's SessionStart lands first). `resetSession`
+  // clears only the ending session's id.
+  test('MEM · 새 세션 SessionStart가 이전 세션 end보다 먼저 와도 새 세션 기억을 지우지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // Session A captures memory and shows it.
+    w.setSessionStartContext(['MEM-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-A')
+
+    // Session B's SessionStart arrives before A's end (the reverse of the
+    // usual order), keyed by B's id.
+    w.setSessionStartContext(['MEM-B'])
+    await $.classic.SessionStart({ source: 'clear', session_id: 'sess-2' })
+
+    // Now A's session.end fires; the harness still names A.
+    await w.endSession()
+
+    // B continues under its own classic id without a `session.start`; the
+    // snapshot reads the last captured classic session, so its memory is there.
+    await w.submit('B 세션 원문')
+    await w.advance(1)
+    const br = w.completes[1]?.prompt ?? ''
+    expect(br).toContain('MEM-B')
+    expect(br).not.toContain('MEM-A')
+  })
+
+  // High-1: `/clear` ends A and the process goes on under B's classic id with
+  // no `session.start` for it. The snapshot must follow the classic hook's id,
+  // so B's SessionStart memory is used and A's is gone.
+  test('MEM · /clear(session.start 없음) 후 새 classic SessionStart 기억이 다음 개선 요청에 포함된다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // A captures its session-start memory and shows it.
+    w.setSessionStartContext(['MEM-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-A')
+
+    // `/clear`: the engine ends A (reason `clear`, naming A), then B's classic
+    // SessionStart arrives with a new id. No `session.start` fires for B.
+    await w.endSession()
+    w.setSessionStartContext(['MEM-B'])
+    await $.classic.SessionStart({ source: 'clear', session_id: 'sess-2' })
+
+    // Without restartSession, the next request still sees B's memory only.
+    await w.submit('B 세션 원문')
+    await w.advance(1)
+    const br = w.completes[1]?.prompt ?? ''
+    expect(br).toContain('MEM-B')
+    expect(br).not.toContain('MEM-A')
+
+    // The differing classic id is diagnosed exactly once, not per hook.
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Medium-2: the classic hook's id and the `session.start` id need not agree
+  // (e.g. a resume/clear the plugin saw no `session.start` for). Memory still
+  // follows the classic hook, and the mismatch is diagnosed once per id.
+  test('MEM · classic id가 session.start id와 달라도 기억이 보인다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-DIFF'])
+    await $.classic.SessionStart({ source: 'resume', session_id: 'sess-other' })
+    // A second classic hook for the same id must not repeat the diagnostic.
+    await $.classic.SessionStart({ source: 'resume', session_id: 'sess-other' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-DIFF')
+
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Follow-up: an invalid classic `session_id` cannot key the store, so the
+  // capture is skipped (the stored session's memory stays) and the diagnostic
+  // lands exactly once. An empty id is passed verbatim; if the harness replaced
+  // it with the test session id, this test would fail at the first assertion.
+  test('MEM · classic id가 비면 기억을 기록하지 않고 진단만 1회 남긴다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // A valid capture first, so "skipped" is observable as "unchanged".
+    w.setSessionStartContext(['MEM-KEEP'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-KEEP')
+
+    // Empty id twice: no adopt, no replacement, one diagnostic.
+    w.setSessionStartContext(['MEM-EMPTY'])
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+
+    const noId = w.logs.filter(text => text.includes('carried no session_id'))
+    expect(noId).toHaveLength(1)
+
+    await w.run('cancel')
+    await w.run('다음 원문')
+    await w.advance(1)
+    const next = w.completes[1]?.prompt ?? ''
+    expect(next).toContain('MEM-KEEP')
+    expect(next).not.toContain('MEM-EMPTY')
+  })
+
+  // Subagent guard: a classic hook raised inside a subagent carries `agent_id`,
+  // and its settings hooks must not touch the main session's memory.
+  test('MEM · 서브에이전트(agent_id) classic 훅은 기억을 바꾸지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // The main thread captures its own memory first.
+    w.setSessionStartContext(['MEM-MAIN'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    w.setPromptSubmitContext(['MEM-MAIN-UPS'])
+    await $.classic.UserPromptSubmit({ prompt: '메인', session_id: w.sessionId() })
+
+    // The same id from a subagent carries new context: both hooks are ignored.
+    w.setSessionStartContext(['MEM-SUB'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId(), agent_id: 'sub-1' })
+    w.setPromptSubmitContext(['MEM-SUB-UPS'])
+    await $.classic.UserPromptSubmit({ prompt: '서브', session_id: w.sessionId(), agent_id: 'sub-1' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const prompt = w.completes[0]?.prompt ?? ''
+    expect(prompt).toContain('MEM-MAIN')
+    expect(prompt).toContain('MEM-MAIN-UPS')
+    expect(prompt).not.toContain('MEM-SUB')
+    expect(prompt).not.toContain('MEM-SUB-UPS')
+  })
+
+  // A UserPromptSubmit for a different session id must not adopt or replace the
+  // stored session's memory; session changes come from SessionStart alone.
+  test('MEM · 다른 session_id의 UserPromptSubmit이 현재 세션 기억을 덮지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-CUR'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+
+    w.setPromptSubmitContext(['MEM-OTHER'])
+    await $.classic.UserPromptSubmit({ prompt: '다른 세션', session_id: 'sess-other' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const prompt = w.completes[0]?.prompt ?? ''
+    expect(prompt).toContain('MEM-CUR')
+    expect(prompt).not.toContain('MEM-OTHER')
+
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Diagnostic split: the empty-id report has its own state, so toggling between
+  // an empty id and a mismatched (non-empty) id cannot make it repeat.
+  test('MEM · 빈 id와 불일치 id를 번갈아 보내도 각 진단은 1회만 남는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+
+    const noId = w.logs.filter(text => text.includes('carried no session_id'))
+    const differs = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(noId).toHaveLength(1)
+    expect(differs).toHaveLength(1)
+  })
+
+  // A `session.start` that yielded no id cannot compare, so the follow-the-
+  // classic-hook fallback is reported once for observability.
+  test('MEM · session.start id가 없으면 classic id 대체 사실을 1회 진단한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    await w.restartSession('')
+
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+
+    const missing = w.logs.filter(text => text.includes('session.start yielded no session id'))
+    expect(missing).toHaveLength(1)
   })
 
   // The pane UI path: mount the real Pane and press its accept button.
