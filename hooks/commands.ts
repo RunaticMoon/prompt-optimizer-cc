@@ -227,7 +227,14 @@ export function formatStatus(config: OptimizerConfig, state: Readonly<RuntimeSta
  */
 export function registerCommands(on: On, deps: CommandDeps): void {
   on('command.run', { command: OPTIMIZE_COMMAND.name }, async ($, e) => {
-    const outcome = await runCommand(deps, portsOf($), uiPortsOf($), e.args)
+    // A send's `$.prompt.submit` is refused while this hook still holds the
+    // turn ("submit from a later event"), so it is deferred through this
+    // `$.clock.after` callback, which runs once the hook has returned. `$` is
+    // used at its call site here (the loader refuses a passed-around `$`).
+    const schedule = (fn: () => void): void => {
+      $.clock.after(0, fn)
+    }
+    const outcome = await runCommand(deps, portsOf($), uiPortsOf($), e.args, schedule)
     if (outcome.persist === undefined) return { text: outcome.text }
 
     // Mirror the in-memory change into persistent settings, best effort. The
@@ -300,10 +307,11 @@ async function runCommand(
   ports: EnginePorts,
   ui: UiPorts,
   args: string,
+  schedule: (fn: () => void) => void,
 ): Promise<CommandOutcome> {
   const parsed = parseOptimizeArgs(args)
   try {
-    return await dispatch(deps, ports, ui, parsed)
+    return await dispatch(deps, ports, ui, parsed, schedule)
   } catch (error) {
     // A failing controller method (or a refused UI choice) becomes one line,
     // never an exception escaping the command hook.
@@ -317,6 +325,7 @@ async function dispatch(
   ports: EnginePorts,
   ui: UiPorts,
   command: ParsedCommand,
+  schedule: (fn: () => void) => void,
 ): Promise<CommandOutcome> {
   switch (command.kind) {
     case 'on':
@@ -373,11 +382,11 @@ async function dispatch(
     }
     case 'send': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      return actionOutcome(await deps.controller.sendDraft(ports), '개선안을 보냈습니다.')
+      return scheduleSend(deps, ports, ui, 'draft', schedule)
     }
     case 'raw': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
-      return actionOutcome(await deps.controller.sendOriginal(ports), '원문을 그대로 보냈습니다.')
+      return scheduleSend(deps, ports, ui, 'original', schedule)
     }
     case 'cancel': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
@@ -410,6 +419,55 @@ function hasWorkflow(deps: CommandDeps): boolean {
  */
 function actionOutcome(result: ActionResult, success: string): CommandOutcome {
   return { text: result.ok ? success : result.reason }
+}
+
+/** Mirrors the controller's silent in-flight refusal (`IN_FLIGHT_REASON` there). */
+const SEND_IN_FLIGHT = '개선 작업을 처리하는 중입니다.'
+
+/**
+ * Answers a `send`/`raw` intent, deferring the controller call to `schedule`.
+ *
+ * `controller.send` ends in `$.prompt.submit`, which the host refuses while a
+ * `command.run` hook still owns the turn ("submit from a later event,
+ * turn.complete"). The synchronous pre-check reports the refusals the
+ * controller would answer with anyway; an accepted call is handed to
+ * `schedule`, which runs it once the hook has returned and released the turn.
+ */
+function scheduleSend(
+  deps: CommandDeps,
+  ports: EnginePorts,
+  ui: UiPorts,
+  source: 'draft' | 'original',
+  schedule: (fn: () => void) => void,
+): CommandOutcome {
+  const blocker = sendBlocker(deps.controller.getState(), source)
+  if (blocker !== null) return { text: blocker }
+
+  schedule(() => {
+    const sending = source === 'draft' ? deps.controller.sendDraft(ports) : deps.controller.sendOriginal(ports)
+    void sending
+      .then(result => {
+        // The controller notifies every failure except the in-flight refusal,
+        // which it returns silently; toast only that one, never twice.
+        if (!result.ok && result.reason === SEND_IN_FLIGHT) ui.toast(result.reason)
+      })
+      .catch(error => ui.toast(`전송에 실패했습니다: ${describeError(error)}`))
+  })
+  return { text: source === 'draft' ? '개선안 전송을 예약했습니다.' : '원문 전송을 예약했습니다.' }
+}
+
+/**
+ * Why a `send`/`raw` cannot proceed now, or `null` when it can. Pure and
+ * synchronous, so the command can refuse before scheduling; the guards mirror
+ * the controller's own `send`.
+ */
+function sendBlocker(state: Readonly<RuntimeState>, source: 'draft' | 'original'): string | null {
+  const workflow = state.workflow
+  if (workflow === null) return NO_WORKFLOW
+  if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') return SEND_IN_FLIGHT
+  const text = source === 'draft' ? workflow.draft : workflow.original
+  if (text === '') return source === 'draft' ? '전송할 개선안이 없습니다.' : '전송할 원문이 없습니다.'
+  return null
 }
 
 /**

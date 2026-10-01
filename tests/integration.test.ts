@@ -337,22 +337,14 @@ function mountPane($: Engine) {
 }
 
 /**
- * Known product bugs, written as EXPECTED-behavior checks.
+ * Invariant 5 through the command path: `/optimize send` and `/optimize raw`
+ * deliver, once each.
  *
- * The kit's `claude-code/testing` module exports only `describe`, `expect`,
- * `mock`, `test` and `tier`; neither `test.skip`/`test.todo` nor a `{ skip }` /
- * `{ todo }` test option is honoured here, so these cannot be registered as
- * skipped tests. Each body below is kept unregistered (and the reproduction is
- * in the task report) so the suite stays green while the defect is open.
- *
- * - INV5 (P1): `/optimize send` and `/optimize raw` never deliver. The
- *   `command.run` hook calls `sendApproved`, whose `$.prompt.submit` the host
- *   refuses with: "prompt.submit: called from a command.run hook, it would wait
- *   on the turn this hook is holding; submit from a later event (turn.complete)
- *   (host check)". The pane's send/raw buttons are unaffected — see the
- *   INV5(UI) tests, which pass.
+ * The plugin defers the controller call through a `$.clock.after(0)` callback,
+ * so the submission happens after `command.run` returns (the host refuses a
+ * submit made from inside the hook); the test advances the mock clock to run it.
  */
-async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
+async function assertInv5CommandDelivery($: Engine, on: On): Promise<void> {
   const w = setup($, on)
   await w.start()
   w.setModel((_request, call) => answered(`초안${call}`))
@@ -362,7 +354,10 @@ async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
   await w.submit('더 짧게')
   await w.advance(1)
 
-  await w.run('send')
+  expect(await w.run('send')).toBe('개선안 전송을 예약했습니다.')
+  // Nothing delivered yet: the command has only queued the deferred send.
+  expect(w.submits).toHaveLength(0)
+  await w.advance(0)
   expect(w.submits).toHaveLength(1)
   expect(w.submits[0]?.text).toBe('초안2')
   expect(w.submits[0]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
@@ -370,14 +365,13 @@ async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
   w.setBox('')
   await w.submit('원문B')
   await w.advance(1)
-  await w.run('raw')
+  expect(await w.run('raw')).toBe('원문 전송을 예약했습니다.')
+  expect(w.submits).toHaveLength(1)
+  await w.advance(0)
   expect(w.submits).toHaveLength(2)
   expect(w.submits[1]?.text).toBe('원문B')
   expect(w.submits[1]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
 }
-
-/** The listed, unregistered expectations above, so they are not dead code. */
-const KNOWN_PRODUCT_BUGS = [{ invariant: 'INV5', expected: expectedInv5CommandDelivery }] as const
 
 describe('integration — session isolation and delivery accuracy', () => {
   // Invariant 1: a plain composer submission is dropped; nothing reaches main.
@@ -455,6 +449,12 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(w.submits).toHaveLength(1)
     expect(w.submits[0]?.text).toBe(edited)
     expect(w.completes).toHaveLength(1)
+  })
+
+  // Invariant 5, command path: `/optimize send` and `/optimize raw` deliver
+  // once, from the deferred callback (after the command hook released its turn).
+  test('INV5(command) · /optimize send·raw가 command 반환 뒤 1회 전달한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    await assertInv5CommandDelivery($, on)
   })
 
   // Invariant 5, working path: the pane's send button submits once (the host
