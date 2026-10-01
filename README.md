@@ -47,16 +47,18 @@ Mod API는 early access라 버전 간 계약이 바뀔 수 있다. 실제로 2.1
 터미널에서 설치:
 
 ```bash
-claude plugin marketplace add RunaticMoon/prompt-optimizer-cc
+claude plugin marketplace add https://github.com/RunaticMoon/prompt-optimizer-cc.git
 claude plugin install prompt-optimizer@prompt-optimizer-cc
 ```
+
+HTTPS URL을 쓰는 이유: `소유자/저장소` 형식은 SSH가 설정된 PC에서 SSH로 clone하므로, GitHub에 등록되지 않은 키가 있으면 `Permission denied (publickey)`로 추가·갱신이 실패한다. HTTPS URL은 공개 저장소를 인증 없이 받는다.
 
 `marketplace add`에는 `--scope` 옵션이 있다(user 기본 / project / local).
 
 세션 안에서 설치하려면:
 
 ```text
-/plugin marketplace add RunaticMoon/prompt-optimizer-cc
+/plugin marketplace add https://github.com/RunaticMoon/prompt-optimizer-cc.git
 /plugin install prompt-optimizer@prompt-optimizer-cc
 ```
 
@@ -90,6 +92,16 @@ export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 claude plugin marketplace update prompt-optimizer-cc
 claude plugin update prompt-optimizer@prompt-optimizer-cc
 ```
+
+이미 `소유자/저장소` 형식(SSH)으로 추가해 갱신이 실패한다면 다음 순서로 전환한다.
+
+```bash
+claude plugin marketplace remove prompt-optimizer-cc
+claude plugin marketplace add https://github.com/RunaticMoon/prompt-optimizer-cc.git
+claude plugin install prompt-optimizer@prompt-optimizer-cc
+```
+
+`remove`는 이 마켓플레이스의 플러그인 제거와 저장된 옵션·시크릿·데이터 삭제를 함께 수행한다. 재설치 후 `/config`(또는 `/plugin configure prompt-optimizer@prompt-optimizer-cc`)에서 설정을 다시 지정한다.
 
 제거:
 

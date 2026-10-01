@@ -47,16 +47,18 @@ The marketplace name is `prompt-optimizer-cc`, and the plugin name is `prompt-op
 Install from a terminal:
 
 ```bash
-claude plugin marketplace add RunaticMoon/prompt-optimizer-cc
+claude plugin marketplace add https://github.com/RunaticMoon/prompt-optimizer-cc.git
 claude plugin install prompt-optimizer@prompt-optimizer-cc
 ```
+
+Why the HTTPS URL: the `owner/repo` shorthand clones over SSH on a PC with SSH configured, so a key that is not registered with GitHub fails to add or update the marketplace with `Permission denied (publickey)`. The HTTPS URL fetches the public repository without authentication.
 
 `marketplace add` has a `--scope` option (user by default / project / local).
 
 To install from inside a session:
 
 ```text
-/plugin marketplace add RunaticMoon/prompt-optimizer-cc
+/plugin marketplace add https://github.com/RunaticMoon/prompt-optimizer-cc.git
 /plugin install prompt-optimizer@prompt-optimizer-cc
 ```
 
@@ -90,6 +92,16 @@ Update:
 claude plugin marketplace update prompt-optimizer-cc
 claude plugin update prompt-optimizer@prompt-optimizer-cc
 ```
+
+If you already added it with the `owner/repo` shorthand (SSH) and updates fail, switch in this order.
+
+```bash
+claude plugin marketplace remove prompt-optimizer-cc
+claude plugin marketplace add https://github.com/RunaticMoon/prompt-optimizer-cc.git
+claude plugin install prompt-optimizer@prompt-optimizer-cc
+```
+
+`remove` also uninstalls this marketplace's plugin and deletes its saved options, secrets, and data. After reinstalling, set your configuration again in `/config` (or `/plugin configure prompt-optimizer@prompt-optimizer-cc`).
 
 Remove:
 
