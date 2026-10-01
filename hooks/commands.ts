@@ -200,6 +200,7 @@ export function formatStatus(config: OptimizerConfig, state: Readonly<RuntimeSta
     `트리거: ${config.triggerMode === 'always' ? '항상' : `접두어 "${config.triggerPrefix}"`} · UI: ${config.uiMode}`,
     `모델: ${config.model} · 최대 토큰: ${config.maxTokens} · 타임아웃: ${config.timeoutMs}ms · 최대 라운드: ${config.maxRounds}`,
     `문맥: 최근 ${config.contextTurns}턴 · 최대 ${config.contextMaxChars}자 · raw 접두어 "${config.rawPrefix}"`,
+    `장기 기억 문맥: ${config.memoryContext ? '켬' : '끔'}`,
   ]
   if (config.systemPromptFile !== '') lines.push(`시스템 프롬프트 파일: ${config.systemPromptFile}`)
 

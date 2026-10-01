@@ -130,6 +130,7 @@ describe('formatStatus', () => {
     expect(text).toContain('접두어 "?? "')
     expect(text).toContain('모델: sonnet')
     expect(text).toContain('시스템 프롬프트 파일: ~/p.md')
+    expect(text).toContain('장기 기억 문맥: 켬')
     expect(text).toContain('진행 중인 개선 작업: wf-1')
     expect(text).toContain('단계 reviewing')
     expect(text).toContain('1/3회')
@@ -149,6 +150,7 @@ describe('formatStatus', () => {
     const text = formatStatus(config(), liveState({ workflow: null }))
     expect(text).toContain('트리거: 항상')
     expect(text).not.toContain('시스템 프롬프트 파일')
+    expect(formatStatus(config({ memoryContext: false }), liveState({ workflow: null }))).toContain('장기 기억 문맥: 끔')
   })
 })
 

@@ -107,6 +107,13 @@
       "description": "Optional file with extra system instructions; empty keeps the built-in prompt.",
       "required": false,
       "default": ""
+    },
+    "memoryContext": {
+      "type": "boolean",
+      "title": "Long-term memory context",
+      "description": "Let the optimizer read context other plugins' hooks injected into the session (for example claude-mem or OpenViking memories). Sent only to the optimizer model.",
+      "required": false,
+      "default": true
     }
   }
 }
