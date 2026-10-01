@@ -302,6 +302,10 @@ Check commands:
 File structure:
 
 ```text
+.claude/
+  skills/
+    release-label/
+      SKILL.md         # the Claude Code skill that picks the release label
 .claude-plugin/
   plugin.json          # manifest: name and the 12 userConfig keys
   marketplace.json     # Marketplace definition (name, owner, plugins)
@@ -355,6 +359,7 @@ When a PR is merged into `main`, the `Version bump` workflow (`.github/workflows
 
 - For that reason, do not edit the version value in a PR. The workflow bumps it after the merge.
 - Claude Code identifies plugin updates by the version in `plugin.json`, so the version must change for users to get the new code with a `/plugin` update.
+- The PR label is chosen by the Claude Code `release-label` skill (`.claude/skills/release-label/SKILL.md`): it reads the change, creates the `semver:`/`skip-release` labels when missing, and applies one label to the PR.
 - The manual commands are `npm run version:bump -- <major|minor|patch|X.Y.Z>` (updates all three files at once and prints the new version) and `npm run check:version` (checks that the three files agree).
 - It uses `pull_request_target` so fork PRs are handled too, but it never runs PR code and only checks out `main`.
 

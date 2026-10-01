@@ -302,6 +302,10 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 파일 구조:
 
 ```text
+.claude/
+  skills/
+    release-label/
+      SKILL.md         # 머지 전 릴리스 라벨을 고르는 Claude Code 스킬
 .claude-plugin/
   plugin.json          # 매니페스트: 이름·userConfig 12개 키
   marketplace.json     # 마켓플레이스 정의(이름·owner·plugins)
@@ -355,6 +359,7 @@ tsconfig.json          # .claude-plugin/types/tsconfig.json 확장
 
 - 그래서 PR에서 version 값을 직접 고치지 않는다. 버전은 머지 후 워크플로가 올린다.
 - Claude Code는 `plugin.json`의 version으로 플러그인 업데이트를 식별하므로, version이 바뀌어야 사용자가 `/plugin` 업데이트로 새 코드를 받는다.
+- PR 라벨은 Claude Code의 `release-label` 스킬(`.claude/skills/release-label/SKILL.md`)이 정한다. 변경 내용을 읽고 `semver:`·`skip-release` 라벨이 없으면 만들고, PR에 맞는 라벨 하나를 붙인다.
 - 수동 명령은 `npm run version:bump -- <major|minor|patch|X.Y.Z>`(세 파일 동시 갱신, 새 버전 출력)와 `npm run check:version`(세 파일 버전 일치 확인)이다.
 - 포크 PR도 처리하도록 `pull_request_target`을 쓰지만, PR 코드는 실행하지 않고 `main`만 checkout한다.
 
