@@ -125,6 +125,12 @@ interface World {
   closes: string[]
   /** Transcript lines the plugin logged. */
   logs: string[]
+  /** How many times the plugin called `$.session.model()`. */
+  readonly modelReads: number
+  /** Sets the value the bottom `session.model` hook answers with. */
+  setModelValue(value: string): void
+  /** Makes `$.session.model()` refuse, so detection falls back to common. */
+  setModelDeny(reason?: string): void
   /** Replaces the completion behavior. */
   setModel(behavior: ModelBehavior): void
   /** Makes the next `prompt.fill` refuse. */
@@ -172,6 +178,12 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
   let boxText = ''
   let behavior: ModelBehavior = () => answered(DRAFT)
   let fillFn: ((input: PromptFillInput) => { isFilled: boolean; refusal?: 'no_composer' | 'dialog' }) | null = null
+  // The main session's model as the bottom `session.model` hook answers it. The
+  // default `''` normalizes to the `common` profile, so the fixtures that never
+  // set a model read exactly as the built-in plugin did before model guidance.
+  let modelRaw = ''
+  let modelReads = 0
+  let modelRefusal: string | null = null
 
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: sessionId }))
@@ -180,10 +192,15 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
   on('session.cwd', () => ({ value: '/repo/sub' }))
   on('session.root', () => ({ value: '/repo' }))
   on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false, name: 'owner/repo' } }))
+  on('session.model', () => {
+    modelReads += 1
+    return modelRefusal === null ? { value: modelRaw } : { deny: modelRefusal }
+  })
   on('fs.stat', () => ({ value: { kind: 'file', size: 9, mtimeMs: 0, isLink: false } }))
   on('fs.read', () => ({ value: '규칙 텍스트' }))
   on('env.get', () => ({ value: undefined }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('config.set', (_$, e) => ({ value: e.value }))
 
   on('ui.open', (_$, e) => {
     opens.push(e.id)
@@ -263,6 +280,16 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     opens,
     closes,
     logs,
+    get modelReads() {
+      return modelReads
+    },
+    setModelValue(value) {
+      modelRaw = value
+      modelRefusal = null
+    },
+    setModelDeny(reason = 'model getter unavailable') {
+      modelRefusal = reason
+    },
     setModel(next) {
       behavior = next
     },
@@ -767,5 +794,266 @@ describe('integration — session isolation and delivery accuracy', () => {
     const passed = await w.submit(DRAFT)
     expect(passed).toEqual({ text: DRAFT })
     expect(w.submits).toHaveLength(1)
+  })
+})
+
+/**
+ * Task M — model-aware guidance through the three real entry paths.
+ *
+ * Every fixture below drives the LOADED plugin, so the `session.model` value
+ * set with `w.setModelValue(...)` is read through the very closure `portsOf`
+ * builds at the submission hook, the command hook and the pane UI hook. Each
+ * assertion checks what the one `model.complete` request carried: the
+ * `[대상 모델 편집 지침: <profile>]` block for the main session's model, while
+ * the optimizer's own `model` and `effort` stay untouched.
+ */
+
+/** The opening of the model-specific system-prompt block `composeSystemPrompt` writes. */
+const BLOCK_TAG = '[대상 모델 편집 지침:'
+
+/** The shared editing guidance that is present even when no model block is added. */
+const COMMON_TAG = '[요청 편집 지침]'
+
+/** The fixed role/JSON contract, always the last section. */
+const CONTRACT_TAG = '[고정 계약]'
+
+/** The canonical main-session ids C measured (probe-model REPORT, 2.1.286). */
+const OPUS_1M = 'claude-opus-5-5[1m]'
+const SONNET_55 = 'claude-sonnet-5-5'
+const FABLE_51 = 'claude-fable-5-1'
+const HAIKU = 'claude-haiku-4-5-20251001'
+
+/** A `config.set` input for one `/config` row, as the test `$` stamps it. */
+function configChange(key: string, value: string | boolean) {
+  return {
+    key,
+    value,
+    previous: value,
+    provider: { plugin: PLUGIN, tier: 'user' as const },
+    origin: { kind: 'plugin' as const, name: 'integration-test' },
+  }
+}
+
+describe('integration — model-aware guidance at the three entry points', () => {
+  // Entry 1: prompt.submit reserves a round; the scheduled round reads the main
+  // session's model (C's `claude-opus-5-5[1m]`) and applies its block, while the
+  // optimizer's own model and effort are unchanged.
+  test('MG1 · prompt.submit 예약 라운드가 opus-5-5[1m]을 읽어 블록을 넣는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    const dropped = await w.submit(ORIGINAL)
+    expect(dropped).toEqual({ drop: DROP_OPTIMIZING })
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    const request = w.completes[0]
+    expect(request?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(request?.system ?? '').not.toContain('sonnet-5-5')
+    expect(request?.system ?? '').toContain(COMMON_TAG)
+    expect(request?.system ?? '').toContain(CONTRACT_TAG)
+    expect(request?.model).toBe('haiku')
+    expect(request?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // Entry 1, second round: the model is read afresh on every round, so a
+  // changed main model lands on the supplement/reply round too.
+  test('MG2 · 보완 라운드가 모델을 다시 읽어 새 프로필로 바뀐다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    w.setModelValue(SONNET_55)
+    const supplement = await w.submit('더 짧게')
+    expect(supplement).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(2)
+    const request = w.completes[1]
+    expect(request?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(request?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(request?.model).toBe('haiku')
+    expect(request?.effort).toBe('low')
+    expect(w.modelReads).toBe(2)
+  })
+
+  // Entry 2: `/optimize <text>` starts a run, `/optimize retry` re-reads the
+  // model and uses the new profile.
+  test('MG3 · /optimize 시작·retry 경로가 모델 전환을 반영한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    await w.run('명시적 요청')
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.effort).toBe('low')
+
+    w.setModelValue(SONNET_55)
+    const retried = await w.run('retry')
+    expect(retried).toContain('다시 다듬')
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.effort).toBe('low')
+    expect(w.modelReads).toBe(2)
+  })
+
+  // Entry 3: the pane UI's Input (refine) and retry button both go through
+  // `ui/register.tsx`'s own `portsOf`, and both re-read the model.
+  test('MG4 · pane refine·retry 경로가 모델 전환을 반영한다', { options: { uiMode: 'pane' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    const mounted = await mountPane($)
+    w.setModelValue(SONNET_55)
+    await mounted.input({ key: 'optimizer:instruction', text: '더 짧게' })
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    w.setModelValue(FABLE_51)
+    await mounted.press({ key: 'optimizer:retry' })
+    expect(w.completes).toHaveLength(3)
+    expect(w.completes[2]?.system ?? '').toContain(`${BLOCK_TAG} fable-5-1]`)
+    expect(w.completes[2]?.system ?? '').not.toContain(`${BLOCK_TAG} sonnet-5-5]`)
+
+    for (const request of w.completes) {
+      expect(request.model).toBe('haiku')
+      expect(request.effort).toBe('low')
+    }
+    expect(w.modelReads).toBe(3)
+  })
+
+  // A listed-but-common model: Haiku 4.5 gets no model block, only the common
+  // guidance and the fixed contract.
+  test('MG5 · haiku는 common이라 모델 블록 없이 공통·고정 계약만 남는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(HAIKU)
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    const request = w.completes[0]
+    expect(request?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(request?.system ?? '').toContain(COMMON_TAG)
+    expect(request?.system ?? '').toContain(CONTRACT_TAG)
+    expect(request?.model).toBe('haiku')
+    expect(request?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // A refused getter degrades to common without failing the round: the
+  // completion still happens exactly once.
+  test('MG6 · getter 거부는 common으로 폴백하고 completion은 1회 수행한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelDeny()
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // `modelGuidance: false` from the start: the getter is never called and no
+  // model block appears.
+  test('MG7 · modelGuidance=false는 getter를 부르지 않고 블록도 없다', { options: { uiMode: 'composer', modelGuidance: false } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.effort).toBe('low')
+    expect(w.modelReads).toBe(0)
+  })
+
+  // Toggling off at runtime through `config.set`: the first round reads the
+  // model, the next round after the toggle does not.
+  test('MG8 · config.set로 modelGuidance를 끄면 다음 라운드부터 getter를 부르지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.modelReads).toBe(1)
+
+    const set = await $.config.set(configChange(`${PLUGIN}.modelGuidance`, false))
+    expect(set).toEqual({ value: false })
+
+    const supplement = await w.submit('더 짧게')
+    expect(supplement).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // The optimizer's own model is independent of the main session's model: a
+  // configured `sonnet` stays on the request while the guidance follows opus.
+  test('MG9 · 메인 모델과 별개로 요청 model·effort는 옵티마이저 설정값이다', { options: { uiMode: 'composer', model: 'sonnet' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.model).toBe('sonnet')
+    expect(w.completes[0]?.effort).toBe('low')
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+  })
+
+  // A session reset clears the last applied snapshot; the next session reads
+  // its own model and applies the matching block.
+  test('MG10 · session reset 후 새 세션이 자기 모델을 다시 읽는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    await w.endSession()
+    await w.restartSession('sess-2')
+    w.setModelValue(SONNET_55)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.effort).toBe('low')
   })
 })
