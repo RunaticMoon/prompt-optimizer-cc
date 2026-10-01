@@ -95,6 +95,14 @@ other release labels that are actually on the PR (check `labels` from
 gh pr edit <n> --add-label "semver:minor" --remove-label "skip-release"
 ```
 
+If `gh pr edit` fails with a "Projects (classic) is being deprecated" GraphQL
+error (some `gh` versions), use the REST API instead:
+
+```bash
+gh api -X POST repos/{owner}/{repo}/issues/<n>/labels -f 'labels[]=semver:minor'
+gh api -X DELETE repos/{owner}/{repo}/issues/<n>/labels/skip-release
+```
+
 For patch, remove whichever release labels are on the PR and add none. Leave
 unrelated labels untouched. If no PR exists yet, pass `--label` to
 `gh pr create` or apply the label right after creation.
