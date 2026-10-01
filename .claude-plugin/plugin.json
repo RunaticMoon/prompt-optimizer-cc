@@ -1,6 +1,6 @@
 {
   "name": "prompt-optimizer",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Drafts and improves the prompt you are about to send before the main session sees it: it keeps the submission out of the transcript, holds a short optimizer dialogue in its own state (a pane, or the prompt box itself on narrow terminals), and puts a finished draft back in the prompt box for your own Enter. One cheap completion per round, no fork, no transcript rewrite.",
   "author": {
     "name": "RunaticMoon"
