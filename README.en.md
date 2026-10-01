@@ -137,7 +137,7 @@ Skill-directory scaffolding (`claude plugin init|new`) is not provided by this r
 
 The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its requested height is 12 rows, focus is taken on the requested pane, and it can be closed with Esc (`hooks/ui/ui-ports.ts`). Actual height depends on placement and any size the user has set.
 In pane mode on terminal and desktop, the band directly above the prompt shows the **original** (a 180-character preview by default) above the **full improved draft**. The pane keeps its phase/round/token header, key hint, actions, refinement input, full latest optimizer message, original toggle, and error/progress state. On surfaces where the band has not rendered, the pane also shows the full original and draft.
-For an inline pane below 40 screen rows, the first view shows an improved-draft preview → `1: 넣기` (put in prompt box) → refinement input → `2: 전송 · 3: 원문` (send / original). The band above the prompt is omitted. The header, optimizer message, original preview and `0` toggle, and errors remain below in the scrollable pane. A fullscreen dock pane at 110 columns or more keeps its existing layout.
+For an inline pane below 40 screen rows, the first view shows an improved-draft preview → `1: 넣기` (put in prompt box) → refinement input → `2: 전송 · 3: 원문` (send / original). The band above the prompt is omitted. The header, optimizer message, original preview, `0` toggle when the original exceeds 180 characters, and errors remain below in the scrollable pane. A dock pane keeps its existing layout.
 
 | Button / input | Behavior |
 |---|---|
@@ -153,7 +153,7 @@ If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력
 | `1` | Put in prompt box; edit then send (`입력창에 넣기`) |
 | `2` | Send improved draft now (`개선안 바로 전송`) |
 | `3` | Send original unchanged (`원문 그대로 전송`) |
-| `0` | Show / hide the full original when the band is drawn outside a small inline pane (shown when the original exceeds 180 characters) |
+| `0` | Show / hide the full original when it exceeds 180 characters. In a compact inline pane, the toggle appears in the lower scrollable area. |
 
 `Cmd+Enter` is unsupported in the Pane: the Mods API accepts only one digit or lowercase letter for a Button `hotkey`. Use `2` to send immediately.
 

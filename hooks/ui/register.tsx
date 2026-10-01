@@ -10,15 +10,24 @@ import { PANE_ROWS } from './ui-ports'
 
 const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
 const isBusy = (phase: Workflow['phase']): boolean => BUSY_PHASES.includes(phase)
-// At 80×24 an inline pane has six body rows, while 80×48 reaches the
-// requested twelve; 40 screen rows separates those two observed layouts.
+// Compact treatment is based on terminal height. Pane placement is tracked
+// separately because a dock viewport reports transcript width, not screen width.
 const COMPACT_VIEWPORT_ROWS = 40
-// The engine docks fullscreen panes from 110 columns, even below 40 rows.
-const FULLSCREEN_DOCK_COLUMNS = 110
 
 export function isCompactViewport(viewport?: RenderViewport): boolean {
-  return Boolean(viewport && viewport.rows < COMPACT_VIEWPORT_ROWS
-    && !(viewport.isFullscreen === true && viewport.columns >= FULLSCREEN_DOCK_COLUMNS))
+  return Boolean(viewport && viewport.rows < COMPACT_VIEWPORT_ROWS)
+}
+
+/** Budget the inline pane's first view from measured body rows. */
+export function estimatedCompactRows(viewport: RenderViewport): number {
+  // At 80×24, main-screen has 11 rows and fullscreen has 6; at 80×20
+  // they have 7 and 4. Main-screen 100×24 also has 11, fullscreen 6.
+  // An unknown fullscreen flag uses the conservative fullscreen estimate.
+  // Below four available rows, preview plus three control rows cannot fit.
+  const estimate = viewport.isFullscreen === false
+    ? viewport.rows - 13
+    : Math.floor((viewport.rows - 12) / 2)
+  return Math.min(PANE_ROWS, Math.max(4, estimate))
 }
 
 const KEYS = {
@@ -87,40 +96,38 @@ function cellWidth(char: string): number {
 export function hardWrapPreview(value: string, columns: number, maxLines: number): string[] {
   if (columns < 1 || maxLines < 1) return []
   const sourceLines = value.replace(/\r\n?/g, '\n').split('\n')
+    .map(sourceLine => sourceLine.replace(/[^\S\n]+/g, ' ').trim())
+    .filter(Boolean)
   const lines: string[] = []
-  let truncated = false
-  for (let sourceIndex = 0; sourceIndex < sourceLines.length; sourceIndex++) {
-    const sourceLine = sourceLines[sourceIndex]!
-    const normalized = sourceLine.replace(/[^\S\n]+/g, ' ').trim()
+  for (const sourceLine of sourceLines) {
     let line = ''
     let used = 0
-    for (const char of normalized) {
+    for (const char of sourceLine) {
       const width = cellWidth(char)
       if (used + width > columns) {
-        if (!line) { // A wide glyph cannot fit a one-cell viewport.
-          line = '…'
-          used = 1
+        if (!line) { // Replace an unfit wide glyph; continue with the next.
+          lines.push('…')
           continue
         }
         lines.push(line)
-        if (lines.length >= maxLines) { truncated = true; break }
         line = ''
         used = 0
+        if (width > columns) {
+          lines.push('…')
+          continue
+        }
       }
       line += char
       used += width
     }
-    if (truncated) break
-    lines.push(line)
-    if (lines.length >= maxLines) {
-      truncated = sourceIndex < sourceLines.length - 1
-      break
-    }
+    if (line) lines.push(line)
   }
-  if (truncated) {
-    const last = Array.from(lines[maxLines - 1] ?? '')
+  if (lines.length > maxLines) {
+    const visible = lines.slice(0, maxLines)
+    const last = Array.from(visible[maxLines - 1] ?? '')
     while (last.reduce((sum, char) => sum + cellWidth(char), 0) + 1 > columns) last.pop()
-    lines[maxLines - 1] = `${last.join('').trimEnd()}…`
+    visible[maxLines - 1] = `${last.join('').trimEnd()}…`
+    return visible
   }
   return lines
 }
@@ -146,12 +153,14 @@ export function registerUi(
 ): void {
   let showOriginal = false
   let renderedWorkflowId: string | undefined
+  let panePlacement: 'inline' | 'dock' | undefined
   const drawnBands = new Set<string>()
   const bandKey = (id: string, surface: string) => `${id}:${surface}`
   const observeWorkflow = (workflow: Workflow | null): void => {
     if (renderedWorkflowId === workflow?.id) return
     renderedWorkflowId = workflow?.id
     showOriginal = false
+    panePlacement = undefined
     drawnBands.clear()
   }
 
@@ -160,7 +169,7 @@ export function registerUi(
     observeWorkflow(workflow)
     const eligible = workflow && !e.props.hasSurvey && !e.props.view.agentId
       && (e.surface === 'terminal' || e.surface === 'desktop')
-      && !(workflow.ui === 'pane' && isCompactViewport(e.viewport))
+      && !(workflow.ui === 'pane' && panePlacement === 'inline' && isCompactViewport(e.viewport))
     const key = workflow ? bandKey(workflow.id, e.surface) : undefined
     if (!eligible || !workflow || !key) {
       if (key && drawnBands.delete(key)) $.ui.invalidate('ui.render')
@@ -198,6 +207,10 @@ export function registerUi(
     const Input = 'Input' in elements ? elements.Input : undefined
     const workflow = controller.getState().workflow
     observeWorkflow(workflow)
+    if (workflow?.ui === 'pane' && panePlacement !== e.props.placement) {
+      panePlacement = e.props.placement
+      $.ui.invalidate('ui.render')
+    }
     if (!workflow) return <Text>진행 중인 개선 작업이 없습니다</Text>
     if (workflow.ui === 'composer') return <Text>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
 
@@ -236,7 +249,7 @@ export function registerUi(
     if (e.props.placement === 'inline' && isCompactViewport(e.viewport)) {
       // Derive the budget from the viewport, never the rendered bodyRows:
       // inline panes shrink to their own content height and can feed that back.
-      const estimatedRows = Math.min(PANE_ROWS, Math.max(4, Math.floor(e.viewport!.rows / 4)))
+      const estimatedRows = estimatedCompactRows(e.viewport!)
       const previewLines = Math.max(1, estimatedRows - 3)
       const previewColumns = Math.max(1, e.props.bodyColumns - 2)
       const preview = workflow.draft.trim()
@@ -270,16 +283,17 @@ export function registerUi(
               pane from shrinking to the compact controls and preserves context. */}
           <Box marginTop={1} flexDirection="column">
             <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
-            {message && <Box flexDirection="column">
+            {message && preview !== message && <Box flexDirection="column">
               <Text bold>옵티마이저 메시지</Text>
               <Text wrap="wrap">{message}</Text>
             </Box>}
             <Text bold>원문</Text>
             <Text wrap="wrap">{originalPreview}</Text>
-            {busy
+            {originalChars.length > 180 && (busy
               ? <Text dimColor>0: {originalToggleLabel} (사용 불가)</Text>
-              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />}
-            {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
+              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />)}
+            {workflow.lastError && preview !== `오류: ${workflow.lastError}` &&
+              <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
           </Box>
         </Box>
       )
