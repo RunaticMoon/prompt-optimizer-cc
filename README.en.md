@@ -124,6 +124,7 @@ Skill-directory scaffolding (`claude plugin init|new`) is not provided by this r
 ### 4.2 Pane buttons and key flow
 
 The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its height is 18 rows, focus is taken on the requested pane, and it can be closed with Esc (`hooks/ui/ui-ports.ts`).
+On terminal and desktop, the band directly above the prompt shows the **original** (a 180-character preview by default) above the **full improved draft**. The pane keeps its phase/round/token header, key hint, actions, refinement input, full latest optimizer message, original toggle, and error/progress state. On surfaces where the band has not rendered, the pane also shows the full original and draft.
 
 | Button / input | Behavior |
 |---|---|
@@ -139,12 +140,11 @@ If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력
 | `1` | Put in prompt box; edit then send (`입력창에 넣기`) |
 | `2` | Send improved draft now (`개선안 바로 전송`) |
 | `3` | Send original unchanged (`원문 그대로 전송`) |
-| `0` | Show / hide full original (shown when the original exceeds 24 characters in a narrow layout or 180 in a wide layout) |
+| `0` | Show / hide the full original in the band (shown when the original exceeds 180 characters) |
 
 `Cmd+Enter` is unsupported in the Pane: the Mods API accepts only one digit or lowercase letter for a Button `hotkey`. Use `2` to send immediately.
 
-Displayed state: it shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중` — collecting / generating / reviewing / failed / delivering / sending), `n/최대회` (n/max rounds), the total returned tokens, the current draft, the latest optimizer message in its own section, and the original summary. The original toggle appears when the original exceeds 24 characters in a narrow layout (pane body at most 90 columns) or 180 characters in a wide layout.
-On a narrow terminal, the pane's limited height may put the original below the first screen. Use `Tab` to move to the toggle or press `0` to access it.
+The pane shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중`), `n/최대회` (n/max rounds), total returned tokens, and the latest optimizer message. Read the original and improved draft in the band above the prompt; press `0` in the pane to expand or collapse an original longer than 180 characters.
 
 ### 4.3 Display by surface
 
