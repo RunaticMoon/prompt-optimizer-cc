@@ -5,8 +5,9 @@ description: Pick and apply the release label (semver:major, semver:minor, or sk
 
 # Release label
 
-Choose exactly one release label for a pull request into `main` and apply it with
-`gh`, so the merged PR bumps the plugin version correctly.
+Decide the release level of a pull request into `main` and label it with `gh`,
+so the merged PR bumps the plugin version correctly. A PR carries at most one of
+`semver:major`, `semver:minor`, `skip-release`; a patch release carries none.
 
 ## Why the label drives the version
 
@@ -65,13 +66,16 @@ Deployment-target files decide whether a release happens at all: `hooks/**` and
 `.gitignore`, and `.claude-plugin/marketplace.json` (the marketplace listing
 metadata, so changing it alone is not a deployment change).
 
-1. **semver:major** — a change that breaks existing user settings or usage:
+1. **skip-release** — no deployment-target file changed. This wins even when a
+   commit is marked breaking (`!` / `BREAKING CHANGE`): nothing ships, so
+   nothing is released.
+2. **semver:major** — a deployment-target change that breaks existing user
+   settings or usage:
    removing or renaming a `userConfig` key in `plugin.json`, removing an option
    value, changing a default so existing behavior changes materially, removing
    or changing the meaning of a `/optimize` subcommand or prefix
    (`raw`/`trigger`), raising the minimum Claude Code version, or a `!` in the
    commit subject / `BREAKING CHANGE` in the body.
-2. **skip-release** — no deployment-target file changed.
 3. **semver:minor** — a new user-visible feature: a new `userConfig` key or
    option value, a new command/subcommand/button/UI mode, or new behavior. A
    `feat:` commit that touches deployment-target files lands here by default.
@@ -83,15 +87,17 @@ state your reasoning and ask. If the user names a label, follow it.
 
 ## 4. Apply it
 
-A PR gets at most one release label. Add the chosen one and remove the other two.
+A PR gets at most one release label. Add the chosen one, and remove only the
+other release labels that are actually on the PR (check `labels` from
+`gh pr view <n> --json labels`):
 
 ```bash
-gh pr edit <n> --add-label "semver:minor" --remove-label "semver:major" --remove-label "skip-release"
+gh pr edit <n> --add-label "semver:minor" --remove-label "skip-release"
 ```
 
-For patch, remove all three release labels. Leave unrelated labels untouched. If
-no PR exists yet, pass `--label` to `gh pr create` or apply the label right after
-creation.
+For patch, remove whichever release labels are on the PR and add none. Leave
+unrelated labels untouched. If no PR exists yet, pass `--label` to
+`gh pr create` or apply the label right after creation.
 
 ## 5. Check safety before merging
 
