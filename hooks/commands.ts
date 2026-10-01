@@ -262,7 +262,9 @@ function portsOf($: EngineInterface): EnginePorts {
       cwd: () => $.session.cwd(),
       root: () => $.session.root(),
       repo: () => $.session.repo(),
+      model: () => $.session.model(),
     },
+    clock: { sleep: (ms, options) => $.clock.sleep(ms, options) },
     fs: {
       stat: path => $.fs.stat(path),
       read: ((path: string) => $.fs.read(path)) as unknown as EnginePorts['fs']['read'],
