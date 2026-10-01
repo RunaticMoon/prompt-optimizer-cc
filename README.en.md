@@ -134,7 +134,7 @@ The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its heigh
 | **취소** (Cancel) | Aborts the in-progress call (`AbortController`), restores the original text to the prompt box, and issues a bypass. It does not send automatically. Esc/closing the pane does the same. However, it is refused while transferring to the prompt box (`입력창으로 옮기는 중이라 취소할 수 없습니다`, "Cannot cancel while transferring to the prompt box") or while sending (`전송 중이라 취소할 수 없습니다`, "Cannot cancel while sending"). |
 | **보완 내용** (Refinement) input (`다듬기`, Refine) | Runs one more round with the entered refinement. |
 
-With the pane focused, press a digit to run its button. If the pane is unfocused, use `ctrl+x tab` to focus it first. `Tab` moves between buttons and inputs, and `Enter` presses the selected button. Arrow keys scroll instead of moving between buttons; `Esc` closes the pane.
+With the pane focused, press a digit to run its button. If the pane is unfocused, use `ctrl+x tab` to focus it first. `Tab` moves between buttons and inputs, and `Enter` presses the selected button. Arrow keys may scroll or move between buttons depending on the Claude Code version and focus state, so digits or `Tab` are the reliable way; `Esc` closes the pane.
 
 | Digit | Button |
 |---|---|
