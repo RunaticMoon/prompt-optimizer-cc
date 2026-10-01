@@ -9,6 +9,8 @@ import type { EngineInterface } from 'claude-code'
 export interface OptimizerConfig {
   /** Whether the optimizer intercepts eligible submissions at all. */
   enabled: boolean
+  /** Whether the main session's model selects model-specific rewrite guidance. */
+  modelGuidance: boolean
   /** `always` intercepts every eligible prompt; `prefix` only prefixed ones. */
   triggerMode: TriggerMode
   /** Prefix that starts an optimization when `triggerMode` is `prefix`. */
@@ -287,6 +289,7 @@ export interface SubmitTarget {
 /** Default settings; the manifest `userConfig` states the same values. */
 export const DEFAULT_CONFIG: OptimizerConfig = {
   enabled: true,
+  modelGuidance: true,
   triggerMode: 'always',
   triggerPrefix: '?? ',
   rawPrefix: '::raw ',

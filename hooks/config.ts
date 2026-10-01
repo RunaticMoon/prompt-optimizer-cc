@@ -109,6 +109,16 @@ function validateKey(key: ConfigKey, raw: unknown): KeyResult {
       }
       return { value: parsed }
     }
+    case 'modelGuidance': {
+      const parsed = toBoolean(raw)
+      if (parsed === undefined) {
+        return {
+          value: DEFAULT_CONFIG.modelGuidance,
+          warning: `"modelGuidance" must be a boolean; using default ${DEFAULT_CONFIG.modelGuidance}`,
+        }
+      }
+      return { value: parsed }
+    }
     case 'triggerMode': {
       if (raw === 'always' || raw === 'prefix') return { value: raw }
       return {
