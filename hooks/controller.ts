@@ -86,6 +86,8 @@ export interface ControllerDeps {
   getConfig(): OptimizerConfig
   /** A state change or notification; the UI (K) subscribes. */
   onChange(state: Readonly<RuntimeState>, notice?: string): void
+  /** Rendered long-term memory for the snapshot; absent reads none. */
+  readMemory?(): string
 }
 
 /** What a submit hook should do with one submission. */
@@ -272,11 +274,19 @@ export function createController(deps: ControllerDeps): OptimizerController {
     // The snapshot is read once, on the first round.
     if (workflow.phase === 'idle') {
       apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
+      // The memory read is kept out of the snapshot's own try: a throwing
+      // reader is treated as no memory, so collection still happens. A snapshot
+      // failure is not a round failure either: continue without it.
+      let memory = ''
+      try {
+        memory = deps.readMemory?.() ?? ''
+      } catch {
+        memory = ''
+      }
       let context: ContextSnapshot | null = null
       try {
-        context = await collectContext(ports, config)
+        context = await collectContext(ports, config, memory)
       } catch {
-        // A snapshot failure is not a round failure: continue without it.
         context = null
       }
       if (context !== null) apply({ type: 'context', workflowId, generation, context })

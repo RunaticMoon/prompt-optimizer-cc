@@ -132,6 +132,10 @@ interface World {
   /** The simulated composer's current text. */
   box(): string
   setBox(text: string): void
+  /** The additionalContext the bottom `classic.SessionStart` hook returns. */
+  setSessionStartContext(entries: readonly string[] | undefined): void
+  /** The additionalContext the bottom `classic.UserPromptSubmit` hook returns. */
+  setPromptSubmitContext(entries: readonly string[] | undefined): void
   /** Starts the session (the plugin wires itself on this). */
   start(): Promise<void>
   /** A composer submission, with the emulated engine starting a turn on a pass. */
@@ -170,6 +174,8 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
   let sectionHooks = 0
   let sessionId = 'sess-1'
   let boxText = ''
+  let ssContext: readonly string[] | undefined
+  let upsContext: readonly string[] | undefined
   let behavior: ModelBehavior = () => answered(DRAFT)
   let fillFn: ((input: PromptFillInput) => { isFilled: boolean; refusal?: 'no_composer' | 'dialog' }) | null = null
 
@@ -239,6 +245,15 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     return { text: e.text }
   })
 
+  // The bottom classic hooks: the loaded plugin's `classic.*` hooks sit above
+  // them and observe their `additionalContext` through `next(e)`.
+  on('classic.SessionStart', () => ({
+    additionalContext: ssContext === undefined ? undefined : [...ssContext],
+  }))
+  on('classic.UserPromptSubmit', () => ({
+    additionalContext: upsContext === undefined ? undefined : [...upsContext],
+  }))
+
   const turnStart = async (): Promise<void> => {
     await $.turn.start({ text: '', turnId: `turn-${turns + 1}` })
   }
@@ -272,6 +287,12 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     box: () => boxText,
     setBox: text => {
       boxText = text
+    },
+    setSessionStartContext(entries) {
+      ssContext = entries === undefined ? undefined : [...entries]
+    },
+    setPromptSubmitContext(entries) {
+      upsContext = entries === undefined ? undefined : [...entries]
     },
     async start() {
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
@@ -748,6 +769,47 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(request?.system ?? '').toContain('JSON')
     expect((request?.prompt.length ?? 0) + (request?.system?.length ?? 0)).toBeLessThanOrEqual(16000)
     expect(request?.model).toBe('haiku')
+  })
+
+  // Long-term memory capture: the plugin's `classic.SessionStart` and
+  // `classic.UserPromptSubmit` hooks copy other plugins' `additionalContext`
+  // into the snapshot, and a fresh SessionStart clears the previous-prompt ones.
+  test('MEM · classic 메모리 포착이 옵티마이저 스냅샷에 실린다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // 1. A SessionStart context lands in the first request's snapshot.
+    w.setSessionStartContext(['MEM-SS-1'])
+    await $.classic.SessionStart({ source: 'startup' })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const first = w.completes[0]?.prompt ?? ''
+    expect(first).toContain('## Long-term memory')
+    expect(first).toContain('### Injected at session start')
+    expect(first).toContain('MEM-SS-1')
+
+    // 2. A later UserPromptSubmit context joins the next run's snapshot, beside
+    //    the session-start one.
+    await w.run('cancel')
+    w.setPromptSubmitContext(['MEM-UPS-1'])
+    await $.classic.UserPromptSubmit({ prompt: '이전 프롬프트' })
+    await w.run('두번째 원문')
+    await w.advance(1)
+    const second = w.completes[1]?.prompt ?? ''
+    expect(second).toContain('MEM-SS-1')
+    expect(second).toContain('### Injected for the previous prompt')
+    expect(second).toContain('MEM-UPS-1')
+
+    // 3. A fresh SessionStart clears the previous-prompt entries.
+    await w.run('cancel')
+    w.setSessionStartContext(['MEM-SS-2'])
+    await $.classic.SessionStart({ source: 'clear' })
+    await w.run('세번째 원문')
+    await w.advance(1)
+    const third = w.completes[2]?.prompt ?? ''
+    expect(third).toContain('MEM-SS-2')
+    expect(third).not.toContain('MEM-UPS-1')
+    expect(third).not.toContain('### Injected for the previous prompt')
   })
 
   // The pane UI path: mount the real Pane and press its accept button.

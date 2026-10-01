@@ -925,3 +925,82 @@ describe('scheduled work', () => {
     expect(h.notices).toContain('보완 요청을 처리하지 못했습니다: repaint failed')
   })
 })
+
+describe('readMemory — long-term memory folded into the snapshot', () => {
+  test('reads the rendered memory once per run and folds it into the first snapshot', async () => {
+    let reads = 0
+    const h = harness({
+      deps: {
+        readMemory: () => {
+          reads += 1
+          return '### Injected at session start\n세션 기억'
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(reads).toBe(1)
+    const context = h.controller.getState().workflow?.context
+    expect(context?.memory).toContain('세션 기억')
+    expect(context?.text).toContain('## Long-term memory')
+    expect(context?.text).toContain('세션 기억')
+    expect(h.completes[0]?.prompt).toContain('## Long-term memory')
+    expect(h.completes[0]?.prompt).toContain('세션 기억')
+
+    // The snapshot is read once: a later round reuses it, never re-reads.
+    await h.controller.refine(h.ports, '더 짧게')
+    expect(reads).toBe(1)
+  })
+
+  test('omits the memory when memoryContext is off', async () => {
+    let reads = 0
+    const h = harness({
+      config: { memoryContext: false },
+      deps: {
+        readMemory: () => {
+          reads += 1
+          return '숨겨야 할 기억'
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(reads).toBe(1)
+    expect(h.controller.getState().workflow?.context?.memory).toBe('')
+    expect(h.completes[0]?.prompt).not.toContain('숨겨야 할 기억')
+    expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
+  })
+
+  test('treats a throwing reader as no memory and keeps the round going', async () => {
+    const h = harness({
+      deps: {
+        readMemory: () => {
+          throw new Error('memory unavailable')
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.messages).toBe(1)
+    expect(h.calls.complete).toBe(1)
+    const workflow = h.controller.getState().workflow
+    expect(workflow?.phase).toBe('reviewing')
+    expect(workflow?.context?.memory).toBe('')
+  })
+
+  test('an absent reader leaves the memory section off the snapshot', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.controller.getState().workflow?.context?.memory).toBe('')
+    expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
+  })
+})

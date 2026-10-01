@@ -19,7 +19,12 @@
  *   refreshes `currentSchedule` for the controller.
  *
  * Events registered here, once each and without a matcher: `session.start`,
- * `session.end`, `prompt.submit`, `prompt.edit`, `prompt.fill`, `config.set`.
+ * `session.end`, `prompt.submit`, `prompt.edit`, `prompt.fill`, `config.set`,
+ * `classic.SessionStart` and `classic.UserPromptSubmit`. The two classic hooks
+ * only observe `next(e)`'s `additionalContext` for the memory snapshot and
+ * return the result unchanged; `SessionStart` also clears the previous-prompt
+ * entries, since a new session, `/clear` or a compact may leave none of the
+ * memory they retrieved present in the main context.
  * `registerUi`/`registerCommands` own `ui.render`/`ui.press`/`ui.input`/
  * `ui.close` and `command.run`, each under its matcher.
  */
@@ -28,9 +33,15 @@ import type { EngineInterface, On, PluginOptions } from 'claude-code'
 
 import { OPTIMIZE_COMMAND, registerCommands, type SettingsPort } from './commands'
 import { resolveConfig, validateConfigChange } from './config'
-import type { ConfigKey, EnginePorts, OptimizerConfig } from './contracts'
+import {
+  CONTEXT_MEMORY_CHARS,
+  type ConfigKey,
+  type EnginePorts,
+  type OptimizerConfig,
+} from './contracts'
 import { createController } from './controller'
 import { classifySubmission } from './eligibility'
+import { createMemoryStore, renderMemory } from './memory'
 import { createPresenter } from './ui/present'
 import { registerUi } from './ui/register'
 import { paneOpenArgs, type UiPorts } from './ui/ui-ports'
@@ -112,6 +123,7 @@ export function register(on: On, options: PluginOptions): void {
   let idCounter = 0
 
   const presenter = createPresenter()
+  const memory = createMemoryStore()
 
   const settings: SettingsPort = {
     get: getConfig,
@@ -134,6 +146,7 @@ export function register(on: On, options: PluginOptions): void {
       else void Promise.resolve().then(fn)
     },
     getConfig,
+    readMemory: () => renderMemory(memory.current(), CONTEXT_MEMORY_CHARS),
     onChange: (state, notice) => {
       if (currentUi !== null) presenter.present(currentUi, state, notice)
     },
@@ -270,6 +283,34 @@ export function register(on: On, options: PluginOptions): void {
           `prompt-optimizer: ${field} 값이 올바르지 않아 이전 값을 유지합니다: ${result.error}`,
         )
       }
+    }
+    return r
+  })
+
+  // The memory-capture hooks: they only observe, never change the chain. The
+  // result `r` is awaited first (a throwing `next` propagates untouched), the
+  // captured `additionalContext` is copied into the session's store, and the
+  // SAME `r` is returned. Recording is wrapped so a capture fault cannot break
+  // another plugin's settings hooks.
+  on('classic.SessionStart', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      memory.recordSessionStart(r.additionalContext)
+      // A new session (/clear, compact, resume) may leave none of the memory
+      // retrieved for the previous prompt in the main context, so drop it.
+      memory.recordPromptSubmit(undefined)
+    } catch {
+      // A capture fault must not break the chain.
+    }
+    return r
+  })
+
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      memory.recordPromptSubmit(r.additionalContext)
+    } catch {
+      // A capture fault must not break the chain.
     }
     return r
   })
