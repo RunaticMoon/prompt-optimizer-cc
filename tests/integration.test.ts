@@ -962,6 +962,86 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(next).not.toContain('MEM-EMPTY')
   })
 
+  // Subagent guard: a classic hook raised inside a subagent carries `agent_id`,
+  // and its settings hooks must not touch the main session's memory.
+  test('MEM · 서브에이전트(agent_id) classic 훅은 기억을 바꾸지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // The main thread captures its own memory first.
+    w.setSessionStartContext(['MEM-MAIN'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    w.setPromptSubmitContext(['MEM-MAIN-UPS'])
+    await $.classic.UserPromptSubmit({ prompt: '메인', session_id: w.sessionId() })
+
+    // The same id from a subagent carries new context: both hooks are ignored.
+    w.setSessionStartContext(['MEM-SUB'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId(), agent_id: 'sub-1' })
+    w.setPromptSubmitContext(['MEM-SUB-UPS'])
+    await $.classic.UserPromptSubmit({ prompt: '서브', session_id: w.sessionId(), agent_id: 'sub-1' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const prompt = w.completes[0]?.prompt ?? ''
+    expect(prompt).toContain('MEM-MAIN')
+    expect(prompt).toContain('MEM-MAIN-UPS')
+    expect(prompt).not.toContain('MEM-SUB')
+    expect(prompt).not.toContain('MEM-SUB-UPS')
+  })
+
+  // A UserPromptSubmit for a different session id must not adopt or replace the
+  // stored session's memory; session changes come from SessionStart alone.
+  test('MEM · 다른 session_id의 UserPromptSubmit이 현재 세션 기억을 덮지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-CUR'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+
+    w.setPromptSubmitContext(['MEM-OTHER'])
+    await $.classic.UserPromptSubmit({ prompt: '다른 세션', session_id: 'sess-other' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const prompt = w.completes[0]?.prompt ?? ''
+    expect(prompt).toContain('MEM-CUR')
+    expect(prompt).not.toContain('MEM-OTHER')
+
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Diagnostic split: the empty-id report has its own state, so toggling between
+  // an empty id and a mismatched (non-empty) id cannot make it repeat.
+  test('MEM · 빈 id와 불일치 id를 번갈아 보내도 각 진단은 1회만 남는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+
+    const noId = w.logs.filter(text => text.includes('carried no session_id'))
+    const differs = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(noId).toHaveLength(1)
+    expect(differs).toHaveLength(1)
+  })
+
+  // A `session.start` that yielded no id cannot compare, so the follow-the-
+  // classic-hook fallback is reported once for observability.
+  test('MEM · session.start id가 없으면 classic id 대체 사실을 1회 진단한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    await w.restartSession('')
+
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+
+    const missing = w.logs.filter(text => text.includes('session.start yielded no session id'))
+    expect(missing).toHaveLength(1)
+  })
+
   // The pane UI path: mount the real Pane and press its accept button.
   test('UI · pane 모드에서 ui.mount/press accept가 1회 채우고 우회한다', { options: { uiMode: 'pane' } }, async ($, on) => {
     const w = setup($, on)

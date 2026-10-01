@@ -25,10 +25,13 @@
  * return the result unchanged; both key what they capture by the classic
  * `e.session_id`, and the snapshot reads the last session recorded through it,
  * so `/clear` (which changes that id without a `session.start`) still follows
- * the classic hook. `SessionStart` also clears the previous-prompt entries,
+ * the classic hook. A hook raised inside a subagent (`e.agent_id` set) is
+ * ignored entirely, so a worker's own settings hooks cannot disturb the main
+ * session's memory. `SessionStart` also clears the previous-prompt entries,
  * since a new session, `/clear` or a compact may leave none of the memory they
- * retrieved present in the main context; `session.end` drops only the ending
- * session's memory, leaving an already captured next session's intact.
+ * retrieved present in the main context, and it is the only hook that changes
+ * the stored session; `session.end` drops only the ending session's memory,
+ * leaving an already captured next session's intact.
  * `registerUi`/`registerCommands` own `ui.render`/`ui.press`/`ui.input`/
  * `ui.close` and `command.run`, each under its matcher.
  */
@@ -125,9 +128,14 @@ export function register(on: On, options: PluginOptions): void {
   let currentUi: UiPorts | null = null
   let currentSchedule: ((fn: () => void) => void) | null = null
   let idCounter = 0
-  // The last classic `session_id` a memory diagnostic was logged for; a shared
-  // classic id reports at most once (see the classic hooks below).
-  let lastDiagnosedClassicId: string | null = null
+  // Memory diagnostics, split so each kind is reported once independently (a
+  // shared classic id reports at most once; see the classic hooks below):
+  // `emptyIdReported` covers an id that cannot key the store, `lastMismatchId`
+  // covers an id that differs from `session.start`'s (e.g. after `/clear`), and
+  // `missingStartIdReported` covers a `session.start` that yielded no id at all.
+  let emptyIdReported = false
+  let lastMismatchId: string | null = null
+  let missingStartIdReported = false
 
   const presenter = createPresenter()
   const memory = createMemoryStore()
@@ -164,19 +172,26 @@ export function register(on: On, options: PluginOptions): void {
    * needs none. An id that is missing, empty or not a string cannot key the
    * memory store, so it is reported once and the caller skips recording for it;
    * an id that differs from the id `session.start` recorded (as after a
-   * `/clear`) is reported once so the mismatch is visible. The note is the
-   * message to log; `lastDiagnosedClassicId` remembers the id last reported, so
-   * a repeated id stays silent.
+   * `/clear`) is reported once per id so the mismatch is visible; and a
+   * `session.start` that yielded no id at all is reported once, since then
+   * every classic id "differs" and the follow-the-classic-hook fallback is the
+   * only path. Each kind keeps its own state, so toggling between them cannot
+   * make either repeat.
    */
   function classicIdDiagnostic(id: unknown): string | null {
     if (typeof id !== 'string' || id === '') {
-      if (lastDiagnosedClassicId === '') return null
-      lastDiagnosedClassicId = ''
+      if (emptyIdReported) return null
+      emptyIdReported = true
       return 'prompt-optimizer: a classic hook carried no session_id; long-term memory capture is skipped for it'
     }
     const sessionId = controller.getState().sessionId
-    if (sessionId === '' || sessionId === id || lastDiagnosedClassicId === id) return null
-    lastDiagnosedClassicId = id
+    if (sessionId === '') {
+      if (missingStartIdReported) return null
+      missingStartIdReported = true
+      return 'prompt-optimizer: session.start yielded no session id; long-term memory follows the classic hook id'
+    }
+    if (sessionId === id || lastMismatchId === id) return null
+    lastMismatchId = id
     return 'prompt-optimizer: classic hook session_id differs from the session.start id (e.g. after /clear); long-term memory follows the classic hook id'
   }
 
@@ -327,21 +342,24 @@ export function register(on: On, options: PluginOptions): void {
   })
 
   // The memory-capture hooks: they only observe, never change the chain. The
-  // result `r` is awaited first (a throwing `next` propagates untouched), the
+  // result `r` is awaited first (a throwing `next` propagates untouched), then
+  // a hook raised inside a subagent (`agent_id` set) is left alone — a worker's
+  // settings hooks must not disturb the main session's memory. Otherwise the
   // captured `additionalContext` is copied into the store under the classic
-  // hook's own `e.session_id`, and the SAME `r` is returned. Recording is
-  // wrapped so a capture fault cannot break another plugin's settings hooks.
-  // The classic `session_id` is the read key (the transcript file's name): the
-  // snapshot reads the last adopted session (`memory.latest()`), so a `/clear`
-  // that changes the id without a `session.start` still follows the classic
-  // hook. An id that is missing, empty or not a string cannot key the store, so
-  // it is not recorded at all; a diagnostic explains either case once per id,
-  // and sits in the same try so a logging fault cannot break the chain either.
+  // hook's own `e.session_id`, and the SAME `r` is returned. Recording runs
+  // first, wrapped so a capture fault cannot break another plugin's settings
+  // hooks; the diagnostic follows in its own `try`, so a logging fault cannot
+  // skip the capture. The classic `session_id` is the read key (the transcript
+  // file's name): the snapshot reads the last adopted session
+  // (`memory.latest()`), so a `/clear` that changes the id without a
+  // `session.start` still follows the classic hook. An id that is missing,
+  // empty or not a string cannot key the store, so it is not recorded at all;
+  // a diagnostic explains either case once per kind.
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
+    const agentId = (e as { agent_id?: unknown }).agent_id
+    if (typeof agentId === 'string' && agentId !== '') return r
     try {
-      const note = classicIdDiagnostic(e.session_id)
-      if (note !== null) $.ui.log(note, { to: 'debug' })
       if (typeof e.session_id === 'string' && e.session_id !== '') {
         memory.recordSessionStart(e.session_id, r.additionalContext)
         // A new session (/clear, compact, resume) may leave none of the memory
@@ -351,19 +369,31 @@ export function register(on: On, options: PluginOptions): void {
     } catch {
       // A capture fault must not break the chain.
     }
+    try {
+      const note = classicIdDiagnostic(e.session_id)
+      if (note !== null) $.ui.log(note, { to: 'debug' })
+    } catch {
+      // A logging fault must not undo the capture above.
+    }
     return r
   })
 
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const r = await next(e)
+    const agentId = (e as { agent_id?: unknown }).agent_id
+    if (typeof agentId === 'string' && agentId !== '') return r
     try {
-      const note = classicIdDiagnostic(e.session_id)
-      if (note !== null) $.ui.log(note, { to: 'debug' })
       if (typeof e.session_id === 'string' && e.session_id !== '') {
         memory.recordPromptSubmit(e.session_id, r.additionalContext)
       }
     } catch {
       // A capture fault must not break the chain.
+    }
+    try {
+      const note = classicIdDiagnostic(e.session_id)
+      if (note !== null) $.ui.log(note, { to: 'debug' })
+    } catch {
+      // A logging fault must not undo the capture above.
     }
     return r
   })

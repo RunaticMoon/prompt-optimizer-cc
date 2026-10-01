@@ -116,14 +116,27 @@ describe('createMemoryStore', () => {
     expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
   })
 
-  test('a new session id drops the previous session\'s memory on a prompt record too', () => {
+  test('a prompt record for a different session does not steal the stored slot', () => {
     const store = createMemoryStore()
     store.recordSessionStart('sess-a', ['s1'])
 
+    // A UserPromptSubmit from another session must not adopt: only
+    // `SessionStart` changes the stored session.
     store.recordPromptSubmit('sess-b', ['p1'])
 
+    expect(store.storedSessionId()).toBe('sess-a')
+    expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.latest()).toEqual({ sessionStart: ['s1'], lastPrompt: [] })
+  })
+
+  test('a prompt record adopts when the store is still empty', () => {
+    const store = createMemoryStore()
+
+    store.recordPromptSubmit('sess-b', ['p1'])
+
+    expect(store.storedSessionId()).toBe('sess-b')
     expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: ['p1'] })
-    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.latest()).toEqual({ sessionStart: [], lastPrompt: ['p1'] })
   })
 
   test('latest() and storedSessionId() start empty', () => {

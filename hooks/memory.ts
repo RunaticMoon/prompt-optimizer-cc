@@ -8,13 +8,16 @@
  * the store holds into the bounded "Long-term memory" section that
  * `collectContext` in `context.ts` folds into the snapshot.
  *
- * The store holds one session at a time: each record carries the classic hook's
- * `e.session_id`, and the first record for a new id adopts it, dropping the
- * previous session's memory. The snapshot reads through
- * {@link MemoryStore.latest}, which follows the classic hook's id: `/clear`
- * changes that id without a `session.start`, so the new session's SessionStart
- * (with no `session.start` behind it) is still what the next request sees.
- * {@link MemoryStore.current} stays for callers that must key by a known id,
+ * The store holds one session at a time. Each record carries the classic hook's
+ * `e.session_id`. `classic.SessionStart` adopts a new id (dropping the previous
+ * session's memory), but `classic.UserPromptSubmit` only fills an empty store:
+ * a prompt from a different, already-stored session cannot steal the slot, so
+ * session changes follow `SessionStart` alone (`/clear`, resume and fork all
+ * raise it). The snapshot reads through {@link MemoryStore.latest}, which
+ * follows the classic hook's id: `/clear` changes that id without a
+ * `session.start`, so the new session's SessionStart is still what the next
+ * request sees. {@link MemoryStore.current} and
+ * {@link MemoryStore.storedSessionId} stay for queries, diagnostics and tests,
  * and `session.end` clears only the ending session's record.
  */
 
@@ -23,7 +26,11 @@ import type { CapturedMemory } from './contracts'
 
 /** Holds the latest memory observed for the most recently recorded session. */
 export interface MemoryStore {
-  /** The captured memory for `sessionId`; empty unless it is the stored session. */
+  /**
+   * The captured memory for `sessionId`; empty unless it is the stored session.
+   * Queries, diagnostics and tests only: the snapshot reads through
+   * {@link MemoryStore.latest}.
+   */
   current(sessionId: string): CapturedMemory
   /**
    * The captured memory for the session the store last adopted, whatever its
@@ -32,11 +39,21 @@ export interface MemoryStore {
    * `session.start`.
    */
   latest(): CapturedMemory
-  /** The id of the session the store last adopted, or `''` when none has been. */
+  /**
+   * The id of the session the store last adopted, or `''` when none has been.
+   * Queries, diagnostics and tests only: the snapshot reads through
+   * {@link MemoryStore.latest}.
+   */
   storedSessionId(): string
   /** Replaces the session-start entries for `sessionId` (`undefined` clears them). */
   recordSessionStart(sessionId: string, entries: readonly string[] | undefined): void
-  /** Replaces the previous-prompt entries for `sessionId` (`undefined` clears them). */
+  /**
+   * Replaces the previous-prompt entries for `sessionId` (`undefined` clears
+   * them). Adopts `sessionId` only when the store is empty; a different,
+   * non-empty stored id is left untouched, so a UserPromptSubmit from another
+   * session cannot take the slot (session changes come from
+   * {@link MemoryStore.recordSessionStart}).
+   */
   recordPromptSubmit(sessionId: string, entries: readonly string[] | undefined): void
   /**
    * Clears the store only when `sessionId` is the stored session; a different
@@ -88,6 +105,10 @@ export function createMemoryStore(): MemoryStore {
       sessionStart = clean(entries)
     },
     recordPromptSubmit(id: string, entries: readonly string[] | undefined): void {
+      // A UserPromptSubmit never changes the session: it only fills an empty
+      // store. A different stored id means another session already holds the
+      // slot, so this record is ignored rather than adopting it away.
+      if (sessionId !== '' && id !== sessionId) return
       adopt(id)
       lastPrompt = clean(entries)
     },
