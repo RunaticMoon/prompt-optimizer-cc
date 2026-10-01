@@ -168,6 +168,45 @@ describe('optimizer UI', () => {
     expect(drawn).not.toContain('명령: /optimize accept')
   })
 
+  test('pane buttons expose visible digit hotkeys and focus guidance in both layouts', async ($, on) => {
+    const item = workflow()
+    item.original = '긴 원문 '.repeat(40)
+    const current = state(item)
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+
+    for (const columns of [80, 110]) {
+      const pane = { ...PANE, viewport: { columns, rows: 40 } }
+      const drawn = textOf(await ui.render(pane))
+      for (const [digit, label] of [
+        ['1', '입력창으로 가져오기'], ['2', '바로 보내기'],
+        ['3', '원문 보내기'], ['4', '다시 다듬기'], ['5', '취소'],
+      ]) {
+        expect(drawn).toContain(`"hotkey":"${digit}"`)
+        expect(drawn).toContain(`"label":"${digit}: ${label}"`)
+      }
+      expect(drawn).toContain('"hotkey":"0"')
+      expect(drawn).toContain('"plain":true')
+      expect(drawn).toContain('숫자키 실행 · Tab 이동 · Enter 선택 · Esc 닫기')
+
+      const unfocused = textOf(await ui.render({ ...pane, props: { ...PANE.props, isFocused: false } }))
+      expect(unfocused).toContain('ctrl+x tab으로 포커스')
+    }
+
+    current.workflow = workflow('generating')
+    const disabled = textOf(await ui.render(PANE))
+    for (const label of ['1: 입력창으로 가져오기', '2: 바로 보내기', '3: 원문 보내기', '4: 다시 다듬기']) {
+      expect(disabled).toContain(`${label} · 사용 불가`)
+    }
+
+    current.workflow = { ...item, phase: 'sending' }
+    for (const columns of [80, 110]) {
+      const sending = textOf(await ui.render({ ...PANE, viewport: { columns, rows: 40 } }))
+      expect(sending).toContain('5: 취소 · 사용 불가')
+      expect(sending).toContain('0: 원문 전체 보기 · 사용 불가')
+    }
+  })
+
   test('80-column pane keeps the header and all actions before a long draft', async ($, on) => {
     const item = workflow()
     item.original = '오래된 원문 '.repeat(30)
@@ -211,14 +250,14 @@ describe('optimizer UI', () => {
 
     current.workflow = workflow('generating')
     const busy = textOf(await ui.render(PANE))
-    expect(busy).toContain('입력창으로 가져오기 · 사용 불가')
+    expect(busy).toContain('1: 입력창으로 가져오기 · 사용 불가')
     expect(busy).toContain('잠시 기다려 주세요.')
     await press('optimizer:accept')
     expect(calls).toHaveLength(actions.length)
 
     current.workflow = { ...workflow('failed'), draft: '', lastError: '다시 시도할 수 있습니다.' }
     const failed = textOf(await ui.render(PANE))
-    expect(failed).toContain('입력창으로 가져오기 · 사용 불가')
+    expect(failed).toContain('1: 입력창으로 가져오기 · 사용 불가')
     expect(failed).toContain('다시 시도할 수 있습니다.')
     await press('optimizer:send')
     expect(calls).toHaveLength(actions.length)
