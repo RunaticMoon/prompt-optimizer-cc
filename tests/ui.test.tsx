@@ -5,7 +5,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { OptimizerController } from '../hooks/controller'
 import { PANE_ID } from '../hooks/controller'
 import { DEFAULT_CONFIG, type RuntimeState, type Workflow } from '../hooks/contracts'
-import { createPresenter } from '../hooks/ui/present'
+import { COMPOSER_GUIDE, createPresenter } from '../hooks/ui/present'
 import { handlePaneClose, registerUi } from '../hooks/ui/register'
 import { paneOpenArgs, type UiPorts } from '../hooks/ui/ui-ports'
 
@@ -84,7 +84,7 @@ type CapturedHook = (...args: unknown[]) => unknown
  * `ui.render`'s hook calls `$.ui.resolve(e)`, available only on the hook-side
  * `$`; the probe session.start hook captures one so the render hook can draw.
  */
-async function captureUi($: Engine, on: On, controller: OptimizerController, omittedControl?: 'Button' | 'Input', focusCalls?: string[], focusFail?: 'deny' | 'throw'): Promise<{
+async function captureUi($: Engine, on: On, controller: OptimizerController, omittedControl?: 'Button' | 'Input', focusCalls?: string[], focusFail?: 'deny' | 'throw', renderInvalidations?: string[]): Promise<{
   render: (e: RenderInput<'Pane' | 'AbovePrompt'>) => Promise<unknown>
   press: (e: unknown) => Promise<unknown>
   input: (e: unknown) => Promise<unknown>
@@ -116,13 +116,16 @@ async function captureUi($: Engine, on: On, controller: OptimizerController, omi
             return focusFail === 'deny' ? { deny: 'the ring did not move' } : {}
           },
         } }
-      : event === 'ui.render' && omittedControl
+      : event === 'ui.render' && (omittedControl || renderInvalidations)
       ? {
           ui: {
-            invalidate: (kind: 'ui.render') => (hook$ as EngineInterface).ui.invalidate(kind),
+            invalidate: (kind: 'ui.render') => {
+              renderInvalidations?.push(kind)
+              if (!renderInvalidations) (hook$ as EngineInterface).ui.invalidate(kind)
+            },
             resolve: async (input: RenderInput<'Pane' | 'AbovePrompt'>) => {
               const table = await (hook$ as EngineInterface).ui.resolve(input)
-              return { ...table, [omittedControl]: undefined }
+              return omittedControl ? { ...table, [omittedControl]: undefined } : table
             },
           },
         }
@@ -145,11 +148,11 @@ describe('optimizer UI', () => {
     expect(drawn).toContain('원래 요청')
     expect(drawn).toContain('↓ 개선안')
     expect(drawn).toContain('한국어로 작성한 개선안입니다.')
-    expect(drawn).not.toContain('"hotkey"')
+    expect(drawn.indexOf('원문')).toBeLessThan(drawn.indexOf('↓ 개선안'))
+    for (const control of ['Button', 'Input', 'Select', '"hotkey"']) expect(drawn).not.toContain(control)
 
     for (const [item, props] of [
       [null, BAND.props],
-      [{ ...workflow(), ui: 'composer' }, BAND.props],
       [workflow(), { ...BAND.props, hasSurvey: true }],
       [workflow(), { ...BAND.props, view: { agentId: 'agent-1' } }],
     ] as const) {
@@ -157,6 +160,51 @@ describe('optimizer UI', () => {
       expect(await ui.render({ ...BAND, props })).toEqual({ inner: { ...BAND, props } })
     }
     expect(textOf(await ui.render(PANE))).toContain('한국어로 작성한 개선안입니다.')
+  })
+
+  test('composer band shows the full original, draft, and shared guide', async ($, on) => {
+    const item = { ...workflow(), ui: 'composer' as const, original: '긴 원문 '.repeat(40) }
+    const current = state(item)
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const drawn = textOf(await ui.render(BAND))
+    expect(drawn).toContain(item.original)
+    expect(drawn).toContain(item.draft)
+    expect(drawn).toContain(COMPOSER_GUIDE)
+    expect(drawn.indexOf('원문')).toBeLessThan(drawn.indexOf('↓ 개선안'))
+    expect(drawn.indexOf('↓ 개선안')).toBeLessThan(drawn.indexOf(COMPOSER_GUIDE))
+    expect(drawn).toContain('"dimColor":true')
+    expect(drawn).toContain('"wrap":"truncate-end"')
+    for (const control of ['Button', 'Input', 'Select', '"hotkey"']) expect(drawn).not.toContain(control)
+
+    current.workflow = { ...item, phase: 'generating', draft: '' }
+    expect(textOf(await ui.render(BAND))).toContain('개선안을 준비하고 있습니다…')
+    current.workflow = { ...item, phase: 'failed', draft: '' }
+    expect(textOf(await ui.render(BAND))).toContain('아직 개선안이 없습니다.')
+  })
+
+  test('band eligibility transitions restore the pane fallback and invalidate once', async ($, on) => {
+    const current = state(workflow())
+    const { controller } = fakeController(current)
+    const invalidations: string[] = []
+    const ui = await captureUi($, on, controller, undefined, undefined, undefined, invalidations)
+    const ineligible = [
+      { ...BAND, props: { ...BAND.props, hasSurvey: true } },
+      { ...BAND, props: { ...BAND.props, view: { agentId: 'agent-1' } } },
+    ]
+    for (const event of ineligible) {
+      expect(textOf(await ui.render(BAND))).toContain('원래 요청')
+      await ui.render(BAND)
+      expect(invalidations).toHaveLength(1)
+      expect(textOf(await ui.render(PANE))).not.toContain('한국어로 작성한 개선안입니다.')
+      expect(await ui.render(event)).toEqual({ inner: event })
+      await ui.render(event)
+      expect(invalidations).toHaveLength(2)
+      const fallback = textOf(await ui.render(PANE))
+      expect(fallback).toContain('원래 요청')
+      expect(fallback).toContain('한국어로 작성한 개선안입니다.')
+      invalidations.length = 0
+    }
   })
 
   test('band shows full draft, phase empties, and original toggle', async ($, on) => {
@@ -230,14 +278,22 @@ describe('optimizer UI', () => {
     expect(textOf(await ui.render(PANE))).toContain('개선 대화는 입력창에서 진행 중입니다')
   })
 
-  test('placed desktop and VS Code panes render the workflow', async ($, on) => {
+  test('desktop band owns the bodies while its pane keeps the controls', async ($, on) => {
     const { controller } = fakeController(state(workflow()))
     const ui = await captureUi($, on, controller)
-    for (const surface of ['desktop', 'vscode'] as const) {
-      const drawn = textOf(await ui.render({ ...PANE, surface }))
-      expect(drawn).toContain('프롬프트 옵티마이저')
-      expect(drawn).toContain('한국어로 작성한 개선안입니다.')
-    }
+    expect(textOf(await ui.render({ ...BAND, surface: 'desktop' }))).toContain('한국어로 작성한 개선안입니다.')
+    const drawn = textOf(await ui.render({ ...PANE, surface: 'desktop' }))
+    expect(drawn).toContain('프롬프트 옵티마이저')
+    expect(drawn).not.toContain('원래 요청')
+    expect(drawn).not.toContain('한국어로 작성한 개선안입니다.')
+  })
+
+  test('VS Code pane falls back to the full bodies without a band', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller)
+    const drawn = textOf(await ui.render({ ...PANE, surface: 'vscode' }))
+    expect(drawn).toContain('원래 요청')
+    expect(drawn).toContain('한국어로 작성한 개선안입니다.')
   })
 
   test('a pane without Button offers command actions in text', async ($, on) => {
@@ -534,7 +590,7 @@ describe('optimizer UI', () => {
   })
 
   test('pane args and presenter switch routes without duplicate composer logs', () => {
-    expect(paneOpenArgs()).toMatchObject({ id: PANE_ID, focus: true, closeOnEscape: true, rows: 18 })
+    expect(paneOpenArgs()).toMatchObject({ id: PANE_ID, focus: true, closeOnEscape: true, rows: 12 })
     const statuses: Array<string | undefined> = []
     const logs: string[] = []
     const toasts: string[] = []
@@ -554,11 +610,13 @@ describe('optimizer UI', () => {
     current.workflow = { ...workflow(), ui: 'composer' }
     presenter.present(ui, current, '준비됐습니다')
     presenter.present(ui, current, '준비됐습니다')
+    expect(invalidations).toBe(3)
     expect(statuses.at(-1)).toContain('/optimize accept(입력창으로)')
     expect(logs.filter((line) => line.startsWith('개선안:'))).toHaveLength(1)
     expect(logs.filter((line) => line === '준비됐습니다')).toHaveLength(1)
     current.workflow = null
     presenter.present(ui, current)
+    expect(invalidations).toBe(4)
     expect(statuses.at(-1)).toBeUndefined()
     expect(toasts).toHaveLength(0)
     expect(DEFAULT_CONFIG.maxRounds).toBe(3)
@@ -587,9 +645,10 @@ describe('optimizer UI', () => {
 
     current.workflow = { ...workflow(), ui: 'composer' }
     presenter.present(ui, current)
+    expect(invalidations).toBe(3)
     current.workflow = null
     presenter.present(ui, current)
     expect(closed).toEqual([PANE_ID])
-    expect(invalidations).toBe(2)
+    expect(invalidations).toBe(4)
   })
 })

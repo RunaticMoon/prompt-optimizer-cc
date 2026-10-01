@@ -36,6 +36,7 @@ export function createPresenter(): {
       const workflow = state.workflow
       if (!workflow) {
         const closedPane = lastWorkflowUi === 'pane'
+        const closedComposer = lastWorkflowUi === 'composer'
         lastWorkflowUi = undefined
         if (closedPane) {
           try {
@@ -43,8 +44,8 @@ export function createPresenter(): {
           } catch {
             // The pane may already have been closed by delivery or the user.
           }
-          ui.invalidate()
         }
+        if (closedPane || closedComposer) ui.invalidate()
         if (hadStatus) ui.status(undefined)
         activeId = undefined
         lastDraft = ''
@@ -76,6 +77,7 @@ export function createPresenter(): {
 
       ui.status(`옵티마이저 ${phaseLabel(workflow.phase)} (${workflow.rounds}회) · ${COMPOSER_GUIDE}`)
       hadStatus = true
+      ui.invalidate()
 
       const message = [...workflow.dialogue].reverse().find((item) => item.role === 'optimizer')?.text ?? ''
       if (message && message !== lastMessage) {

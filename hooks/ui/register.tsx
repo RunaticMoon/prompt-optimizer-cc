@@ -5,7 +5,10 @@ import type { EngineInterface, On } from 'claude-code'
 import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
-import { phaseLabel } from './present'
+import { COMPOSER_GUIDE, phaseLabel } from './present'
+
+const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
+const isBusy = (phase: Workflow['phase']): boolean => BUSY_PHASES.includes(phase)
 
 const KEYS = {
   original: 'optimizer:original',
@@ -45,7 +48,7 @@ function portsOf($: EngineInterface): EnginePorts {
 }
 
 function canAct(workflow: Workflow | null): workflow is Workflow {
-  return Boolean(workflow && !['idle', 'collecting', 'generating', 'transferring', 'sending'].includes(workflow.phase))
+  return Boolean(workflow && !isBusy(workflow.phase))
 }
 
 function latestOptimizerMessage(workflow: Workflow): string {
@@ -75,29 +78,32 @@ export function registerUi(
   let renderedWorkflowId: string | undefined
   const drawnBands = new Set<string>()
   const bandKey = (id: string, surface: string) => `${id}:${surface}`
+  const observeWorkflow = (workflow: Workflow | null): void => {
+    if (renderedWorkflowId === workflow?.id) return
+    renderedWorkflowId = workflow?.id
+    showOriginal = false
+    drawnBands.clear()
+  }
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const workflow = controller.getState().workflow
-    const eligible = workflow?.ui === 'pane' && !e.props.hasSurvey && !e.props.view.agentId
+    observeWorkflow(workflow)
+    const eligible = workflow && !e.props.hasSurvey && !e.props.view.agentId
       && (e.surface === 'terminal' || e.surface === 'desktop')
     const key = workflow ? bandKey(workflow.id, e.surface) : undefined
     if (!eligible || !workflow || !key) {
       if (key && drawnBands.delete(key)) $.ui.invalidate('ui.render')
-      if (!workflow) drawnBands.clear()
       return next(e)
     }
 
-    if (renderedWorkflowId !== workflow.id) {
-      renderedWorkflowId = workflow.id
-      showOriginal = false
-      drawnBands.clear()
-    }
     const { Box, Text } = await $.ui.resolve(e)
     const originalChars = Array.from(workflow.original)
-    const original = showOriginal || originalChars.length <= 180
+    const original = workflow.ui === 'composer' || showOriginal || originalChars.length <= 180
       ? workflow.original
       : `${originalChars.slice(0, 180).join('')}…`
-    const busy = ['idle', 'collecting', 'generating', 'transferring', 'sending'].includes(workflow.phase)
+    const busy = isBusy(workflow.phase)
+    // RenderResultOf has no accepted/denied signal for a tree. Keep the key
+    // stable as workflow.id+surface and invalidate only once per draw transition.
     if (!drawnBands.has(key)) {
       drawnBands.add(key)
       $.ui.invalidate('ui.render')
@@ -108,6 +114,7 @@ export function registerUi(
         <Text wrap="wrap">{original}</Text>
         <Text bold>↓ 개선안</Text>
         <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+        {workflow.ui === 'composer' && <Text dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}
       </Box>
     )
   })
@@ -119,16 +126,12 @@ export function registerUi(
     const { Box, Text, Button } = elements
     const Input = 'Input' in elements ? elements.Input : undefined
     const workflow = controller.getState().workflow
+    observeWorkflow(workflow)
     if (!workflow) return <Text>진행 중인 개선 작업이 없습니다</Text>
     if (workflow.ui === 'composer') return <Text>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
 
-    if (renderedWorkflowId !== workflow.id) {
-      renderedWorkflowId = workflow.id
-      showOriginal = false
-    }
-
     const maxRounds = getMaxRounds()
-    const busy = ['idle', 'collecting', 'generating', 'transferring', 'sending'].includes(workflow.phase)
+    const busy = isBusy(workflow.phase)
     const draftReady = Boolean(workflow.draft.trim()) && !busy
     const retryReady = !busy && workflow.rounds < maxRounds
     const tokens = Object.values(workflow.usage).reduce((sum, count) => sum + count, 0)
