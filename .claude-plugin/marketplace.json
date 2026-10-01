@@ -12,7 +12,8 @@
       "source": "./",
       "description": "Drafts and improves the prompt you are about to send, holding a short optimizer dialogue in its own state and putting a finished draft back in the prompt box.",
       "category": "productivity",
-      "homepage": "https://github.com/RunaticMoon/prompt-optimizer-cc"
+      "homepage": "https://github.com/RunaticMoon/prompt-optimizer-cc",
+      "license": "MIT"
     }
   ]
 }

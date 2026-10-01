@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "node scripts/check-types.mjs",
     "test": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .",
-    "validate": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .",
+    "validate": "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/marketplace.json && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json",
     "check:package": "node scripts/check-package.mjs"
   },
   "devDependencies": {

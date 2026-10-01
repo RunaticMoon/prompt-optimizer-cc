@@ -13,6 +13,7 @@
     "hooks",
     "claude-code"
   ],
+  "license": "MIT",
   "userConfig": {
     "enabled": {
       "type": "boolean",

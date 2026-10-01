@@ -282,7 +282,7 @@ Check commands:
 |---|---|---|
 | `npm run typecheck` | `node scripts/check-types.mjs` | Checks that the generated types exist, then runs `tsc -p tsconfig.json` |
 | `npm test` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .` | Runs the Mod tests (no API cost, mock engine) |
-| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .` | Validates the manifest and hooks |
+| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/marketplace.json && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json` | Validates the marketplace, manifest and hooks |
 | `npm run check:package` | `node scripts/check-package.mjs` | Checks that no generated types/references/official declarations are among the tracked files |
 
 File structure:

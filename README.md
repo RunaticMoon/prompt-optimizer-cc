@@ -282,7 +282,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 |---|---|---|
 | `npm run typecheck` | `node scripts/check-types.mjs` | 생성 타입 존재 확인 후 `tsc -p tsconfig.json` |
 | `npm test` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .` | Mod 테스트 실행(API 비용 없음, mock 엔진) |
-| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .` | 매니페스트·훅 검증 |
+| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/marketplace.json && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json` | 마켓플레이스·매니페스트·훅 검증 |
 | `npm run check:package` | `node scripts/check-package.mjs` | 추적 파일에 생성 타입/참조/공식 선언이 없는지 확인 |
 
 파일 구조:
