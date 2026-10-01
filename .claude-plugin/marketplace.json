@@ -1,0 +1,18 @@
+{
+  "name": "prompt-optimizer-cc",
+  "owner": {
+    "name": "RunaticMoon"
+  },
+  "metadata": {
+    "description": "Claude Code prompt-optimizer mod: drafts and improves a prompt before the main session sees it."
+  },
+  "plugins": [
+    {
+      "name": "prompt-optimizer",
+      "source": "./",
+      "description": "Drafts and improves the prompt you are about to send, holding a short optimizer dialogue in its own state and putting a finished draft back in the prompt box.",
+      "category": "productivity",
+      "homepage": "https://github.com/RunaticMoon/prompt-optimizer-cc"
+    }
+  ]
+}
