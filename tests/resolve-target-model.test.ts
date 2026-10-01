@@ -357,6 +357,71 @@ describe('resolveTargetModel — timer failure', () => {
   })
 })
 
+/** Ports whose `sleep` returns `value` without being awaitable. */
+function brokenSleepPorts(
+  h: Harness,
+  value: unknown,
+): Pick<EnginePorts, 'session' | 'clock'> {
+  return {
+    session: h.ports.session,
+    clock: { sleep: () => value } as unknown as NonNullable<EnginePorts['clock']>,
+  }
+}
+
+describe('resolveTargetModel — a sleep that never started', () => {
+  test('a non-thenable return does not reject; a ready getter still maps', async () => {
+    for (const value of [undefined, {}]) {
+      const h = harness({ model: async () => 'claude-opus-5-5[1m]' })
+
+      const result = await resolveTargetModel(
+        brokenSleepPorts(h, value),
+        true,
+        new AbortController().signal,
+      )
+
+      expect(result).toStrictEqual(
+        snap('claude-opus-5-5[1m]', 'claude-opus-5-5', 'opus-5-5', 'matched'),
+      )
+      expect(h.modelCalls()).toBe(1)
+    }
+  })
+
+  test('a non-thenable return with a pending getter is common/error', async () => {
+    for (const value of [undefined, {}]) {
+      const h = harness({ model: () => new Promise<string>(() => {}) })
+
+      const result = await resolveTargetModel(
+        brokenSleepPorts(h, value),
+        true,
+        new AbortController().signal,
+      )
+
+      expect(result).toStrictEqual(common('error'))
+      expect(h.modelCalls()).toBe(1)
+    }
+  })
+
+  test('a non-thenable return leaves no unhandled rejection', async () => {
+    const tracker = trackRejections()
+    const pending: Array<Promise<TargetModelSnapshot>> = []
+    for (const value of [undefined, {}]) {
+      const ready = harness({ model: async () => 'claude-opus-5-5[1m]' })
+      pending.push(
+        resolveTargetModel(brokenSleepPorts(ready, value), true, new AbortController().signal),
+      )
+      const stuck = harness({ model: () => new Promise<string>(() => {}) })
+      pending.push(
+        resolveTargetModel(brokenSleepPorts(stuck, value), true, new AbortController().signal),
+      )
+    }
+
+    await Promise.all(pending)
+    await macrotask()
+    expect(tracker.count()).toBe(0)
+    tracker.stop()
+  })
+})
+
 describe('resolveTargetModel — cancellation', () => {
   test('aborting during the race is common/cancelled and ends the timer', async () => {
     const h = harness({ model: () => new Promise<string>(() => {}) })

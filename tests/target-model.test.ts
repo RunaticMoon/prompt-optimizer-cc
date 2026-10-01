@@ -52,6 +52,10 @@ describe('normalizeTargetModel — allowlisted profiles', () => {
       ]),
     )
   })
+
+  test('the allowlist is frozen against accidental mutation', () => {
+    expect(Object.isFrozen(MODEL_PROFILE_BY_ID)).toBe(true)
+  })
 })
 
 describe('normalizeTargetModel — aliases without a version', () => {
@@ -126,6 +130,13 @@ describe('normalizeTargetModel — guard rails', () => {
   test('control characters anywhere in the raw string are refused', () => {
     for (const input of ['claude-opus-5-5\n', '\u0000opus', 'claude\topus-5-5']) {
       expect(normalizeTargetModel(input)).toStrictEqual(snap(input, null, 'common', 'unknown'))
+    }
+  })
+
+  test('C1 control characters are refused whole, preserving the raw value', () => {
+    for (const input of ['claude-opus-5-5\u0085', '\u0080opus', 'claude\u009fopus-5-5']) {
+      expect(normalizeTargetModel(input)).toStrictEqual(snap(input, null, 'common', 'unknown'))
+      expect(normalizeTargetModel(input).raw).toBe(input)
     }
   })
 })

@@ -18,8 +18,8 @@ import type {
 /** Longest accepted raw model string (UTF-16 code units); longer is `unknown`. */
 const MAX_RAW_LENGTH = 256
 
-/** Controls that make a raw string unusable for lookup. */
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+/** Controls that make a raw string unusable for lookup (C0, DEL and C1). */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/
 
 /** A single trailing 1M-context marker, removed from the lookup copy. */
 const LONG_CONTEXT_SUFFIX = /\[1m\]$/
@@ -38,7 +38,7 @@ const MODEL_GRAMMAR =
  * The exact allowlist of canonical ids that get a model-specific profile.
  * Every other formally valid id stays on `common` with reason `unlisted`.
  */
-export const MODEL_PROFILE_BY_ID: Readonly<Record<string, GuidanceProfile>> = {
+export const MODEL_PROFILE_BY_ID: Readonly<Record<string, GuidanceProfile>> = Object.freeze({
   'claude-fable-5-1': 'fable-5-1',
   'claude-mythos-5-1': 'fable-5-1',
   'claude-fable-5': 'fable-5',
@@ -48,7 +48,7 @@ export const MODEL_PROFILE_BY_ID: Readonly<Record<string, GuidanceProfile>> = {
   'claude-opus-4-8': 'opus-4-8',
   'claude-sonnet-5-5': 'sonnet-5-5',
   'claude-sonnet-5': 'sonnet-5',
-}
+})
 
 function snapshot(
   raw: string | null,

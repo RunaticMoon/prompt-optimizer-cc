@@ -30,6 +30,16 @@ function common(reason: ModelResolutionReason): TargetModelSnapshot {
 }
 
 /**
+ * True when `value` can be awaited. A `sleep` that returns anything else has
+ * not really started a timer; awaiting it with `value.then` would instead throw
+ * synchronously and reject the outer promise, breaking the "always resolve"
+ * contract.
+ */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return value != null && typeof (value as { then?: unknown }).then === 'function'
+}
+
+/**
  * Resolves the target model for one optimizer round.
  *
  * @param ports the session and (optional) timer ports; only `session.model`
@@ -91,7 +101,7 @@ export function resolveTargetModel(
     }
 
     // 4. Start the timer. A synchronous throw is an `error`, not a hang.
-    let timer: Promise<void>
+    let timer: unknown
     try {
       timer = sleep(TARGET_MODEL_TIMEOUT_MS, { signal: timerController.signal })
     } catch {
@@ -99,11 +109,16 @@ export function resolveTargetModel(
       return
     }
     // Resolution is the elapsed 500 ms; a late rejection (our own abort once
-    // another branch has settled, or a host failure) is absorbed here.
-    timer.then(
-      () => finish(common('timeout')),
-      () => finish(common('error')),
-    )
+    // another branch has settled, or a host failure) is absorbed here. The
+    // `isThenable` guard keeps a non-thenable return out of `timer.then`, which
+    // would throw synchronously and reject this promise. Such a return means
+    // the sleep never started: an `error`, reported after the getter below.
+    if (isThenable(timer)) {
+      timer.then(
+        () => finish(common('timeout')),
+        () => finish(common('error')),
+      )
+    }
 
     // 5. Read the model. A synchronous throw is an `error`.
     let answer: Promise<unknown>
@@ -117,5 +132,13 @@ export function resolveTargetModel(
       raw => finish(normalizeTargetModel(raw)),
       () => finish(common('error')),
     )
+
+    // A timer that could not be awaited cannot bound the wait. Report it now
+    // that the getter's reaction is queued, so an already-ready getter keeps
+    // priority while a pending getter still ends in `common/error` rather than
+    // hanging forever.
+    if (!isThenable(timer)) {
+      Promise.resolve().then(() => finish(common('error')))
+    }
   })
 }
