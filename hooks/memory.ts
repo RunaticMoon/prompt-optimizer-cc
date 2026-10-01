@@ -3,25 +3,36 @@
  *
  * Pure: no `$`, no I/O, no clock. Other plugins inject long-term memory into
  * the main session through their settings hooks; the mod's own `classic.*`
- * hooks observe those `additionalContext` entries (wired in a later task) and
+ * hooks observe those `additionalContext` entries (wired in `register.ts`) and
  * hand them to {@link createMemoryStore}. {@link renderMemory} turns whatever
  * the store holds into the bounded "Long-term memory" section that
  * `collectContext` in `context.ts` folds into the snapshot.
+ *
+ * The store is scoped to one session at a time: each record carries the
+ * classic hook's `e.session_id`, and the first record for a new id drops the
+ * previous session's memory. Reading through {@link MemoryStore.current} with a
+ * different (or empty) id yields nothing, so a session that never saw its own
+ * `classic.SessionStart` cannot inherit the last session's memory.
  */
 
-import { CONTEXT_TRUNCATION_MARK } from './context'
+import { truncateHead } from './context'
 import type { CapturedMemory } from './contracts'
 
-/** Holds the latest memory observed for one session. */
+/** Holds the latest memory observed for the most recently recorded session. */
 export interface MemoryStore {
-  /** The current captured memory. */
-  current(): CapturedMemory
-  /** Replaces the session-start entries (`undefined` clears them). */
-  recordSessionStart(entries: readonly string[] | undefined): void
-  /** Replaces the previous-prompt entries (`undefined` clears them). */
-  recordPromptSubmit(entries: readonly string[] | undefined): void
-  /** Clears both fields. */
-  reset(): void
+  /** The captured memory for `sessionId`; empty unless it is the stored session. */
+  current(sessionId: string): CapturedMemory
+  /** Replaces the session-start entries for `sessionId` (`undefined` clears them). */
+  recordSessionStart(sessionId: string, entries: readonly string[] | undefined): void
+  /** Replaces the previous-prompt entries for `sessionId` (`undefined` clears them). */
+  recordPromptSubmit(sessionId: string, entries: readonly string[] | undefined): void
+  /**
+   * Clears the store only when `sessionId` is the stored session; a different
+   * or empty id leaves it untouched. Used at `session.end` so an already
+   * captured next session (e.g. a `/clear` whose SessionStart arrived first)
+   * survives the ending session's end.
+   */
+  resetSession(sessionId: string): void
 }
 
 /** Trims every entry and drops those that are empty (or whitespace only). */
@@ -37,20 +48,34 @@ function clean(entries: readonly string[] | undefined): string[] {
 
 /** A fresh store, backed by closure state. */
 export function createMemoryStore(): MemoryStore {
+  let sessionId = ''
   let sessionStart: string[] = []
   let lastPrompt: string[] = []
 
+  /** Adopts `id` as the stored session, dropping whatever the previous one held. */
+  const adopt = (id: string): void => {
+    if (id === sessionId) return
+    sessionId = id
+    sessionStart = []
+    lastPrompt = []
+  }
+
   return {
-    current(): CapturedMemory {
+    current(id: string): CapturedMemory {
+      if (id === '' || id !== sessionId) return { sessionStart: [], lastPrompt: [] }
       return { sessionStart: [...sessionStart], lastPrompt: [...lastPrompt] }
     },
-    recordSessionStart(entries: readonly string[] | undefined): void {
+    recordSessionStart(id: string, entries: readonly string[] | undefined): void {
+      adopt(id)
       sessionStart = clean(entries)
     },
-    recordPromptSubmit(entries: readonly string[] | undefined): void {
+    recordPromptSubmit(id: string, entries: readonly string[] | undefined): void {
+      adopt(id)
       lastPrompt = clean(entries)
     },
-    reset(): void {
+    resetSession(id: string): void {
+      if (id === '' || id !== sessionId) return
+      sessionId = ''
       sessionStart = []
       lastPrompt = []
     },
@@ -61,25 +86,6 @@ const SESSION_START_HEADING = '### Injected at session start'
 
 const LAST_PROMPT_HEADING =
   '### Injected for the previous prompt (not retrieved for this prompt)'
-
-function isHighSurrogate(code: number): boolean {
-  return code >= 0xd800 && code <= 0xdbff
-}
-
-/** First `end` characters, never splitting a surrogate pair. */
-function safeHead(text: string, end: number): string {
-  if (end >= text.length) return text
-  let cut = end < 0 ? 0 : end
-  if (cut > 0 && isHighSurrogate(text.charCodeAt(cut - 1))) cut -= 1
-  return text.slice(0, cut)
-}
-
-/** Keeps the head, appends the truncation marker, within `cap` characters. */
-function truncateHead(text: string, cap: number): string {
-  if (text.length <= cap) return text
-  if (cap <= CONTEXT_TRUNCATION_MARK.length) return safeHead(text, Math.max(0, cap))
-  return `${safeHead(text, cap - CONTEXT_TRUNCATION_MARK.length)}${CONTEXT_TRUNCATION_MARK}`
-}
 
 /**
  * Renders the captured memory as a bounded snapshot section. Both fields get

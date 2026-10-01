@@ -152,6 +152,8 @@ interface World {
   waitFor(predicate: () => boolean, spins?: number): Promise<void>
   endSession(): Promise<void>
   restartSession(id: string): Promise<void>
+  /** The harness session's id, i.e. what `$.session.id()` answers. */
+  sessionId(): string
 }
 
 /**
@@ -340,6 +342,7 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
       sessionId = id
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
     },
+    sessionId: () => sessionId,
   }
 }
 
@@ -774,13 +777,20 @@ describe('integration — session isolation and delivery accuracy', () => {
   // Long-term memory capture: the plugin's `classic.SessionStart` and
   // `classic.UserPromptSubmit` hooks copy other plugins' `additionalContext`
   // into the snapshot, and a fresh SessionStart clears the previous-prompt ones.
+  //
+  // The classic envelope's `session_id` is given explicitly and made to match
+  // `$.session.id()` (`w.sessionId()`, the value the harness's `session.id` hook
+  // answers). The kit stamps a classic call with the test session's own UUID
+  // otherwise, which no `session.id` hook can name; in the real engine both
+  // name the same session (the transcript file's name), which is the memory
+  // store's key.
   test('MEM · classic 메모리 포착이 옵티마이저 스냅샷에 실린다', { options: { uiMode: 'composer' } }, async ($, on) => {
     const w = setup($, on)
     await w.start()
 
     // 1. A SessionStart context lands in the first request's snapshot.
     w.setSessionStartContext(['MEM-SS-1'])
-    await $.classic.SessionStart({ source: 'startup' })
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
     await w.submit(ORIGINAL)
     await w.advance(1)
     const first = w.completes[0]?.prompt ?? ''
@@ -792,7 +802,7 @@ describe('integration — session isolation and delivery accuracy', () => {
     //    the session-start one.
     await w.run('cancel')
     w.setPromptSubmitContext(['MEM-UPS-1'])
-    await $.classic.UserPromptSubmit({ prompt: '이전 프롬프트' })
+    await $.classic.UserPromptSubmit({ prompt: '이전 프롬프트', session_id: w.sessionId() })
     await w.run('두번째 원문')
     await w.advance(1)
     const second = w.completes[1]?.prompt ?? ''
@@ -803,13 +813,70 @@ describe('integration — session isolation and delivery accuracy', () => {
     // 3. A fresh SessionStart clears the previous-prompt entries.
     await w.run('cancel')
     w.setSessionStartContext(['MEM-SS-2'])
-    await $.classic.SessionStart({ source: 'clear' })
+    await $.classic.SessionStart({ source: 'clear', session_id: w.sessionId() })
     await w.run('세번째 원문')
     await w.advance(1)
     const third = w.completes[2]?.prompt ?? ''
     expect(third).toContain('MEM-SS-2')
     expect(third).not.toContain('MEM-UPS-1')
     expect(third).not.toContain('### Injected for the previous prompt')
+  })
+
+  // L-2 regression: the memory store is session-scoped. Memory captured for
+  // session A must not leak into a new session (different id) that never sees
+  // its own classic SessionStart.
+  test('MEM · 새 세션은 classic SessionStart 없이 이전 세션 기억을 물려받지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-SS-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-SS-A')
+
+    // End session A and start session B without any classic SessionStart.
+    await w.run('cancel')
+    await w.endSession()
+    await w.restartSession('sess-2')
+
+    await w.submit('새 세션 원문')
+    await w.advance(1)
+    const next = w.completes[1]?.prompt ?? ''
+    expect(next).not.toContain('MEM-SS-A')
+    expect(next).not.toContain('## Long-term memory')
+  })
+
+  // L-2 follow-up: an ending session must not wipe a next session's memory that
+  // a classic SessionStart already captured before the end arrived (e.g. a
+  // `/clear` whose new session's SessionStart lands first). `resetSession`
+  // clears only the ending session's id.
+  test('MEM · 새 세션 SessionStart가 이전 세션 end보다 먼저 와도 새 세션 기억을 지우지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // Session A captures memory and shows it.
+    w.setSessionStartContext(['MEM-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-A')
+
+    // Session B's SessionStart arrives before A's end (the reverse of the
+    // usual order), keyed by B's id.
+    w.setSessionStartContext(['MEM-B'])
+    await $.classic.SessionStart({ source: 'clear', session_id: 'sess-2' })
+
+    // Now A's session.end fires; the harness still names A.
+    await w.endSession()
+
+    // B continues and its freshly captured memory is still there.
+    await w.restartSession('sess-2')
+    await w.submit('B 세션 원문')
+    await w.advance(1)
+    const br = w.completes[1]?.prompt ?? ''
+    expect(br).toContain('MEM-B')
+    expect(br).not.toContain('MEM-A')
   })
 
   // The pane UI path: mount the real Pane and press its accept button.

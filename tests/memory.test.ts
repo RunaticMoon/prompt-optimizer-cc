@@ -21,65 +21,109 @@ function sectionBody(text: string, heading: string): string {
 }
 
 describe('createMemoryStore', () => {
-  test('starts empty', () => {
+  test('starts empty for any id, including the empty one', () => {
     const store = createMemoryStore()
 
-    expect(store.current()).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.current('')).toEqual({ sessionStart: [], lastPrompt: [] })
   })
 
-  test('records each field independently and replaces on every call', () => {
+  test('records each field independently and replaces on every call, within one session', () => {
     const store = createMemoryStore()
 
-    store.recordSessionStart(['s1', 's2'])
-    store.recordPromptSubmit(['p1'])
-    expect(store.current()).toEqual({ sessionStart: ['s1', 's2'], lastPrompt: ['p1'] })
+    store.recordSessionStart('sess-a', ['s1', 's2'])
+    store.recordPromptSubmit('sess-a', ['p1'])
+    expect(store.current('sess-a')).toEqual({ sessionStart: ['s1', 's2'], lastPrompt: ['p1'] })
 
-    store.recordSessionStart(['s3'])
-    expect(store.current()).toEqual({ sessionStart: ['s3'], lastPrompt: ['p1'] })
+    store.recordSessionStart('sess-a', ['s3'])
+    expect(store.current('sess-a')).toEqual({ sessionStart: ['s3'], lastPrompt: ['p1'] })
 
-    store.recordPromptSubmit(['p2', 'p3'])
-    expect(store.current()).toEqual({ sessionStart: ['s3'], lastPrompt: ['p2', 'p3'] })
+    store.recordPromptSubmit('sess-a', ['p2', 'p3'])
+    expect(store.current('sess-a')).toEqual({ sessionStart: ['s3'], lastPrompt: ['p2', 'p3'] })
   })
 
   test('clears a field when recorded undefined', () => {
     const store = createMemoryStore()
-    store.recordSessionStart(['s1'])
-    store.recordPromptSubmit(['p1'])
+    store.recordSessionStart('sess-a', ['s1'])
+    store.recordPromptSubmit('sess-a', ['p1'])
 
-    store.recordSessionStart(undefined)
-    store.recordPromptSubmit(undefined)
+    store.recordSessionStart('sess-a', undefined)
+    store.recordPromptSubmit('sess-a', undefined)
 
-    expect(store.current()).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
   })
 
   test('trims entries and drops empty or whitespace-only ones', () => {
     const store = createMemoryStore()
 
-    store.recordSessionStart(['  keep  ', '', '   ', '\n', 'also'])
-    store.recordPromptSubmit(['\t\n  '])
+    store.recordSessionStart('sess-a', ['  keep  ', '', '   ', '\n', 'also'])
+    store.recordPromptSubmit('sess-a', ['\t\n  '])
 
-    expect(store.current()).toEqual({ sessionStart: ['keep', 'also'], lastPrompt: [] })
+    expect(store.current('sess-a')).toEqual({ sessionStart: ['keep', 'also'], lastPrompt: [] })
   })
 
-  test('reset clears both fields', () => {
+  test('resetSession clears both fields only for the stored session', () => {
     const store = createMemoryStore()
-    store.recordSessionStart(['s1'])
-    store.recordPromptSubmit(['p1'])
+    store.recordSessionStart('sess-a', ['s1'])
+    store.recordPromptSubmit('sess-a', ['p1'])
 
-    store.reset()
+    store.resetSession('sess-a')
 
-    expect(store.current()).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
+  })
+
+  test('resetSession leaves a different or empty id\'s memory untouched', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-b', ['s2'])
+    store.recordPromptSubmit('sess-b', ['p2'])
+
+    store.resetSession('sess-a')
+    store.resetSession('')
+
+    expect(store.current('sess-b')).toEqual({ sessionStart: ['s2'], lastPrompt: ['p2'] })
   })
 
   test('hands out a copy, so later records do not mutate an earlier read', () => {
     const store = createMemoryStore()
-    store.recordSessionStart(['s1'])
+    store.recordSessionStart('sess-a', ['s1'])
 
-    const read = store.current()
-    store.recordSessionStart(['s2'])
+    const read = store.current('sess-a')
+    store.recordSessionStart('sess-a', ['s2'])
 
     expect(read.sessionStart).toEqual(['s1'])
-    expect(store.current().sessionStart).toEqual(['s2'])
+    expect(store.current('sess-a').sessionStart).toEqual(['s2'])
+  })
+
+  test('reads nothing for a different or empty id', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-a', ['s1'])
+    store.recordPromptSubmit('sess-a', ['p1'])
+
+    expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.current('')).toEqual({ sessionStart: [], lastPrompt: [] })
+  })
+
+  test('a new session id drops the previous session\'s memory on the next record', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-a', ['s1'])
+    store.recordPromptSubmit('sess-a', ['p1'])
+
+    // The new session records only a SessionStart: the previous session's
+    // previous-prompt entries are gone, not carried over.
+    store.recordSessionStart('sess-b', ['s2'])
+
+    expect(store.current('sess-b')).toEqual({ sessionStart: ['s2'], lastPrompt: [] })
+    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
+  })
+
+  test('a new session id drops the previous session\'s memory on a prompt record too', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-a', ['s1'])
+
+    store.recordPromptSubmit('sess-b', ['p1'])
+
+    expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: ['p1'] })
+    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
   })
 })
 

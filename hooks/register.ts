@@ -22,9 +22,12 @@
  * `session.end`, `prompt.submit`, `prompt.edit`, `prompt.fill`, `config.set`,
  * `classic.SessionStart` and `classic.UserPromptSubmit`. The two classic hooks
  * only observe `next(e)`'s `additionalContext` for the memory snapshot and
- * return the result unchanged; `SessionStart` also clears the previous-prompt
- * entries, since a new session, `/clear` or a compact may leave none of the
- * memory they retrieved present in the main context.
+ * return the result unchanged; both key what they capture by the classic
+ * `e.session_id`, so a session that never saw its own `SessionStart` reads
+ * nothing. `SessionStart` also clears the previous-prompt entries, since a new
+ * session, `/clear` or a compact may leave none of the memory they retrieved
+ * present in the main context; `session.end` drops only the ending session's
+ * memory, leaving an already captured next session's intact.
  * `registerUi`/`registerCommands` own `ui.render`/`ui.press`/`ui.input`/
  * `ui.close` and `command.run`, each under its matcher.
  */
@@ -146,7 +149,7 @@ export function register(on: On, options: PluginOptions): void {
       else void Promise.resolve().then(fn)
     },
     getConfig,
-    readMemory: () => renderMemory(memory.current(), CONTEXT_MEMORY_CHARS),
+    readMemory: () => renderMemory(memory.current(controller.getState().sessionId), CONTEXT_MEMORY_CHARS),
     onChange: (state, notice) => {
       if (currentUi !== null) presenter.present(currentUi, state, notice)
     },
@@ -197,7 +200,13 @@ export function register(on: On, options: PluginOptions): void {
   on('session.end', async ($, e, next) => {
     currentUi = null
     currentSchedule = null
+    // Read the ending session's id before `onSessionEnd` resets the state.
+    const endingSessionId = controller.getState().sessionId
     controller.onSessionEnd()
+    // Drop only the ending session's memory. A new session's classic
+    // SessionStart can arrive before this end (e.g. `/clear`), and its fresh
+    // memory must survive; a mismatched id leaves the store untouched.
+    memory.resetSession(endingSessionId)
     return next(e)
   })
 
@@ -289,16 +298,19 @@ export function register(on: On, options: PluginOptions): void {
 
   // The memory-capture hooks: they only observe, never change the chain. The
   // result `r` is awaited first (a throwing `next` propagates untouched), the
-  // captured `additionalContext` is copied into the session's store, and the
-  // SAME `r` is returned. Recording is wrapped so a capture fault cannot break
-  // another plugin's settings hooks.
+  // captured `additionalContext` is copied into the store under the classic
+  // hook's own `e.session_id`, and the SAME `r` is returned. Recording is
+  // wrapped so a capture fault cannot break another plugin's settings hooks.
+  // The engine's classic `session_id` is the session id (the transcript file's
+  // name); it is read by `controller.getState().sessionId` at snapshot time,
+  // which assumes the two name the same session.
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
     try {
-      memory.recordSessionStart(r.additionalContext)
+      memory.recordSessionStart(e.session_id, r.additionalContext)
       // A new session (/clear, compact, resume) may leave none of the memory
       // retrieved for the previous prompt in the main context, so drop it.
-      memory.recordPromptSubmit(undefined)
+      memory.recordPromptSubmit(e.session_id, undefined)
     } catch {
       // A capture fault must not break the chain.
     }
@@ -308,7 +320,7 @@ export function register(on: On, options: PluginOptions): void {
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const r = await next(e)
     try {
-      memory.recordPromptSubmit(r.additionalContext)
+      memory.recordPromptSubmit(e.session_id, r.additionalContext)
     } catch {
       // A capture fault must not break the chain.
     }

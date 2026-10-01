@@ -61,9 +61,11 @@ export interface SnapshotInput {
  *
  * Conversation is selected newest-first within the last `contextTurns` user
  * turns, then reordered oldest-first. When the overall budget is exceeded the
- * oldest conversation lines are dropped first; the fixed sections (rules,
- * location, memory, tools) stay. Single sections and single messages are
- * trimmed with a marker, never mid-surrogate.
+ * oldest conversation lines are dropped first; only if the assembled text
+ * still exceeds the budget with no conversation left does the final
+ * {@link truncateHead} cut the tail of the whole text, which may trim the
+ * fixed sections too (tools, then memory, location, rules in turn). Single
+ * sections and single messages are trimmed with a marker, never mid-surrogate.
  */
 export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
   const budget = Math.max(0, Math.min(input.contextMaxChars, CONTEXT_TOTAL_CHARS))
@@ -316,7 +318,11 @@ function safeTail(text: string, length: number): string {
 }
 
 /** Keeps the head, appends the truncation marker, within `cap` characters. */
-function truncateHead(text: string, cap: number, mark: string = CONTEXT_TRUNCATION_MARK): string {
+export function truncateHead(
+  text: string,
+  cap: number,
+  mark: string = CONTEXT_TRUNCATION_MARK,
+): string {
   if (text.length <= cap) return text
   if (cap <= mark.length) return safeHead(text, Math.max(0, cap))
   return `${safeHead(text, cap - mark.length)}${mark}`
