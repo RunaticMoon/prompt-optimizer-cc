@@ -134,7 +134,19 @@ The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its heigh
 | **취소** (Cancel) | Aborts the in-progress call (`AbortController`), restores the original text to the prompt box, and issues a bypass. It does not send automatically. Esc/closing the pane does the same. However, it is refused while transferring to the prompt box (`입력창으로 옮기는 중이라 취소할 수 없습니다`, "Cannot cancel while transferring to the prompt box") or while sending (`전송 중이라 취소할 수 없습니다`, "Cannot cancel while sending"). |
 | **보완 내용** (Refinement) input (`다듬기`, Refine) | Runs one more round with the entered refinement. |
 
-Displayed state: it shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중` — collecting / generating / reviewing / failed / delivering / sending), `n/최대회` (n/max rounds), the total returned tokens, the original summary (with an "원문 전체 보기", "View full original", toggle when over 180 characters), and the latest optimizer message.
+With the pane focused, press a digit to run its button. If the pane is unfocused, use `ctrl+x tab` to focus it first. `Tab` moves between buttons and inputs, and `Enter` presses the selected button. Arrow keys may scroll or move between buttons depending on the Claude Code version and focus state, so digits or `Tab` are the reliable way; `Esc` closes the pane.
+
+| Digit | Button |
+|---|---|
+| `1` | Bring to prompt box (`입력창으로 가져오기`) |
+| `2` | Send now (`바로 보내기`) |
+| `3` | Send original (`원문 보내기`) |
+| `4` | Refine again (`다시 다듬기`) |
+| `5` | Cancel (`취소`) |
+| `0` | Show / hide full original (shown when the original exceeds 24 characters in a narrow layout or 180 in a wide layout) |
+
+Displayed state: it shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중` — collecting / generating / reviewing / failed / delivering / sending), `n/최대회` (n/max rounds), the total returned tokens, the original summary, and the latest optimizer message. The original toggle appears when the original exceeds 24 characters in a narrow layout (pane body at most 90 columns) or 180 characters in a wide layout.
+On a narrow terminal, the pane's limited height may put the original below the first screen. Use `Tab` to move to the toggle or press `0` to access it.
 
 ### 4.3 Display by surface
 

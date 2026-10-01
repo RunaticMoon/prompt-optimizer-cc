@@ -117,6 +117,7 @@ export function registerUi(
     const originalSummary = originalChars.length > 180
       ? `${originalChars.slice(0, 180).join('')}…`
       : workflow.original
+    const originalToggleLabel = showOriginal ? '원문 접기' : '원문 전체 보기'
     const message = latestOptimizerMessage(workflow)
 
     // A surface without Button needs command text; mobile can still use its Button table.
@@ -139,21 +140,26 @@ export function registerUi(
     const actions = (
       <Box marginTop={1} flexDirection="row" flexWrap="wrap" gap={1}>
         {draftReady
-          ? <Button key={KEYS.accept} label="입력창으로 가져오기" variant="primary" autoFocus onPress={() => undefined} />
-          : <Text dimColor>[입력창으로 가져오기 · 사용 불가]</Text>}
+          ? <Button key={KEYS.accept} hotkey="1" label="1: 입력창으로 가져오기" variant="primary" autoFocus onPress={() => undefined} />
+          : <Text dimColor>[1: 입력창으로 가져오기 · 사용 불가]</Text>}
         {draftReady
-          ? <Button key={KEYS.send} label="바로 보내기" onPress={() => undefined} />
-          : <Text dimColor>[바로 보내기 · 사용 불가]</Text>}
+          ? <Button key={KEYS.send} hotkey="2" label="2: 바로 보내기" onPress={() => undefined} />
+          : <Text dimColor>[2: 바로 보내기 · 사용 불가]</Text>}
         {!busy
-          ? <Button key={KEYS.raw} label="원문 보내기" onPress={() => undefined} />
-          : <Text dimColor>[원문 보내기 · 사용 불가]</Text>}
+          ? <Button key={KEYS.raw} hotkey="3" label="3: 원문 보내기" onPress={() => undefined} />
+          : <Text dimColor>[3: 원문 보내기 · 사용 불가]</Text>}
         {retryReady
-          ? <Button key={KEYS.retry} label="다시 다듬기" onPress={() => undefined} />
-          : <Text dimColor>[다시 다듬기 · 사용 불가]</Text>}
+          ? <Button key={KEYS.retry} hotkey="4" label="4: 다시 다듬기" onPress={() => undefined} />
+          : <Text dimColor>[4: 다시 다듬기 · 사용 불가]</Text>}
         {cancelReady
-          ? <Button key={KEYS.cancel} label="취소" role="dismiss" onPress={() => undefined} />
-          : <Text dimColor>[취소 · 사용 불가]</Text>}
+          ? <Button key={KEYS.cancel} hotkey="5" label="5: 취소" role="dismiss" onPress={() => undefined} />
+          : <Text dimColor>[5: 취소 · 사용 불가]</Text>}
       </Box>
+    )
+    const keyHint = (
+      <Text dimColor wrap="wrap">{e.props.isFocused
+        ? '숫자키 실행 · Tab 이동 · Enter 선택 · Esc 닫기'
+        : 'ctrl+x tab으로 포커스 · 숫자키 실행 · Tab 이동 · Enter 선택 · Esc 닫기'}</Text>
     )
     const instruction = retryReady
       ? typeof Input === 'function'
@@ -168,6 +174,7 @@ export function registerUi(
         <Box flexDirection="column" paddingX={1}>
           <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
           {actions}
+          {keyHint}
           <Box marginTop={1} flexDirection="column">
             <Text bold>보완 요청</Text>
             {instruction}
@@ -180,8 +187,8 @@ export function registerUi(
             <Text bold>원문</Text>
             <Text wrap="wrap">{showOriginal ? workflow.original : previewText(workflow.original, Math.max(24, bodyColumns - 4), '…')}</Text>
             {originalChars.length > 24 && (busy
-              ? <Text dimColor>[원문 전체 보기 · 사용 불가]</Text>
-              : <Button key={KEYS.original} label={showOriginal ? '원문 접기' : '원문 전체 보기'} plain onPress={() => undefined} />)}
+              ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />)}
           </Box>
           {message && <Text wrap="wrap">{`옵티마이저: ${previewText(message, Math.max(32, bodyColumns - 4) * 2, '…')}`}</Text>}
           {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
@@ -198,8 +205,8 @@ export function registerUi(
           <Text wrap="wrap">{showOriginal ? workflow.original : originalSummary}</Text>
           {originalChars.length > 180 && (
             busy
-              ? <Text dimColor>[원문 전체 보기 · 사용 불가]</Text>
-              : <Button key={KEYS.original} label={showOriginal ? '원문 접기' : '원문 전체 보기'} plain onPress={() => undefined} />
+              ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />
           )}
         </Box>
         <Box marginTop={1} flexDirection="column">
@@ -224,6 +231,7 @@ export function registerUi(
           {instruction}
         </Box>
         {actions}
+        {keyHint}
       </Box>
     )
   })
