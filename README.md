@@ -396,14 +396,23 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 | `npm test` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .` | Mod 테스트 실행(API 비용 없음, mock 엔진) |
 | `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/marketplace.json && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json` | 마켓플레이스·매니페스트·훅 검증 |
 | `npm run check:package` | `node scripts/check-package.mjs` | 추적 파일에 생성 타입/참조/공식 선언이 없는지 확인 |
+| `npm run version:bump` | `node scripts/bump-version.mjs <major\|minor\|patch\|X.Y.Z>` | 세 파일(`plugin.json`·`package.json`·`package-lock.json`)의 버전을 함께 올리고 새 버전을 출력 |
+| `npm run check:version` | `node scripts/bump-version.mjs --check` | 세 파일의 버전이 서로 일치하는지 확인 |
 
 파일 구조:
 
 ```text
+.claude/
+  skills/
+    release-label/
+      SKILL.md         # 머지 전 릴리스 라벨을 고르는 Claude Code 스킬
 .claude-plugin/
   plugin.json          # 매니페스트: 이름·userConfig 14개 키
   marketplace.json     # 마켓플레이스 정의(이름·owner·plugins)
   types/               # CLI가 생성, gitignore, 커밋 금지
+.github/
+  workflows/
+    version-bump.yml   # main 머지 후 버전 범프·커밋·태그
 hooks/
   hooks.json           # {"modules":["./register.ts"]}
   register.ts          # 조립: 설정 해석, 이벤트 6개 + UI/명령 연결
@@ -429,6 +438,7 @@ tests/                 # 모듈별 단위 테스트, UI 테스트, 스모크 테
 scripts/
   check-types.mjs
   check-package.mjs
+  bump-version.mjs     # 버전 올리기·일치 확인(--check)
 docs/
   DESIGN.md            # 설계 원문
   smoke.md             # 수동·검증자 스모크 절차
@@ -439,6 +449,23 @@ tsconfig.json          # .claude-plugin/types/tsconfig.json 확장
 
 - `.claude-plugin/types/`의 공식 타입 선언은 Anthropic 독점 라이선스라 저장소에 커밋하지 않는다(`.gitignore` + `scripts/check-package.mjs`가 강제).
 - 레퍼런스 폴더·공식 예제·공식 `.d.ts`도 복사해 커밋하지 않는다.
+
+### 8.1 버전·릴리스
+
+`main`에 PR이 머지되면 `Version bump` 워크플로(`.github/workflows/version-bump.yml`)가 실행되어 `.claude-plugin/plugin.json`, `package.json`, `package-lock.json`의 version을 올리고, `chore(release): vX.Y.Z` 커밋과 `vX.Y.Z` 주석 태그를 `main`에 push한다.
+
+| PR 라벨 | 올릴 단계 |
+|---|---|
+| `semver:major` | major |
+| `semver:minor` | minor |
+| (없음) | patch |
+| `skip-release` | 올리지 않음(문서·CI만 바꾼 PR 등) |
+
+- 그래서 PR에서 version 값을 직접 고치지 않는다. 버전은 머지 후 워크플로가 올린다.
+- Claude Code는 `plugin.json`의 version으로 플러그인 업데이트를 식별하므로, version이 바뀌어야 사용자가 `/plugin` 업데이트로 새 코드를 받는다.
+- PR 라벨은 Claude Code의 `release-label` 스킬(`.claude/skills/release-label/SKILL.md`)이 정한다. 변경 내용을 읽고 `semver:`·`skip-release` 라벨이 없으면 만들고, PR에 major·minor·skip-release 중 하나를 붙인다(patch면 라벨을 붙이지 않는다).
+- 수동 명령은 `npm run version:bump -- <major|minor|patch|X.Y.Z>`(세 파일 동시 갱신, 새 버전 출력)와 `npm run check:version`(세 파일 버전 일치 확인)이다.
+- 포크 PR도 처리하도록 `pull_request_target`을 쓰지만, PR 코드는 실행하지 않고 `main`만 checkout한다.
 
 ## 9. 라이선스
 
