@@ -164,11 +164,11 @@ Command name `optimize`, description `프롬프트 옵티마이저: 개선 시�
 | `/optimize [text]` | Starts improvement with the entered text. With no argument, it takes the current prompt-box draft. |
 | `/optimize on` / `off` | Turns automatic interception on / off. |
 | `/optimize accept` | Brings the improved draft to the prompt box. |
-| `/optimize send` | Sends the improved draft now. |
-| `/optimize raw` | Sends the original text as is. |
+| `/optimize send` | Reserves a send of the improved draft. If a job is in progress or there is no improved draft to send, it does not reserve and prints the reason immediately. |
+| `/optimize raw` | Reserves a send of the original text. The reservation conditions are the same as `send`. |
 | `/optimize retry [instruction]` | Refines again with the refinement (or the last refinement if none). |
 | `/optimize cancel` | Cancels the improvement job. |
-| `/optimize status` | Shows the configuration, the current stage, and this session's usage. |
+| `/optimize status` | Shows the configuration, the current stage, and this session's usage (including whether long-term memory context is on or off). |
 | `/optimize model <alias-or-id>` | Changes the optimizer model. |
 | `/optimize -- <text>` | Starts improvement even for a sentence that begins with a reserved word. |
 | `/optimize help` | Shows command help. |
@@ -177,8 +177,21 @@ Command name `optimize`, description `프롬프트 옵티마이저: 개선 시�
 - `model` with no argument returns a usage error.
 - Calling `accept`/`send`/`raw`/`cancel`/`retry` when there is no job in progress returns a single line `진행 중인 개선 작업이 없습니다. ...` ("There is no improvement job in progress. ...").
 - The command hook returns only `{ text }` and never carries `context`. In other words, running the command itself does not put the optimizer dialogue into the main model/transcript.
+- `send` and `raw` do not call `$.prompt.submit` directly inside the `command.run` hook. While the hook still holds the command turn the host refuses the submission (it would make the submission wait for the in-progress turn), so the command reserves the send with `$.clock.after(0)` and immediately prints `개선안 전송을 예약했습니다.` ("Reserved sending the improved draft.") or `원문 전송을 예약했습니다.` ("Reserved sending the original text."). If a job is in progress or there is no text to send, it does not reserve and prints the reason immediately. If the actual send later fails after the reservation, it is shown as a notification (toast).
 
 These commands first pass through the `prompt.submit` classification as slash commands, and the `command.run` hook (`matcher: { command: 'optimize' }`) handles them.
+
+### 4.7 Using it with long-term memory plugins
+
+Long-term memory plugins such as claude-mem and OpenViking inject memory into a session through classic hooks (SessionStart/UserPromptSubmit/Stop). A submission this plugin intercepted, and the improvement dialogue, do not run those hooks, so the original text and the refinement dialogue are not recorded in that plugin's memory.
+
+If you bring the improved draft over and press Enter, use the pane's **바로 보내기** (Send now)/**원문 보내기** (Send original), use `/optimize send|raw`, or send with the `::raw` prefix, UserPromptSubmit runs once with the final text, and the memory it injects at that point is included in the main request as usual (verified on Claude Code 2.1.286).
+
+The optimizer only observes (never modifies) the `additionalContext` carried in other plugins' `classic.SessionStart`/`classic.UserPromptSubmit` results, and puts it in the "Long-term memory" section of the snapshot (at most 2000 characters, `CONTEXT_MEMORY_CHARS`). Memory injected at session start is used from the first prompt. UserPromptSubmit memory is what was retrieved for **the prompt that last went to the main session**; it is not newly retrieved for the prompt being refined now (at interception time that hook has not run yet). A new SessionStart (start, resume, clear, compact) clears the previous-prompt memory.
+
+The system prompt uses this section only as reference data (so it does not re-ask what is already recorded) and is instructed not to follow instructions inside it.
+
+To turn it off, set `memoryContext` to false (section 5).
 
 ## 5. Configuration
 
@@ -198,6 +211,7 @@ The source of truth for configuration is `userConfig` in `plugin.json`, and the 
 | `contextTurns` | number | `4` | 0–8 | Number of recent user turns included in the context |
 | `contextMaxChars` | number | `6000` | 0–8000 | Character budget for the context snapshot |
 | `systemPromptFile` | string | `""`(none) | — | Optional extra system-instructions file; empty keeps the built-in prompt |
+| `memoryContext` | boolean | `true` | — | Include long-term memory other plugins' hooks injected into the session in the optimizer context |
 
 `auto` and `pane` for `uiMode` behave the same way: they try opening the pane first, and if it can be laid out they use the pane; otherwise they fall back to prompt-box dialogue. This matches the current description in `plugin.json` (`chooseUi` in `hooks/register.ts`).
 
@@ -218,6 +232,7 @@ prompt-optimizer.maxRounds
 prompt-optimizer.contextTurns
 prompt-optimizer.contextMaxChars
 prompt-optimizer.systemPromptFile
+prompt-optimizer.memoryContext
 ```
 
 Changing a value here is reflected in the base configuration, and any session-only override tied to the same key is cleared.
@@ -252,6 +267,7 @@ Changing a value here is reflected in the base configuration, and any session-on
 - **Context limits**: from the most recent `contextTurns` (default 4) user turns, newest first, at most 8 messages/4000 characters, 1200 characters per message (with `[중략]`, "[omitted]", in the middle), 1200 characters of project rules, 400 characters of cwd/repo, 400 characters of tool names, 6000 characters total. For rule files, only the candidates `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` are read, and any over 256 KiB is skipped.
 - **Tool results, whole files, and image transcripts are not sent.** Only tool name metadata goes into the context.
 - **There is no separate model call to summarize the context.**
+- **Long-term memory context**: when `memoryContext` is on (the default), the long-term memory other plugins injected into the session is included in the optimizer model (default `haiku`) request as the "Long-term memory" section of the snapshot (at most 2000 characters, `CONTEXT_MEMORY_CHARS`). This section goes only into the optimizer model request and adds no separate model call. To turn it off, set `memoryContext` to false.
 - **No disk storage (plugin state)**: prompts, context, dialogue, bypasses, and usage are only in plugin memory, and the plugin does not write them to files or `$.store`.
 - **Transcript rows from composer notifications**: in composer (prompt-box dialogue) mode, the improved draft, optimizer messages, errors, and notifications are emitted as `$.ui.log` notifications, so the host may record them as notification rows in the session transcript file. This is not a dialogue sent as main-model input, and pane mode uses only `$.ui.invalidate`/`$.ui.toast` instead of `$.ui.log`, so it uses only local state (`hooks/ui/present.ts`).
 - **No monetary display**: only token usage is shown (the pane header total, and the session total in `/optimize status`). Prices are not fixed. The 0 in a cancel response is "returned usage" and does not guarantee a final provider charge of 0.
@@ -262,13 +278,14 @@ Changing a value here is reflected in the base configuration, and any session-on
 - **In-progress turns and waiting submissions**: submissions with a `turnId` or with `wait === true` are left to the main session's queue as is.
 - **Slash commands and shell input**: input starting with `/` or `!` is not intercepted (commands are handled by `command.run`).
 - **Overly long originals**: if the original exceeds 6000 characters (`MAX_ORIGINAL_CHARS`), it is passed through without improvement.
-- **Context loss on explicit send**: "바로 보내기" (Send now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text })`. The engine's `PromptSubmitArgs` has no `context` field, so additional context blocks that other hooks may have attached to the initial submission are not re-attached on an explicit send. The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
+- **Context loss on explicit send (Mod hooks only)**: "바로 보내기" (Send now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text })`. The engine's `PromptSubmitArgs` has no `context` field, so blocks that a Mod hook above this plugin may have attached with `context` on the initial submission are not re-attached on an explicit send. Classic hooks (settings/plugin `hooks.json`), by contrast, run again on an explicit send, so the long-term memory injection is kept (verified on 2.1.286). The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
 - **Cancel refusals**: cancel is refused while already transferring to the prompt box (`transferring`) or while sending (`sending`) (respectively `입력창으로 옮기는 중이라 취소할 수 없습니다`, "Cannot cancel while transferring to the prompt box", and `전송 중이라 취소할 수 없습니다`, "Cannot cancel while sending"). At the points where an in-progress call is aborted (`collecting`/`generating`/`reviewing`/`failed`), cancel works normally.
 - **Empty raw submission drop**: if what follows `rawPrefix` is empty or only whitespace, it is dropped with `보낼 내용이 없습니다.` ("There is nothing to send."). The prefix is not delivered to the main session.
 - **Closing the pane = cancel**: pressing Esc/closing in the pane (origin `person`) cancels the job in progress and restores the original text.
 - **Restore conflict protection**: if the prompt box has new content typed by the user, it is not overwritten with the improved draft (`draft-conflict`). If the fill is refused, no bypass is issued.
 - **Bypass lifetime**: a bypass issued by a restore expires after 10 minutes and is consumed only once. If the user edits, it follows the edited text; if the prompt box is cleared, it is invalidated. If another plugin fills the prompt box, the bypass follows that new text (so it no longer has effect on the original improved draft) and the next Enter is not intercepted, sending that text instead.
-- **Composer notifications may remain in the transcript**: in composer mode, the improved draft and messages go out as `$.ui.log` notifications, so the host may save them as notification rows in the session transcript file. They are not sent as main-model input, and pane mode does not use this path.
+- **Composer notifications may remain in the transcript**: in composer mode, the improved draft and messages go out as `$.ui.log` notifications, so the host may save them as notification rows in the session transcript file. Such a row is recorded with the shape `type: "system"`, `subtype: "informational"`, `isMeta: false`, and no role (measured). It does not affect transcript parsers that select user messages only (for example a memory plugin's Stop hook), but a parser that filters on `isMeta` alone can include this row. The improvement dialogue in pane mode does not remain in the transcript (measured). It is not sent as main-model input, and pane mode does not use this path.
+- **The optimizer does not newly retrieve memory for the current prompt**: the UserPromptSubmit memory in the long-term memory context (4.7) is what was retrieved for the prompt that last went to the main session; it is not newly retrieved for the prompt being refined now (at interception time that hook has not run yet).
 - **Usage is memory-only**: this session's usage is only in plugin memory (`RuntimeState.usage`) and is not saved to `$.store`. It disappears when the session ends.
 - **System prompt file fallback notification**: if `systemPromptFile` cannot be read, a `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: <사유>` notification ("Could not read the system prompt file, so the default prompt is used: <reason>") is shown once for that job, and the built-in prompt is used.
 - **early-access API**: the Mod contract can change (there is a return-shape change history from 2.1.277 → 2.1.285).
@@ -301,7 +318,7 @@ File structure:
 
 ```text
 .claude-plugin/
-  plugin.json          # manifest: name and the 12 userConfig keys
+  plugin.json          # manifest: name and the 13 userConfig keys
   marketplace.json     # Marketplace definition (name, owner, plugins)
   types/               # generated by the CLI, gitignored, do not commit
 hooks/
@@ -311,6 +328,7 @@ hooks/
   config.ts            # option normalization, reading systemPromptFile
   eligibility.ts       # submission classification rules
   context.ts           # context snapshot collection
+  memory.ts            # stores and renders the injected long-term memory
   system-prompt.ts     # built-in prompt + fixed contract
   model.ts             # single-completion request/response mapping
   state.ts             # pure reducer

@@ -164,11 +164,11 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 | `/optimize [text]` | 입력한 텍스트로 개선 시작. 인자가 없으면 현재 입력창 초안을 가져온다. |
 | `/optimize on` / `off` | 자동 가로채기 켜기 / 끄기. |
 | `/optimize accept` | 개선안을 입력창으로 가져오기. |
-| `/optimize send` | 개선안을 지금 전송. |
-| `/optimize raw` | 원문을 그대로 전송. |
+| `/optimize send` | 개선안 전송을 예약한다. 진행 중이거나 보낼 개선안이 없으면 예약하지 않고 바로 이유를 출력한다. |
+| `/optimize raw` | 원문 전송을 예약한다. 예약 조건은 `send`와 같다. |
 | `/optimize retry [instruction]` | 보완어(없으면 마지막 보완어)로 다시 다듬기. |
 | `/optimize cancel` | 개선 작업 취소. |
-| `/optimize status` | 설정·진행 단계·이 세션 사용량 표시. |
+| `/optimize status` | 설정·진행 단계·이 세션 사용량 표시(장기 기억 문맥 켬/끔 포함). |
 | `/optimize model <alias-or-id>` | 옵티마이저 모델 변경. |
 | `/optimize -- <text>` | 예약어로 시작하는 문장도 개선 시작. |
 | `/optimize help` | 명령 도움말 표시. |
@@ -177,8 +177,21 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 - `model`에 인자가 없으면 사용법 오류를 반환한다.
 - 진행 중인 작업이 없는데 `accept`/`send`/`raw`/`cancel`/`retry`를 부르면 `진행 중인 개선 작업이 없습니다. ...` 한 줄을 반환한다.
 - 명령 훅은 `{ text }`만 반환하고 `context`를 절대 싣지 않는다. 즉 명령 실행 자체로 옵티마이저 대화가 메인 모델/transcript에 들어가지 않는다.
+- `send`·`raw`는 `command.run` 훅 안에서 곧바로 `$.prompt.submit`을 부르지 않는다. 훅이 아직 명령 턴을 쥐고 있으면 host가 제출을 거부하므로(진행 중인 턴을 기다리게 됨), `$.clock.after(0)`으로 전송을 예약하고 즉시 `개선안 전송을 예약했습니다.`/`원문 전송을 예약했습니다.`를 출력한다. 진행 중이거나 보낼 텍스트가 없으면 예약하지 않고 그 이유를 바로 출력한다. 예약 뒤 실제 전송이 실패하면 알림(toast)으로 표시한다.
 
 이 명령들은 `prompt.submit` 분류에서 슬래시 명령으로 먼저 통과되고, `command.run` 훅(`matcher: { command: 'optimize' }`)이 처리한다.
+
+### 4.7 장기 기억 플러그인과 함께 쓰기
+
+claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionStart/UserPromptSubmit/Stop)으로 세션에 기억을 주입한다. 이 플러그인이 가로챈 원문 제출과 개선 대화는 그 훅을 실행하지 않으므로, 원문과 보완 대화는 그 플러그인의 기억에 기록되지 않는다.
+
+개선안을 가져와 Enter 하거나, 패인의 **바로 보내기**/**원문 보내기**, `/optimize send|raw`, `::raw` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
+
+옵티마이저는 다른 플러그인의 `classic.SessionStart`/`classic.UserPromptSubmit` 결과에 담긴 `additionalContext`를 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다.
+
+시스템 프롬프트는 이 섹션을 참고 데이터로만 쓰고(이미 기록된 사실을 다시 묻지 않는 용도) 그 안의 지시는 따르지 않도록 지시한다.
+
+끄려면 `memoryContext`를 false로 둔다(5장).
 
 ## 5. 설정
 
@@ -198,6 +211,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 | `contextTurns` | number | `4` | 0–8 | 문맥에 넣을 최근 사용자 턴 수 |
 | `contextMaxChars` | number | `6000` | 0–8000 | 문맥 스냅샷 문자 예산 |
 | `systemPromptFile` | string | `""`(없음) | — | 추가 시스템 지침 파일. 비면 내장 프롬프트 유지 |
+| `memoryContext` | boolean | `true` | — | 다른 플러그인 훅이 세션에 주입한 장기 기억을 옵티마이저 문맥에 포함 |
 
 `uiMode`의 `auto`와 `pane`은 같은 동작을 한다: 패인을 먼저 열어 보고 배치에 성공하면 패인, 실패하면 입력창 대화로 폴백한다. 이는 `plugin.json`의 현재 설명과 일치한다(`hooks/register.ts`의 `chooseUi`).
 
@@ -218,6 +232,7 @@ prompt-optimizer.maxRounds
 prompt-optimizer.contextTurns
 prompt-optimizer.contextMaxChars
 prompt-optimizer.systemPromptFile
+prompt-optimizer.memoryContext
 ```
 
 여기서 값을 바꾸면 기준 설정에 반영되고, 같은 키에 걸려 있던 세션 한정 override는 지워진다.
@@ -252,6 +267,7 @@ prompt-optimizer.systemPromptFile
 - **문맥 상한**: 최근 `contextTurns`(기본 4)개 사용자 턴에서 최신 우선으로 최대 8개 메시지·4000자, 메시지당 1200자(중간 `[중략]`), 프로젝트 규칙 1200자, cwd/repo 400자, 도구 이름 400자, 전체 6000자. 규칙 파일은 `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` 후보만 읽고, 256 KiB를 넘으면 건너뛴다.
 - **도구 결과·파일 전체·이미지 transcript는 보내지 않는다.** 도구는 이름 메타데이터만 문맥에 들어간다.
 - **문맥을 요약하는 별도 모델 호출은 없다.**
+- **장기 기억 문맥**: `memoryContext`가 켜져 있으면(기본) 다른 플러그인이 세션에 주입한 장기 기억이 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)으로 옵티마이저 모델(기본 `haiku`) 요청에 포함된다. 이 섹션은 옵티마이저 모델 요청에만 들어가고 별도 모델 호출을 늘리지 않는다. 끄려면 `memoryContext`를 false로 둔다.
 - **디스크 저장 없음(플러그인 상태)**: 프롬프트·문맥·대화·bypass·사용량은 플러그인 메모리에만 있고, 플러그인이 파일이나 `$.store`에 쓰지 않는다.
 - **composer 알림의 transcript 행**: composer(입력창 대화) 모드에서는 개선안·옵티마이저 메시지·오류·알림을 `$.ui.log` 알림으로 내보내므로, 호스트가 이를 세션 transcript 파일에 알림 행으로 기록할 수 있다. 이는 메인 모델 입력으로 전송되는 대화가 아니며, 패인 모드는 `$.ui.log` 대신 `$.ui.invalidate`/`$.ui.toast`만 써서 로컬 상태만 사용한다(`hooks/ui/present.ts`).
 - **금액 표시 없음**: 토큰 사용량만 보여준다(패인 헤더 합계, `/optimize status`의 세션 합계). 가격표는 고정하지 않는다. 취소 응답의 0은 "반환된 사용량"이며 공급자 최종 청구액 0을 보장하지 않는다.
@@ -262,13 +278,14 @@ prompt-optimizer.systemPromptFile
 - **진행 중 턴·대기 제출**: `turnId`가 있거나 `wait === true`인 제출은 메인 세션의 큐에 그대로 맡긴다.
 - **슬래시 명령·셸 입력**: `/` 또는 `!`로 시작하는 입력은 가로채지 않는다(명령은 `command.run`이 처리).
 - **너무 긴 원문**: 원문이 6000자(`MAX_ORIGINAL_CHARS`)를 넘으면 개선하지 않고 그대로 통과시킨다.
-- **명시적 전송의 문맥 손실**: "바로 보내기"·`/optimize send`·`/optimize raw`는 `$.prompt.submit({ text })`만 호출한다. 엔진의 `PromptSubmitArgs`에는 `context` 필드가 없어서, 처음 제출에 다른 훅이 붙였을 수 있는 추가 문맥 블록은 명시 전송 때 다시 붙지 않는다. 입력창으로 복원한 뒤 사용자가 직접 Enter 하는 기본 경로에는 영향이 없다(그 경로는 원래 제출 문맥이 아니라 사용자가 입력창에 든 최종 텍스트를 보낸다).
+- **명시적 전송의 문맥 손실(Mod 훅에 한함)**: "바로 보내기"·`/optimize send`·`/optimize raw`는 `$.prompt.submit({ text })`만 호출한다. 엔진의 `PromptSubmitArgs`에는 `context` 필드가 없어서, 처음 제출 때 이 플러그인보다 위의 Mod 훅이 `context`로 붙였을 수 있는 블록은 명시 전송 때 다시 붙지 않는다. 반면 classic 훅(settings/플러그인 `hooks.json`)은 명시 전송 때 다시 실행되므로 장기 기억 주입은 유지된다(실측 2.1.286). 입력창으로 복원한 뒤 사용자가 직접 Enter 하는 기본 경로에는 영향이 없다(그 경로는 원래 제출 문맥이 아니라 사용자가 입력창에 든 최종 텍스트를 보낸다).
 - **취소 거부**: 이미 입력창으로 옮기는 중(`transferring`)이거나 전송 중(`sending`)이면 취소가 거부된다(각각 `입력창으로 옮기는 중이라 취소할 수 없습니다`, `전송 중이라 취소할 수 없습니다`). 진행 중 호출을 중단하는 시점(`collecting`/`generating`/`reviewing`/`failed`)에는 정상적으로 취소된다.
 - **빈 raw 제출 드롭**: `rawPrefix` 뒤가 비었거나 공백뿐이면 `보낼 내용이 없습니다.`와 함께 드롭된다. 접두어가 메인 세션으로 전달되지 않는다.
 - **패인 닫기 = 취소**: 패인에서 Esc/닫기를 하면(origin `person`) 진행 중 작업을 취소하고 원문을 복원한다.
 - **복원 충돌 보호**: 입력창에 사용자가 새로 쓴 내용이 있으면 개선안으로 덮어쓰지 않는다(`draft-conflict`). fill이 거부되면 bypass를 발급하지 않는다.
 - **bypass 수명**: 복원으로 발급된 bypass는 10분 후 만료되고, 한 번만 소비된다. 사용자가 편집하면 그 편집 텍스트로 따라가고, 입력창을 비우면 무효화된다. 다른 플러그인이 입력창을 채우면 bypass는 그 새 텍스트를 따라가므로(원래 개선안에는 효력이 없어진다) 다음 Enter는 가로채지 않고 그 텍스트를 보낸다.
-- **composer 알림이 transcript에 남을 수 있음**: composer 모드에서는 개선안·메시지가 `$.ui.log` 알림으로 나가므로 호스트가 세션 transcript 파일에 알림 행으로 저장할 수 있다. 메인 모델 입력으로 전송되지 않으며, 패인 모드는 이 경로를 쓰지 않는다.
+- **composer 알림이 transcript에 남을 수 있음**: composer 모드에서는 개선안·메시지가 `$.ui.log` 알림으로 나가므로 호스트가 세션 transcript 파일에 알림 행으로 저장할 수 있다. 이 행은 `type: "system"`, `subtype: "informational"`, `isMeta: false`, role 없음 형태로 기록된다(실측). 사용자 메시지만 고르는 transcript 파서(예: 메모리 플러그인의 Stop 훅)에는 영향이 없지만, `isMeta`만 보고 거르는 파서는 이 행을 포함할 수 있다. 패인 모드의 개선 대화는 transcript에 남지 않는다(실측). 메인 모델 입력으로 전송되지 않으며, 패인 모드는 이 경로를 쓰지 않는다.
+- **옵티마이저는 현재 프롬프트로 기억을 새로 검색하지 않는다**: 장기 기억 문맥(4.7)의 UserPromptSubmit 기억은 직전에 메인으로 간 프롬프트에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다).
 - **사용량은 메모리에만**: 이 세션의 사용량은 플러그인 메모리(`RuntimeState.usage`)에만 있고 `$.store`에 저장하지 않는다. 세션이 끝나면 사라진다.
 - **시스템 프롬프트 파일 폴백 알림**: `systemPromptFile`을 읽지 못하면 그 작업에서 한 번 `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: <사유>` 알림을 보여 주고 내장 프롬프트를 쓴다.
 - **early-access API**: Mod 계약이 바뀔 수 있다(2.1.277 → 2.1.285에서 반환형 변경 이력).
@@ -301,7 +318,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 
 ```text
 .claude-plugin/
-  plugin.json          # 매니페스트: 이름·userConfig 12개 키
+  plugin.json          # 매니페스트: 이름·userConfig 13개 키
   marketplace.json     # 마켓플레이스 정의(이름·owner·plugins)
   types/               # CLI가 생성, gitignore, 커밋 금지
 hooks/
@@ -311,6 +328,7 @@ hooks/
   config.ts            # 옵션 정규화, systemPromptFile 읽기
   eligibility.ts       # 제출 분류 규칙
   context.ts           # 문맥 스냅샷 수집
+  memory.ts            # 주입된 장기 기억 저장·렌더
   system-prompt.ts     # 내장 프롬프트 + 고정 계약
   model.ts             # 단일 완성 요청/응답 변환
   state.ts             # 순수 리듀서
