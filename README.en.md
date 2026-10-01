@@ -68,6 +68,18 @@ To put it in your shell profile:
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 ```
 
+Or put it in the `env` of your Claude Code settings file (`~/.claude/settings.json`) so it is on in every session without shell setup:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+  }
+}
+```
+
+If the settings file already exists, merge into its `env` key instead of overwriting other settings.
+
 Update:
 
 ```bash

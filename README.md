@@ -68,6 +68,18 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 ```
 
+또는 Claude Code 설정 파일(`~/.claude/settings.json`)의 `env`에 넣어 두면 셸 설정 없이 매번 켜진다:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+  }
+}
+```
+
+기존 설정 파일이 있으면 `env` 키에 병합하고 다른 설정을 덮어쓰지 않는다.
+
 업데이트:
 
 ```bash
