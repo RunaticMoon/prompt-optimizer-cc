@@ -281,7 +281,7 @@ context의 `## Target model` 섹션은 만들지 않는다. context는 참고 �
 - `OptimizerConfig`/`DEFAULT_CONFIG`, `config.ts`의 boolean 검증, plugin.json userConfig에 추가한다. 설정 갱신은 기존 `config.set` 경로로 반영한다. 새 slash 하위 명령은 만들지 않는다.
 - 수동 target-model 지정은 추가하지 않는다. C의 getter가 이미 별칭을 해석하며, 별도 수동 값은 실제 세션과 어긋날 위험과 설정 복잡도를 늘린다.
 - plugin.json 초안: type=`boolean`, title=`Model-specific guidance`, description=`Use the main session model to select rewrite guidance. Off keeps common guidance only; the optimizer model is unchanged.`, required=`false`, default=`true`.
-- 기존 status의 `모델:`을 `옵티마이저 모델:`로 명확히 한다. `모델별 지침: 켜짐/꺼짐(공통 유지)`와 마지막 요청의 raw 모델·프로필·폴백 이유를 표시한다.
+- 기존 status의 `모델:`을 `옵티마이저 모델:`로 명확히 한다. `모델별 지침: 켜짐/꺼짐(공통 지침만 사용)`와 마지막 요청의 raw 모델·프로필·폴백 이유를 표시한다.
 - 최초 최적화 전에는 `마지막 최적화 대상: 아직 감지하지 않음`. 감지한 경우 `마지막 최적화 대상: claude-opus-5-5[1m] · 적용: opus-5-5`. 실패는 `미확인 · 적용: common (timeout)`처럼 이유를 표시한다. off의 snapshot은 `감지 생략 · 적용: common (disabled)`다.
 - status는 **조회 시점의 현재 모델이라고 주장하지 않는다**. 설정 변경 직후에는 현재 토글과 이전 라운드의 적용값이 다를 수 있으며 “마지막 최적화”라는 라벨로 구분한다. status 명령은 getter도 completion도 호출하지 않는다.
 - 상태는 controller 내부 `lastGuidance`에만 보관하고 `getGuidanceStatus()`로 읽는다. `RuntimeState`/reducer/Workflow/context 구조는 바꾸지 않는다. 세션 시작/종료에 null로 초기화한다. 취소 전 실제 보낸 요청 정보는 유지해도 되며 아직 보내지 않은 감지 결과는 기록하지 않는다.
