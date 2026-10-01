@@ -21,7 +21,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 ```
 
 - Claude Code 2.1.285 이상. 플래그가 없으면 함수 훅이 켜지지 않는다.
-- 세션에 한해 로드된다. 마켓플레이스 설치 경로는 이 저장소가 제공하지 않는다.
+- 세션에 한해 로드된다(세션 한정 `--plugin-dir` 로더). 마켓플레이스로 설치하는 경로는 `README.md` 3장을 참고한다.
 
 ### 1.2 과금 없는 방법 A — `model.complete` mock 훅 (권장, 설계 실험에서 검증)
 

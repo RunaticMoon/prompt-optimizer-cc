@@ -290,6 +290,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 ```text
 .claude-plugin/
   plugin.json          # 매니페스트: 이름·userConfig 12개 키
+  marketplace.json     # 마켓플레이스 정의(이름·owner·plugins)
   types/               # CLI가 생성, gitignore, 커밋 금지
 hooks/
   hooks.json           # {"modules":["./register.ts"]}
