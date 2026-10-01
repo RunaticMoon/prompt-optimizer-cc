@@ -6,6 +6,9 @@
 # No infinite loop: a push made with GITHUB_TOKEN does not trigger new workflows, and this
 # workflow only reacts to the pull_request_target "closed" event, so its own tag/commit push
 # cannot re-run it.
+#
+# No concurrency group (GitHub keeps only one pending run, cancelling back-to-back merges):
+# the retry loop re-syncs origin/main and re-bumps whenever our push loses the race.
 name: Version bump
 
 on:
@@ -16,11 +19,6 @@ on:
 # Needed to push the release commit and tag back to main.
 permissions:
   contents: write
-
-# Serialize releases so back-to-back merges are processed one at a time.
-concurrency:
-  group: version-bump
-  cancel-in-progress: false
 
 jobs:
   bump:
@@ -48,8 +46,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          for attempt in 1 2 3; do
-            echo "::group::Attempt ${attempt} of 3"
+          for attempt in 1 2 3 4 5; do
+            echo "::group::Attempt ${attempt} of 5"
 
             # Re-sync main in case another commit landed while we were working.
             git fetch origin main --tags
@@ -69,6 +67,7 @@ jobs:
             if git push --atomic origin HEAD:main "refs/tags/v${V}"; then
               echo "Released v${V}"
               echo "version=${V}" >> "$GITHUB_OUTPUT"
+              echo "Released v${V} (${LEVEL}) from #${PR_NUMBER}" >> "$GITHUB_STEP_SUMMARY"
               echo "::endgroup::"
               break
             fi
@@ -79,18 +78,10 @@ jobs:
             # Drop the local tag so the next attempt can recreate it.
             git tag -d "v${V}" || true
 
-            if [ "${attempt}" -eq 3 ]; then
-              echo "::error::Could not push the version bump after 3 attempts."
+            if [ "${attempt}" -eq 5 ]; then
+              echo "::error::Could not push the version bump after 5 attempts."
               exit 1
             fi
 
-            sleep $((attempt * 5))
+            sleep $((attempt * 3 + RANDOM % 5))
           done
-
-      - name: Write job summary
-        env:
-          VERSION: ${{ steps.bump.outputs.version }}
-          LEVEL: ${{ contains(github.event.pull_request.labels.*.name, 'semver:major') && 'major' || contains(github.event.pull_request.labels.*.name, 'semver:minor') && 'minor' || 'patch' }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          echo "Released v${VERSION} (${LEVEL}) from #${PR_NUMBER}" >> "$GITHUB_STEP_SUMMARY"

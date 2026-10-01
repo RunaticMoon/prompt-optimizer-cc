@@ -330,7 +330,7 @@ tests/                 # per-module unit tests, UI tests, smoke tests
 scripts/
   check-types.mjs
   check-package.mjs
-  bump-version.mjs      # bump the version, or check agreement with --check
+  bump-version.mjs     # bump the version, or check agreement with --check
 docs/
   DESIGN.md            # the design document
   smoke.md             # manual and verifier smoke procedure

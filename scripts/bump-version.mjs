@@ -70,7 +70,10 @@ function nextVersion(current, argument) {
   return `${explicit[0]}.${explicit[1]}.${explicit[2]}`
 }
 
-const argument = process.argv[2]
+const args = process.argv.slice(2)
+if (args.length !== 1) fail(USAGE)
+const argument = args[0]
+
 const plugin = readJson(PLUGIN_FILE)
 const pkg = readJson(PACKAGE_FILE)
 const lock = readJson(LOCK_FILE)
@@ -92,8 +95,6 @@ if (argument === '--check') {
   for (const [label, value] of entries) console.error(`  - ${label}: ${JSON.stringify(value)}`)
   process.exit(1)
 }
-
-if (argument === undefined) fail(USAGE)
 
 if (lockRoot === undefined || typeof lockRoot.version !== 'string') {
   fail(`Missing ${path.relative(root, LOCK_FILE)} packages[""].version.`)

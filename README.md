@@ -330,7 +330,7 @@ tests/                 # 모듈별 단위 테스트, UI 테스트, 스모크 테
 scripts/
   check-types.mjs
   check-package.mjs
-  bump-version.mjs      # 버전 올리기·일치 확인(--check)
+  bump-version.mjs     # 버전 올리기·일치 확인(--check)
 docs/
   DESIGN.md            # 설계 원문
   smoke.md             # 수동·검증자 스모크 절차
