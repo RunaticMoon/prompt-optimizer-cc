@@ -16,7 +16,7 @@
 4. 제출 훅은 모델을 기다리지 않고 `{ drop: '프롬프트를 다듬는 중입니다.' }`를 반환한다. 원문은 메인 모델로 가지 않는다.
 5. `$.clock.after(1, ...)`로 예약된 작업이 문맥을 한 번 읽고(`hooks/context.ts`) `$.model.complete`를 한 번 호출한다(`hooks/model.ts`).
 6. 사용자가 패인/입력창에서 보완하면 라운드가 하나씩 추가된다(기본 최대 3회).
-7. "입력창으로 가져오기"로 개선안을 `prompt.fill`하고 일회용 bypass를 발급한다. 사용자가 편집하고 Enter를 누르면 그 초안만 가로채기를 통과해 메인 세션으로 간다.
+7. "입력창에 넣기"로 개선안을 `prompt.fill`하고 일회용 bypass를 발급한다. 사용자가 편집하고 Enter를 누르면 그 초안만 가로채기를 통과해 메인 세션으로 간다.
 
 **무엇을 다듬는가**
 
@@ -119,7 +119,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 1. 입력창에 요청을 쓰고 Enter.
 2. 훅이 제출을 막고(`프롬프트를 다듬는 중입니다.`) 패인을 연다(가능하면). 좁은 터미널에서는 입력창 대화 모드로 폴백한다.
 3. 패인에서 개선 요청을 보완하거나, 결과가 나오면 버튼으로 처리한다.
-4. **입력창으로 가져오기**(권장)를 눌러 개선안을 입력창에 넣고, 직접 확인·편집한 뒤 Enter.
+4. **입력창에 넣기**(권장)를 눌러 개선안을 입력창에 넣고, 직접 확인·편집한 뒤 Enter.
 
 ### 4.2 패인 버튼과 키 흐름
 
@@ -199,7 +199,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 
 claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionStart/UserPromptSubmit/Stop)으로 세션에 기억을 주입한다. 이 플러그인이 가로챈 원문 제출과 개선 대화는 그 훅을 실행하지 않으므로, 원문과 보완 대화는 그 플러그인의 기억에 기록되지 않는다.
 
-개선안을 가져와 Enter 하거나, 패인의 **바로 보내기**/**원문 보내기**, `/optimize send|raw`, `::raw` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
+개선안을 가져와 Enter 하거나, 패인의 **개선안 바로 전송**/**원문 그대로 전송**, `/optimize send|raw`, `::raw` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
 
 옵티마이저는 settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 세션에 주입한 `additionalContext`를 이 플러그인 아래 classic 체인에서 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다. 기억은 classic 훅이 보고한 세션 id를 따르므로, `/clear`처럼 `session.start` 없이 새 세션 id가 와도 그 SessionStart가 주입한 기억을 다음 요청부터 쓴다. 세션 전환은 SessionStart가 하며(UserPromptSubmit은 이미 저장된 세션을 바꾸지 않고, 저장된 세션이 없을 때만 채운다), 세션 end는 끝나는 세션 id가 저장된 classic 세션과 같을 때만 그 기억을 비우고 아니면 다음 SessionStart가 교체한다. 서브에이전트 안에서 발생한 classic 훅(`agent_id`가 있는 경우)은 무시한다.
 
@@ -358,7 +358,7 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 - **진행 중 턴·대기 제출**: `turnId`가 있거나 `wait === true`인 제출은 메인 세션의 큐에 그대로 맡긴다.
 - **슬래시 명령·셸 입력**: `/` 또는 `!`로 시작하는 입력은 가로채지 않는다(명령은 `command.run`이 처리).
 - **너무 긴 원문**: 원문이 6000자(`MAX_ORIGINAL_CHARS`)를 넘으면 개선하지 않고 그대로 통과시킨다.
-- **명시적 전송의 문맥 손실(Mod 훅에 한함)**: "바로 보내기"·`/optimize send`·`/optimize raw`는 `$.prompt.submit({ text })`만 호출한다. 엔진의 `PromptSubmitArgs`에는 `context` 필드가 없어서, 처음 제출 때 이 플러그인보다 위의 Mod 훅이 `context`로 붙였을 수 있는 블록은 명시 전송 때 다시 붙지 않는다. 반면 classic 훅(settings/플러그인 `hooks.json`)은 명시 전송 때 다시 실행되므로 장기 기억 주입은 유지된다(실측 2.1.286). 입력창으로 복원한 뒤 사용자가 직접 Enter 하는 기본 경로에는 영향이 없다(그 경로는 원래 제출 문맥이 아니라 사용자가 입력창에 든 최종 텍스트를 보낸다).
+- **명시적 전송의 문맥 손실(Mod 훅에 한함)**: "개선안 바로 전송"·`/optimize send`·`/optimize raw`는 `$.prompt.submit({ text })`만 호출한다. 엔진의 `PromptSubmitArgs`에는 `context` 필드가 없어서, 처음 제출 때 이 플러그인보다 위의 Mod 훅이 `context`로 붙였을 수 있는 블록은 명시 전송 때 다시 붙지 않는다. 반면 classic 훅(settings/플러그인 `hooks.json`)은 명시 전송 때 다시 실행되므로 장기 기억 주입은 유지된다(실측 2.1.286). 입력창으로 복원한 뒤 사용자가 직접 Enter 하는 기본 경로에는 영향이 없다(그 경로는 원래 제출 문맥이 아니라 사용자가 입력창에 든 최종 텍스트를 보낸다).
 - **취소 거부**: 이미 입력창으로 옮기는 중(`transferring`)이거나 전송 중(`sending`)이면 취소가 거부된다(각각 `입력창으로 옮기는 중이라 취소할 수 없습니다`, `전송 중이라 취소할 수 없습니다`). 진행 중 호출을 중단하는 시점(`collecting`/`generating`/`reviewing`/`failed`)에는 정상적으로 취소된다.
 - **빈 raw 제출 드롭**: `rawPrefix` 뒤가 비었거나 공백뿐이면 `보낼 내용이 없습니다.`와 함께 드롭된다. 접두어가 메인 세션으로 전달되지 않는다.
 - **패인 닫기 = 취소**: 패인에서 Esc/닫기를 하면(origin `person`) 진행 중 작업을 취소하고 원문을 복원한다.
