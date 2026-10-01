@@ -2,6 +2,8 @@ import type { PaneOpenArgs, UiOpenResult } from 'claude-code'
 
 import { PANE_ID } from '../controller'
 
+export const PANE_ROWS = 12
+
 /** The small UI boundary used by the controller's change presenter. */
 export interface UiPorts {
   open(args: PaneOpenArgs): Promise<UiOpenResult>
@@ -18,9 +20,8 @@ export function paneOpenArgs(): PaneOpenArgs {
     title: '프롬프트 옵티마이저',
     focus: true,
     closeOnEscape: true,
-    // Inline pane: header/hint (2), primary action (2 with spacing), refinement
-    // label/input (3), send actions (2), and message start (3). Longer messages
-    // and the original toggle remain scrollable, leaving room for AbovePrompt.
-    rows: 12,
+    // Large inline and dock layouts request twelve rows. Compact inline panes
+    // reserve their first view for the draft preview and controls; details scroll.
+    rows: PANE_ROWS,
   }
 }

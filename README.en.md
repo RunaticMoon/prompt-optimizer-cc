@@ -136,7 +136,8 @@ Skill-directory scaffolding (`claude plugin init|new`) is not provided by this r
 ### 4.2 Pane buttons and key flow
 
 The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its requested height is 12 rows, focus is taken on the requested pane, and it can be closed with Esc (`hooks/ui/ui-ports.ts`). Actual height depends on placement and any size the user has set.
-In pane mode on terminal and desktop, the band directly above the prompt shows the **original** (a 180-character preview by default) above the **full improved draft**. The pane keeps its phase/round/token header, key hint, actions, refinement input, full latest optimizer message, original toggle, and error/progress state. On surfaces where the band has not rendered, the pane also shows the full original and draft.
+In pane mode on terminal and desktop, the band directly above the prompt shows the **original** (a 180-character preview by default) above the **full improved draft**. The pane keeps its phase/round/token header, key hint, actions, refinement input, full latest optimizer message, original toggle, and error/progress state. A compact inline pane omits a message from its lower details when the preview already contains it in full, as described below. On surfaces where the band has not rendered, the pane also shows the full original and draft.
+For an inline pane below 40 screen rows, the first view shows an improved-draft preview → `1: 넣기` (put in prompt box) → refinement input → `2: 전송 · 3: 원문` (send / original). The band above the prompt is omitted. The preview skips blank lines to fit the row budget. If it is truncated or whitespace cleanup changes the source, the full draft, optimizer message, or error appears in the lower scrollable area. Only a message or error already contained in full by the preview is omitted there. The header and original preview remain below; the `0` toggle appears only when the original exceeds 180 characters (and is unavailable while busy). A dock pane keeps its existing layout.
 
 | Button / input | Behavior |
 |---|---|
@@ -152,13 +153,13 @@ If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력
 | `1` | Put in prompt box; edit then send (`입력창에 넣기`) |
 | `2` | Send improved draft now (`개선안 바로 전송`) |
 | `3` | Send original unchanged (`원문 그대로 전송`) |
-| `0` | Show / hide the full original when the band is drawn in pane mode (shown when the original exceeds 180 characters) |
+| `0` | Show / hide the full original when it exceeds 180 characters. In a compact inline pane, the toggle appears in the lower scrollable area. |
 
 `Cmd+Enter` is unsupported in the Pane: the Mods API accepts only one digit or lowercase letter for a Button `hotkey`. Use `2` to send immediately.
 
 The pane shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중`), `n/최대회` (n/max rounds), total returned tokens, and the latest optimizer message. When the band is drawn in pane mode, read the original and improved draft above the prompt; press `0` in the pane to expand or collapse an original longer than 180 characters.
 
-The pane requests 12 rows, so the optimizer message and the `0` original toggle can fall below the first screen. Scroll the pane body to see them; the digit `0` still works even when the toggle is off-screen.
+In a regular pane, the optimizer message and the `0` original toggle can fall below the first screen. Scroll the pane body to see them; the digit `0` still works even when the toggle is off-screen.
 
 ### 4.3 Display by surface
 
@@ -169,7 +170,7 @@ The pane `ui.render` hook checks the pane id without filtering by `surface`. The
 
 ### 4.4 Narrow terminals and composer mode
 
-If the pane cannot be laid out or `uiMode` is `composer`, the improvement dialogue takes place in the prompt box. In this case:
+If the pane cannot be laid out or `uiMode` is `composer`, the improvement dialogue takes place in the prompt box. An inline compact pane that is laid out follows the order in section 4.2 above. In prompt-box dialogue mode:
 
 - On `terminal` and `desktop`, the band above the prompt shows the full original, then the full `↓ 개선안` (or a preparing/empty message), then a dim guide line. It yields when a survey or agent view occupies the band.
 - Status line: `옵티마이저 <단계> (n회) · 보완 내용을 입력해 Enter · /optimize accept(입력창으로) · /optimize send · /optimize raw · /optimize cancel` ("Optimizer <stage> (n rounds) · type a refinement and press Enter · ...").
