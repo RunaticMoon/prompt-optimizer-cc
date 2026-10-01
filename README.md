@@ -18,6 +18,10 @@
 6. 사용자가 패인/입력창에서 보완하면 라운드가 하나씩 추가된다(기본 최대 3회).
 7. "입력창으로 가져오기"로 개선안을 `prompt.fill`하고 일회용 bypass를 발급한다. 사용자가 편집하고 Enter를 누르면 그 초안만 가로채기를 통과해 메인 세션으로 간다.
 
+**무엇을 다듬는가**
+
+옵티마이저는 요청을 유형으로 구분해 다듬는다. 변경은 요청한 변경과 확인 결과, 진단은 원인·근거·미확인 사항, 조사는 출처 있는 답, 글쓰기는 지정한 형식의 글을 결과물로 삼고, 긴 산출물 요구도 함께 확인한다. 문제 설명·질문·아이디어·계획에는 변경 요청이 없으면 진단으로 다뤄 원인과 근거만 보고하고 수정하지 않으며, 명시적 수정 요청은 변경으로 유지한다. 목표 하나와 간단한 결과물만 있는 짧고 명확한 요청은 자연스러운 문장으로 유지하고, 여러 조건·입력·단계가 있거나 긴 산출물을 요구하면 목표/맥락/범위/완료 기준 네 필드로 정리한다. 메인 세션 모델에 맞춘 추가 지침은 5.4에서 설명한다.
+
 **메인 세션과 분리되는 이유와 방식**
 
 - 개선 대화는 플러그인 자체 상태(`RuntimeState`)에만 있고 메인 transcript에 기록되지 않는다.
@@ -168,7 +172,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 | `/optimize raw` | 원문 전송을 예약한다. 예약 조건은 `send`와 같다. |
 | `/optimize retry [instruction]` | 보완어(없으면 마지막 보완어)로 다시 다듬기. |
 | `/optimize cancel` | 개선 작업 취소. |
-| `/optimize status` | 설정·진행 단계·이 세션 사용량 표시(장기 기억 문맥 켬/끔 포함). |
+| `/optimize status` | 설정·진행 단계·이 세션 사용량 표시. `옵티마이저 모델:`, `모델별 지침: 켜짐`/`꺼짐(공통 지침만 사용)`, 마지막 최적화에 적용한 대상 모델(5.4), `장기 기억 문맥: 켬`/`끔`을 포함한다. |
 | `/optimize model <alias-or-id>` | 옵티마이저 모델 변경. |
 | `/optimize -- <text>` | 예약어로 시작하는 문장도 개선 시작. |
 | `/optimize help` | 명령 도움말 표시. |
@@ -202,6 +206,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 | 키 | 타입 | 기본값 | 허용 범위 | 설명 |
 |---|---|---|---|---|
 | `enabled` | boolean | `true` | — | 조건에 맞는 제출을 가로챌지 여부 |
+| `modelGuidance` | boolean | `true` | — | 메인 세션 모델을 감지해 그 모델의 추가 편집 지침을 적용할지 여부. 끄면 공통 지침만 쓴다(5.4) |
 | `triggerMode` | string | `always` | `always` \| `prefix` | `always`는 모든 대상 제출, `prefix`는 접두어가 있는 제출만 |
 | `triggerPrefix` | string | `?? ` | 비어 있으면 prefix 모드에서 기본값으로 복귀 | prefix 모드 트리거 접두어 |
 | `rawPrefix` | string | `::raw ` | — | 이 접두어로 시작하면 접두어를 떼고 그대로 통과 |
@@ -223,6 +228,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 
 ```text
 prompt-optimizer.enabled
+prompt-optimizer.modelGuidance
 prompt-optimizer.triggerMode
 prompt-optimizer.triggerPrefix
 prompt-optimizer.rawPrefix
@@ -260,6 +266,68 @@ prompt-optimizer.memoryContext
 - 권장 위치: `~/.claude/prompt-optimizer/system-prompt.md`.
 - 이 파일은 한 작업(workflow) 시작 시 한 번만 읽고 그 작업 동안 캐시한다. 새 작업/세션 시작 시 다시 읽는다.
 
+### 5.4 모델별 프롬프팅 가이드
+
+옵티마이저가 만드는 것은 **메인 세션 모델에게 보낼 사용자 메시지**이고, 설정 `model`(기본 `haiku`)은 그 메시지를 편집하는 별도 모델이다. 두 모델을 혼동하지 않도록 status는 옵티마이저 자신의 모델을 `옵티마이저 모델:`로 표시한다.
+
+- **매 최적화마다 다시 읽는다.** 첫 호출·재시도·보완(`retry`/`refine`) 등 매 라운드의 요청 조립 직전에 `$.session.model()`로 메인 세션 모델을 읽어, 그 모델의 짧은 추가 지침을 옵티마이저 시스템 프롬프트에 넣는다. `/model`로 바꾸면 다음 최적화부터 새 모델이 반영된다. 이미 입력창에 채운 초안은 자동으로 다시 쓰지 않는다.
+- **500ms 안에 읽지 못하거나 실패하면** 공통 지침만 적용하고 최적화는 그대로 진행한다. timeout·rejection·동기 예외·빈 값·포트 누락은 모두 공통으로 폴백하며 최적화 실패·기존 모델 설정 변경으로 이어지지 않는다.
+- **옵티마이저 자신의 모델과 effort는 바뀌지 않는다.** `model`(기본 `haiku`)과 effort `low`는 그대로이고 `/optimize model`은 옵티마이저 모델만 바꾼다. 메인 대화·메인 모델 설정도 건드리지 않는다. effort 기반 분기는 없다(플러그인이 현재 effort를 읽을 수 없다).
+- **요청 문구로 효과가 있는 내용만 증류한다.** effort·thinking·max_tokens 같은 API/하네스 설정은 지침에서 제외하고, 요청의 목표·범위·완료 조건으로 표현되는 부분만 담는다.
+
+**지원 모델**
+
+`$.session.model()`이 돌려준 원문은 그대로 보존하고, 조회용 사본에서만 앞뒤 공백 제거·소문자화 후 끝의 `[1m]` 한 번과 끝의 `-YYYYMMDD` 날짜 한 번을 떼어낸다. 전체 문자열이 allowlist에 정확히 맞을 때만 모델별 지침을 쓰고, 부분 일치는 하지 않는다(`hooks/target-model.ts`).
+
+| 모델 ID | 적용 프로필 |
+|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1` | `fable-5-1` |
+| `claude-fable-5`, `claude-mythos-5` | `fable-5` |
+| `claude-opus-5-5` | `opus-5-5` |
+| `claude-opus-5` | `opus-5` |
+| `claude-opus-4-8` | `opus-4-8` |
+| `claude-sonnet-5-5` | `sonnet-5-5` |
+| `claude-sonnet-5` | `sonnet-5` |
+| Haiku 4.5(`claude-haiku-4-5-...`), 그 밖의 모델, 별칭만 있는 값(`opus`, `sonnet` …) | `common`(공통 지침만) |
+
+- `[1m]`과 날짜 접미사는 무시한다. 예: `claude-opus-5-5[1m]`, `claude-opus-5-5-20260901[1m]` → `claude-opus-5-5`.
+- 버전 없는 별칭, allowlist 밖의 새 버전, 빈 값, 문자열이 아닌 값은 공통 지침을 쓴다. 가까운 버전으로 폴백하지 않는다.
+- Bedrock·Vertex·게이트웨이처럼 다른 provider가 돌려주는 ID 형식은 확인되지 않아 공통 지침을 쓴다.
+
+**status 표시**
+
+`/optimize status`는 조회 시점의 현재 모델을 읽지 않고, 마지막으로 실제 보낸 요청에 적용한 감지 결과만 보여 준다. `마지막 최적화 대상:` 값의 예:
+
+```text
+아직 감지하지 않음
+claude-opus-5-5[1m] · 적용: opus-5-5
+미확인 · 적용: common (timeout)
+감지 생략 · 적용: common (disabled)
+```
+
+- `아직 감지하지 않음`: 이 세션에서 아직 감지·전송한 최적화가 없다(세션 시작·reset 포함).
+- `<raw> · 적용: <profile>`: 감지에 성공했다. `common`이면 `· 적용: common (<reason>)`으로 이유를 함께 보여 준다.
+- `미확인 · 적용: common (<reason>)`: 값을 읽지 못했고(timeout·error 등) 공통 지침을 적용했다.
+- `감지 생략 · 적용: common (disabled)`: `modelGuidance`가 꺼져 있어 조회 자체를 하지 않았다.
+
+설정을 바꾼 직후에는 현재 토글과 마지막 라운드의 적용값이 다를 수 있어 `마지막 최적화 대상`이라는 라벨로 구분한다.
+
+**시스템 프롬프트 조립 순서**
+
+`hooks/system-prompt.ts`의 `composeSystemPrompt`는 다음 순서로 조립한다.
+
+1. 기본 프롬프트(`BASE_SYSTEM_PROMPT`, 공통 편집 지침 포함)
+2. 대상 모델 추가 블록 — `common`이면 생략한다. 제목은 `[대상 모델 편집 지침: opus-5-5]`처럼 코드가 정한 프로필 이름만 쓰고 raw 모델 문자열은 넣지 않는다.
+3. 사용자 추가 지침(`systemPromptFile`, 5.3) — trim 후 비어 있지 않을 때만 `[추가 지침]`으로 추가
+4. 고정 계약(`[고정 계약]`) — 항상 마지막. 역할 제한과 JSON 출력 계약을 다시 붙이며 어떤 추가 지침도 이를 덮어쓸 수 없다.
+
+`modelGuidance`를 꺼도 공통 편집 지침은 유지되고, 고정 계약은 어떤 경우에도 마지막에 붙는다.
+
+**출처**
+
+- [Anthropic 프롬프팅 모범 사례](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/claude-prompting-best-practices)(영문판은 `/docs/en/...`)와 모델별 페이지(Fable·Opus·Sonnet)의 권고를 요청 문구로 증류했다. 실행 중 원문을 내려받지 않고 저장소에도 포함하지 않는다.
+- 요청 분류, 목표/맥락/범위/완료 기준 네 필드 구조, 지시어 해소 아이디어는 [oh-my-fable](https://github.com/Junhan2/oh-my-fable)(MIT)의 `fable-prompt` 스킬을 참고했다. 그 스킬의 "개선 후 실행" 절차와 블록 원문 복사 규칙은 채택하지 않는다.
+
 ## 6. 비용·프라이버시
 
 - **호출 수**: 라운드당 정확히 `$.model.complete` 1회. 작업당 최대 `maxRounds`(기본 3)회. 자동 재시도·상위 모델 폴백·fork는 없다.
@@ -290,6 +358,9 @@ prompt-optimizer.memoryContext
 - **옵티마이저는 현재 프롬프트로 기억을 새로 검색하지 않는다**: 장기 기억 문맥(4.7)의 UserPromptSubmit 기억은 직전에 메인으로 간 프롬프트에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다).
 - **사용량은 메모리에만**: 이 세션의 사용량은 플러그인 메모리(`RuntimeState.usage`)에만 있고 `$.store`에 저장하지 않는다. 세션이 끝나면 사라진다.
 - **시스템 프롬프트 파일 폴백 알림**: `systemPromptFile`을 읽지 못하면 그 작업에서 한 번 `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: <사유>` 알림을 보여 주고 내장 프롬프트를 쓴다.
+- **모델별 지침의 실제 효과는 미검증**: 지침이 실제 모델 응답의 품질을 높이는지는 모델 응답에 달려 있다. 이 저장소에는 자동 품질 평가가 없고, 테스트는 정규화·선택·조립 계약만 보장한다(5.4).
+- **모델 감지 500ms 제한**: 메인 세션 모델 조회는 500ms(`TARGET_MODEL_TIMEOUT_MS`) 안에 끝나야 한다. 넘으면 그 라운드는 공통 지침만 쓰고 최적화는 계속된다. `/optimize status`의 `마지막 최적화 대상`은 마지막으로 실제 보낸 요청 기준이며 조회 시점의 현재 모델이 아니다.
+- **provider별 모델 ID**: Bedrock·Vertex·게이트웨이 등 다른 provider가 돌려주는 ID 형식은 확인되지 않아 공통 지침만 적용한다.
 - **early-access API**: Mod 계약이 바뀔 수 있다(2.1.277 → 2.1.285에서 반환형 변경 이력).
 - **실제 터미널 화면 검증 상태**: 이 저장소 이력에서는 패인 배치·포커스·fill의 실제 터미널 동작을 아직 검증하지 못했다(개발 환경의 네트워크 오류). `docs/smoke.md`의 절차로 검증 예정이며, 그때까지 화면 동작은 **미검증**이다. 자동 테스트는 mock 엔진에서의 계약만 보장한다.
 
@@ -320,7 +391,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 
 ```text
 .claude-plugin/
-  plugin.json          # 매니페스트: 이름·userConfig 13개 키
+  plugin.json          # 매니페스트: 이름·userConfig 14개 키
   marketplace.json     # 마켓플레이스 정의(이름·owner·plugins)
   types/               # CLI가 생성, gitignore, 커밋 금지
 hooks/
@@ -331,7 +402,10 @@ hooks/
   eligibility.ts       # 제출 분류 규칙
   context.ts           # 문맥 스냅샷 수집
   memory.ts            # 주입된 장기 기억 저장·렌더
+  model-guidance.ts    # 공통·모델별 편집 지침 문자열
   system-prompt.ts     # 내장 프롬프트 + 고정 계약
+  target-model.ts      # 메인 모델 문자열 → 지침 프로필 정규화
+  resolve-target-model.ts # 500ms 제한 대상 모델 조회(실패 시 공통)
   model.ts             # 단일 완성 요청/응답 변환
   state.ts             # 순수 리듀서
   delivery.ts          # 입력창 복원(prompt.fill)과 명시적 전송(prompt.submit)
