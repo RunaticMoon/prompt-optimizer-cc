@@ -125,6 +125,57 @@ describe('createMemoryStore', () => {
     expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: ['p1'] })
     expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
   })
+
+  test('latest() and storedSessionId() start empty', () => {
+    const store = createMemoryStore()
+
+    expect(store.latest()).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(store.storedSessionId()).toBe('')
+  })
+
+  test('latest() returns the adopted session\'s memory and storedSessionId() names it', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-a', ['s1'])
+    store.recordPromptSubmit('sess-a', ['p1'])
+
+    expect(store.latest()).toEqual({ sessionStart: ['s1'], lastPrompt: ['p1'] })
+    expect(store.storedSessionId()).toBe('sess-a')
+  })
+
+  test('latest() follows a newly adopted id and drops the previous session', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-a', ['s1'])
+    store.recordPromptSubmit('sess-a', ['p1'])
+
+    // No `session.start` for `sess-b` (the `/clear` case): the classic hook
+    // alone adopts it, and the previous session's memory does not survive.
+    store.recordSessionStart('sess-b', ['s2'])
+
+    expect(store.storedSessionId()).toBe('sess-b')
+    expect(store.latest()).toEqual({ sessionStart: ['s2'], lastPrompt: [] })
+  })
+
+  test('latest() is empty again after resetSession clears the stored session', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-a', ['s1'])
+    store.recordPromptSubmit('sess-a', ['p1'])
+
+    store.resetSession('sess-a')
+
+    expect(store.storedSessionId()).toBe('')
+    expect(store.latest()).toEqual({ sessionStart: [], lastPrompt: [] })
+  })
+
+  test('latest() hands out a copy, so later records do not mutate an earlier read', () => {
+    const store = createMemoryStore()
+    store.recordSessionStart('sess-a', ['s1'])
+
+    const read = store.latest()
+    store.recordSessionStart('sess-a', ['s2'])
+
+    expect(read.sessionStart).toEqual(['s1'])
+    expect(store.latest().sessionStart).toEqual(['s2'])
+  })
 })
 
 describe('renderMemory', () => {

@@ -870,13 +870,96 @@ describe('integration — session isolation and delivery accuracy', () => {
     // Now A's session.end fires; the harness still names A.
     await w.endSession()
 
-    // B continues and its freshly captured memory is still there.
-    await w.restartSession('sess-2')
+    // B continues under its own classic id without a `session.start`; the
+    // snapshot reads the last captured classic session, so its memory is there.
     await w.submit('B 세션 원문')
     await w.advance(1)
     const br = w.completes[1]?.prompt ?? ''
     expect(br).toContain('MEM-B')
     expect(br).not.toContain('MEM-A')
+  })
+
+  // High-1: `/clear` ends A and the process goes on under B's classic id with
+  // no `session.start` for it. The snapshot must follow the classic hook's id,
+  // so B's SessionStart memory is used and A's is gone.
+  test('MEM · /clear(session.start 없음) 후 새 classic SessionStart 기억이 다음 개선 요청에 포함된다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // A captures its session-start memory and shows it.
+    w.setSessionStartContext(['MEM-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-A')
+
+    // `/clear`: the engine ends A (reason `clear`, naming A), then B's classic
+    // SessionStart arrives with a new id. No `session.start` fires for B.
+    await w.endSession()
+    w.setSessionStartContext(['MEM-B'])
+    await $.classic.SessionStart({ source: 'clear', session_id: 'sess-2' })
+
+    // Without restartSession, the next request still sees B's memory only.
+    await w.submit('B 세션 원문')
+    await w.advance(1)
+    const br = w.completes[1]?.prompt ?? ''
+    expect(br).toContain('MEM-B')
+    expect(br).not.toContain('MEM-A')
+
+    // The differing classic id is diagnosed exactly once, not per hook.
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Medium-2: the classic hook's id and the `session.start` id need not agree
+  // (e.g. a resume/clear the plugin saw no `session.start` for). Memory still
+  // follows the classic hook, and the mismatch is diagnosed once per id.
+  test('MEM · classic id가 session.start id와 달라도 기억이 보인다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-DIFF'])
+    await $.classic.SessionStart({ source: 'resume', session_id: 'sess-other' })
+    // A second classic hook for the same id must not repeat the diagnostic.
+    await $.classic.SessionStart({ source: 'resume', session_id: 'sess-other' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-DIFF')
+
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Follow-up: an invalid classic `session_id` cannot key the store, so the
+  // capture is skipped (the stored session's memory stays) and the diagnostic
+  // lands exactly once. An empty id is passed verbatim; if the harness replaced
+  // it with the test session id, this test would fail at the first assertion.
+  test('MEM · classic id가 비면 기억을 기록하지 않고 진단만 1회 남긴다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // A valid capture first, so "skipped" is observable as "unchanged".
+    w.setSessionStartContext(['MEM-KEEP'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-KEEP')
+
+    // Empty id twice: no adopt, no replacement, one diagnostic.
+    w.setSessionStartContext(['MEM-EMPTY'])
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+
+    const noId = w.logs.filter(text => text.includes('carried no session_id'))
+    expect(noId).toHaveLength(1)
+
+    await w.run('cancel')
+    await w.run('다음 원문')
+    await w.advance(1)
+    const next = w.completes[1]?.prompt ?? ''
+    expect(next).toContain('MEM-KEEP')
+    expect(next).not.toContain('MEM-EMPTY')
   })
 
   // The pane UI path: mount the real Pane and press its accept button.

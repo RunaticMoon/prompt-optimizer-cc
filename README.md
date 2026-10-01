@@ -187,7 +187,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 
 개선안을 가져와 Enter 하거나, 패인의 **바로 보내기**/**원문 보내기**, `/optimize send|raw`, `::raw` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
 
-옵티마이저는 settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 세션에 주입한 `additionalContext`를 이 플러그인 아래 classic 체인에서 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다. 기억은 세션 id별로 보관되어 다른 세션에는 쓰이지 않는다.
+옵티마이저는 settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 세션에 주입한 `additionalContext`를 이 플러그인 아래 classic 체인에서 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다. 기억은 classic 훅이 보고한 세션 id를 따르므로, `/clear`처럼 `session.start` 없이 새 세션 id가 와도 그 SessionStart가 주입한 기억을 다음 요청부터 쓴다(세션 end가 끝나는 세션의 기억을 비운다).
 
 옵티마이저 요청에서 문맥(스냅샷) 안의 `<context>` 등 구역 태그는 `‹`(U+2039)로 바꿔, 그 안의 `</context>` 같은 문자열이 구역 경계를 깨지 못하게 한다.
 

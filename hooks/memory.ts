@@ -8,11 +8,14 @@
  * the store holds into the bounded "Long-term memory" section that
  * `collectContext` in `context.ts` folds into the snapshot.
  *
- * The store is scoped to one session at a time: each record carries the
- * classic hook's `e.session_id`, and the first record for a new id drops the
- * previous session's memory. Reading through {@link MemoryStore.current} with a
- * different (or empty) id yields nothing, so a session that never saw its own
- * `classic.SessionStart` cannot inherit the last session's memory.
+ * The store holds one session at a time: each record carries the classic hook's
+ * `e.session_id`, and the first record for a new id adopts it, dropping the
+ * previous session's memory. The snapshot reads through
+ * {@link MemoryStore.latest}, which follows the classic hook's id: `/clear`
+ * changes that id without a `session.start`, so the new session's SessionStart
+ * (with no `session.start` behind it) is still what the next request sees.
+ * {@link MemoryStore.current} stays for callers that must key by a known id,
+ * and `session.end` clears only the ending session's record.
  */
 
 import { truncateHead } from './context'
@@ -22,6 +25,15 @@ import type { CapturedMemory } from './contracts'
 export interface MemoryStore {
   /** The captured memory for `sessionId`; empty unless it is the stored session. */
   current(sessionId: string): CapturedMemory
+  /**
+   * The captured memory for the session the store last adopted, whatever its
+   * id; empty when none has been adopted. This is the snapshot's read key: it
+   * follows the classic hook's `session_id`, which `/clear` changes without a
+   * `session.start`.
+   */
+  latest(): CapturedMemory
+  /** The id of the session the store last adopted, or `''` when none has been. */
+  storedSessionId(): string
   /** Replaces the session-start entries for `sessionId` (`undefined` clears them). */
   recordSessionStart(sessionId: string, entries: readonly string[] | undefined): void
   /** Replaces the previous-prompt entries for `sessionId` (`undefined` clears them). */
@@ -64,6 +76,12 @@ export function createMemoryStore(): MemoryStore {
     current(id: string): CapturedMemory {
       if (id === '' || id !== sessionId) return { sessionStart: [], lastPrompt: [] }
       return { sessionStart: [...sessionStart], lastPrompt: [...lastPrompt] }
+    },
+    latest(): CapturedMemory {
+      return { sessionStart: [...sessionStart], lastPrompt: [...lastPrompt] }
+    },
+    storedSessionId(): string {
+      return sessionId
     },
     recordSessionStart(id: string, entries: readonly string[] | undefined): void {
       adopt(id)
