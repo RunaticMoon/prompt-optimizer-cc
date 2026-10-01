@@ -7,7 +7,7 @@ import { PANE_ID } from '../hooks/controller'
 import { DEFAULT_CONFIG, type RuntimeState, type Workflow } from '../hooks/contracts'
 import { COMPOSER_GUIDE, createPresenter } from '../hooks/ui/present'
 import { handlePaneClose, registerUi } from '../hooks/ui/register'
-import { paneOpenArgs, type UiPorts } from '../hooks/ui/ui-ports'
+import { PANE_ROWS, paneOpenArgs, type UiPorts } from '../hooks/ui/ui-ports'
 
 const PANE: RenderInput<'Pane', 'terminal'> = {
   component: 'Pane',
@@ -268,6 +268,89 @@ describe('optimizer UI', () => {
     expect(mobile).toContain(item.original)
     expect(mobile).toContain(item.draft)
     expect(mobile).not.toContain('원문 전체 보기')
+  })
+
+  test('only an inline pane below its requested height uses the compact layout', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller)
+    const paneAt = (placement: 'inline' | 'dock', bodyRows: number) => ui.render({
+      ...PANE,
+      props: { ...PANE.props, placement, scroll: { offset: 0, bodyRows } },
+    })
+
+    const compact = textOf(await paneAt('inline', PANE_ROWS - 1))
+    expect(compact).toContain('한국어로 작성한 개선안입니다.')
+    expect(compact).not.toContain('프롬프트 옵티마이저')
+    for (const full of [await paneAt('inline', PANE_ROWS), await paneAt('dock', 6)]) {
+      const drawn = textOf(full)
+      expect(drawn).toContain('프롬프트 옵티마이저')
+      expect(drawn).toContain('옵티마이저 메시지')
+    }
+  })
+
+  test('compact pane keeps the draft, refinement, and three actions above the fold even after a band draw', async ($, on) => {
+    const item = workflow()
+    item.original = '숨길 원문 '.repeat(40)
+    item.draft = '가'.repeat(150)
+    const current = state(item)
+    const { controller, calls } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    await ui.render(BAND)
+    const compact = { ...PANE, props: {
+      ...PANE.props, placement: 'inline' as const, bodyColumns: 70,
+      scroll: { offset: 0, bodyRows: 6 },
+    } }
+    const drawn = textOf(await ui.render(compact))
+    // Six body rows reserve one for Input and one for the action row.
+    // The remaining four rows fit 4 × (70 − 2 padding) = 272 terminal cells.
+    expect(drawn).toContain(`${'가'.repeat(135)}…`)
+    expect(drawn).not.toContain('가'.repeat(136))
+    expect(drawn).not.toContain(item.draft)
+    expect(drawn).not.toContain(item.original)
+    expect(drawn).not.toContain('프롬프트 옵티마이저')
+    expect(drawn).not.toContain('옵티마이저 메시지')
+    expect(drawn).not.toContain('추가 조건이 있나요?')
+    expect(drawn).not.toContain('원문 전체 보기')
+    expect(drawn).not.toContain('현재 개선안')
+    expect(drawn).not.toContain('submitLabel')
+    expect(drawn).toContain('"label":"보완 요청"')
+    expect(drawn).toContain('optimizer:instruction')
+    for (const [key, digit, label] of [
+      ['accept', '1', '1 넣기'], ['send', '2', '2 전송'], ['raw', '3', '3 원문'],
+    ]) {
+      expect(drawn).toContain(`optimizer:${key}`)
+      expect(drawn).toContain(`"hotkey":"${digit}"`)
+      expect(drawn).toContain(`"label":"${label}"`)
+    }
+    expect(drawn).toContain('"autoFocus":true')
+    expect(drawn.indexOf('가'.repeat(20))).toBeLessThan(drawn.indexOf('optimizer:instruction'))
+    expect(drawn.indexOf('optimizer:instruction')).toBeLessThan(drawn.indexOf('optimizer:accept'))
+    await ui.press({ component: 'Pane', requestId: PANE_ID, plugin: 'test', element: 'optimizer:accept' })
+    await ui.press({ component: 'Pane', requestId: PANE_ID, plugin: 'test', element: 'optimizer:send' })
+    await ui.press({ component: 'Pane', requestId: PANE_ID, plugin: 'test', element: 'optimizer:raw' })
+    await ui.input({ component: 'Pane', requestId: PANE_ID, plugin: 'test', kind: 'submit', element: 'optimizer:instruction', value: '더 짧게' })
+    expect(calls).toEqual(['accept', 'sendDraft', 'sendOriginal', 'refine:더 짧게'])
+  })
+
+  test('compact pane uses the optimizer question without a draft and dims unavailable actions', async ($, on) => {
+    const current = state({ ...workflow('failed'), draft: '' })
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const compact = { ...PANE, props: { ...PANE.props, placement: 'inline' as const,
+      scroll: { offset: 0, bodyRows: 6 } } }
+    const missing = textOf(await ui.render(compact))
+    expect(missing).toContain('추가 조건이 있나요?')
+    expect(missing).toContain('"hotkey":"3"')
+    expect(missing).not.toContain('"hotkey":"1"')
+    expect(missing).not.toContain('"hotkey":"2"')
+    expect(missing).toContain('"dimColor":true')
+
+    current.workflow = { ...workflow('generating'), draft: '' }
+    const busy = textOf(await ui.render(compact))
+    expect(busy).toContain('개선안을 준비하고 있습니다…')
+    expect(busy).toContain('보완 요청 불가')
+    expect(busy).not.toContain('optimizer:instruction')
+    expect(busy).not.toContain('"hotkey":"3"')
   })
 
   test('pane describes each phase and an empty workflow', async ($, on) => {

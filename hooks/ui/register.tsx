@@ -6,6 +6,7 @@ import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
 import { COMPOSER_GUIDE, phaseLabel } from './present'
+import { PANE_ROWS } from './ui-ports'
 
 const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
 const isBusy = (phase: Workflow['phase']): boolean => BUSY_PHASES.includes(phase)
@@ -53,6 +54,23 @@ function canAct(workflow: Workflow | null): workflow is Workflow {
 
 function latestOptimizerMessage(workflow: Workflow): string {
   return [...workflow.dialogue].reverse().find((entry) => entry.role === 'optimizer')?.text ?? ''
+}
+
+/** Bound compact copy by terminal cells; the complete draft remains available through action 1. */
+function previewText(value: string, maxCells: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  const chars = Array.from(normalized)
+  const cellWidth = (char: string) => char.codePointAt(0)! > 0x7f ? 2 : 1
+  const total = chars.reduce((sum, char) => sum + cellWidth(char), 0)
+  if (total <= maxCells) return normalized
+  const limit = Math.max(0, maxCells - 1)
+  let used = 0
+  let end = 0
+  while (end < chars.length && used + cellWidth(chars[end]!) <= limit) {
+    used += cellWidth(chars[end]!)
+    end++
+  }
+  return maxCells > 0 ? `${chars.slice(0, end).join('')}…` : ''
 }
 
 /** Escape and the pane close mark both arrive with origin `person`. */
@@ -104,9 +122,8 @@ export function registerUi(
     const busy = isBusy(workflow.phase)
     // RenderResultOf has no accepted/denied signal for a tree. Keep the key
     // stable as workflow.id+surface and invalidate only once per draw transition.
-    // If the engine rejects the band tree or has no room to draw it, the pane
-    // still hides the original/draft bodies; with no acceptance signal this is
-    // the accepted tradeoff.
+    // The engine has no acceptance signal for the band tree. Compact inline
+    // panes therefore keep a draft preview even when this key is recorded.
     if (!drawnBands.has(key)) {
       drawnBands.add(key)
       $.ui.invalidate('ui.render')
@@ -161,6 +178,39 @@ export function registerUi(
           {workflow.lastError && <Text wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
           {busy && <Text>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
           <Text wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
+        </Box>
+      )
+    }
+
+    if (e.props.placement === 'inline' && e.props.scroll.bodyRows < PANE_ROWS) {
+      // Input is a one-line field; its default submit label sits beside it on
+      // focus. Keep compact copy short so it does not request another row.
+      const inputRows = 1
+      const previewRows = Math.max(0, e.props.scroll.bodyRows - inputRows - 1)
+      const previewColumns = Math.max(1, e.props.bodyColumns - 2)
+      const preview = workflow.draft.trim() || (busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
+      const compactInstruction = retryReady
+        ? typeof Input === 'function'
+          ? <Input key={KEYS.instruction} label="보완 요청" placeholder="보완 내용을 입력하세요" onSubmit={() => undefined} />
+          : <Text wrap="truncate-end">보완: /optimize retry &lt;내용&gt;</Text>
+        : <Text dimColor wrap="truncate-end">보완 요청 불가</Text>
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          {previewRows > 0 && <Text wrap="wrap">{previewText(preview, previewRows * previewColumns)}</Text>}
+          {compactInstruction}
+          <Box flexDirection="row">
+            {draftReady
+              ? <Button key={KEYS.accept} hotkey="1" label="1 넣기" plain autoFocus onPress={() => undefined} />
+              : <Text dimColor>1 넣기</Text>}
+            <Text> · </Text>
+            {draftReady
+              ? <Button key={KEYS.send} hotkey="2" label="2 전송" plain onPress={() => undefined} />
+              : <Text dimColor>2 전송</Text>}
+            <Text> · </Text>
+            {!busy
+              ? <Button key={KEYS.raw} hotkey="3" label="3 원문" plain onPress={() => undefined} />
+              : <Text dimColor>3 원문</Text>}
+          </Box>
         </Box>
       )
     }
