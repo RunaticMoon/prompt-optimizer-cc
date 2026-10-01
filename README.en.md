@@ -16,7 +16,7 @@ Full flow (based on the code):
 4. The submit hook does not wait for the model and returns `{ drop: '프롬프트를 다듬는 중입니다.' }` (the Korean means "Refining the prompt."). The original text does not go to the main model.
 5. A job scheduled with `$.clock.after(1, ...)` reads the context once (`hooks/context.ts`) and calls `$.model.complete` once (`hooks/model.ts`).
 6. Each time the user refines in the pane/prompt box, one round is added (3 rounds maximum by default).
-7. "입력창으로 가져오기" (Bring to prompt box) runs `prompt.fill` with the improved draft and issues a one-shot bypass. When the user edits it and presses Enter, only that draft passes through interception and goes to the main session.
+7. "입력창에 넣기" (Put in prompt box) runs `prompt.fill` with the improved draft and issues a one-shot bypass. When the user edits it and presses Enter, only that draft passes through interception and goes to the main session.
 
 **What it refines**
 
@@ -119,33 +119,31 @@ Skill-directory scaffolding (`claude plugin init|new`) is not provided by this r
 1. Type a request in the prompt box and press Enter.
 2. The hook blocks the submission (`프롬프트를 다듬는 중입니다.`, "Refining the prompt.") and opens the pane (when possible). On a narrow terminal it falls back to prompt-box dialogue mode.
 3. In the pane, refine the improvement request, or use the buttons to handle the result once it arrives.
-4. Press **입력창으로 가져오기** (Bring to prompt box) (recommended) to put the improved draft in the prompt box, review and edit it yourself, then press Enter.
+4. Press **입력창에 넣기** (Put in prompt box) (recommended) to put the improved draft in the prompt box, review and edit it yourself, then press Enter.
 
-### 4.2 Pane buttons
+### 4.2 Pane buttons and key flow
 
 The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its height is 18 rows, focus is taken on the requested pane, and it can be closed with Esc (`hooks/ui/ui-ports.ts`).
 
 | Button / input | Behavior |
 |---|---|
-| **입력창으로 가져오기** (Bring to prompt box) | Closes the pane, fills the prompt box with the improved draft via `replace`, and issues a one-shot bypass. The final Enter is the user's. |
-| **바로 보내기** (Send now) | Immediately sends the improved draft via `$.prompt.submit`. The origin is the engine-attached `plugin` and is not forged. |
-| **원문 보내기** (Send original) | Immediately sends the stored original text. |
-| **다시 다듬기** (Refine again) | Generates the same request once more without a refinement (if the dialogue has a last refinement, it uses that). Active only when `라운드 < 최대` (round < max) and not in progress. |
-| **취소** (Cancel) | Aborts the in-progress call (`AbortController`), restores the original text to the prompt box, and issues a bypass. It does not send automatically. Esc/closing the pane does the same. However, it is refused while transferring to the prompt box (`입력창으로 옮기는 중이라 취소할 수 없습니다`, "Cannot cancel while transferring to the prompt box") or while sending (`전송 중이라 취소할 수 없습니다`, "Cannot cancel while sending"). |
-| **보완 내용** (Refinement) input (`다듬기`, Refine) | Runs one more round with the entered refinement. |
+| **입력창에 넣기 (수정 후 전송)** (Put in prompt box; edit before sending) | Closes the pane, fills the prompt box with the improved draft via `replace`, and issues a one-shot bypass. Review or edit it, then send with Enter. |
+| **보완 내용** (Refinement) input (`Enter로 다시 다듬기`, Enter to refine again) | Runs one more round with the entered refinement. Focus returns to the prompt-box button after completion. |
+| **개선안 바로 전송** (Send improved draft now) | Immediately sends the improved draft via `$.prompt.submit`. The origin is the engine-attached `plugin` and is not forged. |
+| **원문 그대로 전송** (Send original unchanged) | Immediately sends the stored original text without editing it. |
 
-With the pane focused, press a digit to run its button. If the pane is unfocused, use `ctrl+x tab` to focus it first. `Tab` moves between buttons and inputs, and `Enter` presses the selected button. Arrow keys may scroll or move between buttons depending on the Claude Code version and focus state, so digits or `Tab` are the reliable way; `Esc` closes the pane.
+If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력창에 넣기** (Put in prompt box), so Enter activates it. `Tab` moves through the refinement input, Send improved draft now, and Send original unchanged. Enter in the refinement input starts another refinement. Arrow keys (↑↓) depend on the pane placement (a side pane moves focus; the bottom pane on a narrow terminal scrolls the body), so the pane's key hint shows only `Tab`, and `Tab` or digits are the reliable choice. `Esc` closes and cancels the pane.
 
 | Digit | Button |
 |---|---|
-| `1` | Bring to prompt box (`입력창으로 가져오기`) |
-| `2` | Send now (`바로 보내기`) |
-| `3` | Send original (`원문 보내기`) |
-| `4` | Refine again (`다시 다듬기`) |
-| `5` | Cancel (`취소`) |
+| `1` | Put in prompt box; edit then send (`입력창에 넣기`) |
+| `2` | Send improved draft now (`개선안 바로 전송`) |
+| `3` | Send original unchanged (`원문 그대로 전송`) |
 | `0` | Show / hide full original (shown when the original exceeds 24 characters in a narrow layout or 180 in a wide layout) |
 
-Displayed state: it shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중` — collecting / generating / reviewing / failed / delivering / sending), `n/최대회` (n/max rounds), the total returned tokens, the original summary, and the latest optimizer message. The original toggle appears when the original exceeds 24 characters in a narrow layout (pane body at most 90 columns) or 180 characters in a wide layout.
+`Cmd+Enter` is unsupported in the Pane: the Mods API accepts only one digit or lowercase letter for a Button `hotkey`. Use `2` to send immediately.
+
+Displayed state: it shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중` — collecting / generating / reviewing / failed / delivering / sending), `n/최대회` (n/max rounds), the total returned tokens, the current draft, the latest optimizer message in its own section, and the original summary. The original toggle appears when the original exceeds 24 characters in a narrow layout (pane body at most 90 columns) or 180 characters in a wide layout.
 On a narrow terminal, the pane's limited height may put the original below the first screen. Use `Tab` to move to the toggle or press `0` to access it.
 
 ### 4.3 Display by surface
@@ -201,7 +199,7 @@ These commands first pass through the `prompt.submit` classification as slash co
 
 Long-term memory plugins such as claude-mem and OpenViking inject memory into a session through classic hooks (SessionStart/UserPromptSubmit/Stop). A submission this plugin intercepted, and the improvement dialogue, do not run those hooks, so the original text and the refinement dialogue are not recorded in that plugin's memory.
 
-If you bring the improved draft over and press Enter, use the pane's **바로 보내기** (Send now)/**원문 보내기** (Send original), use `/optimize send|raw`, or send with the `::raw` prefix, UserPromptSubmit runs once with the final text, and the memory it injects at that point is included in the main request as usual (verified on Claude Code 2.1.286).
+If you bring the improved draft over and press Enter, use the pane's **개선안 바로 전송** (Send improved draft now)/**원문 그대로 전송** (Send original unchanged), use `/optimize send|raw`, or send with the `::raw` prefix, UserPromptSubmit runs once with the final text, and the memory it injects at that point is included in the main request as usual (verified on Claude Code 2.1.286).
 
 The optimizer only observes (never modifies) the `additionalContext` injected into the session by classic hooks (`SessionStart`/`UserPromptSubmit`) in settings or a plugin's `hooks.json`, as seen in the classic chain below this plugin, and puts it in the "Long-term memory" section of the snapshot (at most 2000 characters, `CONTEXT_MEMORY_CHARS`). Memory injected at session start is used from the first prompt. UserPromptSubmit memory is what was retrieved for **the prompt that last went to the main session**; it is not newly retrieved for the prompt being refined now (at interception time that hook has not run yet). A new SessionStart (start, resume, clear, compact) clears the previous-prompt memory. Memory follows the session id the classic hook reports, so after a `/clear` — where a new session id arrives with no `session.start` — the memory that SessionStart injected is used from the next request on. SessionStart changes sessions (a UserPromptSubmit never replaces a stored session; it only fills an empty store), a session end clears the ending session's memory only when its id matches the stored classic session (otherwise the next SessionStart replaces it), and classic hooks raised inside a subagent (with `agent_id` set) are ignored.
 
@@ -360,7 +358,7 @@ Turning `modelGuidance` off still keeps the common editing guidance, and the fix
 - **In-progress turns and waiting submissions**: submissions with a `turnId` or with `wait === true` are left to the main session's queue as is.
 - **Slash commands and shell input**: input starting with `/` or `!` is not intercepted (commands are handled by `command.run`).
 - **Overly long originals**: if the original exceeds 6000 characters (`MAX_ORIGINAL_CHARS`), it is passed through without improvement.
-- **Context loss on explicit send (Mod hooks only)**: "바로 보내기" (Send now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text })`. The engine's `PromptSubmitArgs` has no `context` field, so blocks that a Mod hook above this plugin may have attached with `context` on the initial submission are not re-attached on an explicit send. Classic hooks (settings/plugin `hooks.json`), by contrast, run again on an explicit send, so the long-term memory injection is kept (verified on 2.1.286). The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
+- **Context loss on explicit send (Mod hooks only)**: "개선안 바로 전송" (Send improved draft now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text })`. The engine's `PromptSubmitArgs` has no `context` field, so blocks that a Mod hook above this plugin may have attached with `context` on the initial submission are not re-attached on an explicit send. Classic hooks (settings/plugin `hooks.json`), by contrast, run again on an explicit send, so the long-term memory injection is kept (verified on 2.1.286). The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
 - **Cancel refusals**: cancel is refused while already transferring to the prompt box (`transferring`) or while sending (`sending`) (respectively `입력창으로 옮기는 중이라 취소할 수 없습니다`, "Cannot cancel while transferring to the prompt box", and `전송 중이라 취소할 수 없습니다`, "Cannot cancel while sending"). At the points where an in-progress call is aborted (`collecting`/`generating`/`reviewing`/`failed`), cancel works normally.
 - **Empty raw submission drop**: if what follows `rawPrefix` is empty or only whitespace, it is dropped with `보낼 내용이 없습니다.` ("There is nothing to send."). The prefix is not delivered to the main session.
 - **Closing the pane = cancel**: pressing Esc/closing in the pane (origin `person`) cancels the job in progress and restores the original text.

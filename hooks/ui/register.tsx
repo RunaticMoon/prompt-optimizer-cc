@@ -13,8 +13,6 @@ const KEYS = {
   accept: 'optimizer:accept',
   send: 'optimizer:send',
   raw: 'optimizer:raw',
-  retry: 'optimizer:retry',
-  cancel: 'optimizer:cancel',
 } as const
 
 /** Keep `$` at the hook registration site; helpers receive only method closures. */
@@ -109,7 +107,6 @@ export function registerUi(
 
     const maxRounds = getMaxRounds()
     const busy = ['idle', 'collecting', 'generating', 'transferring', 'sending'].includes(workflow.phase)
-    const cancelReady = !['transferring', 'sending'].includes(workflow.phase)
     const draftReady = Boolean(workflow.draft.trim()) && !busy
     const retryReady = !busy && workflow.rounds < maxRounds
     const tokens = Object.values(workflow.usage).reduce((sum, count) => sum + count, 0)
@@ -129,7 +126,12 @@ export function registerUi(
           <Text wrap="wrap">{workflow.original}</Text>
           <Text bold>현재 개선안</Text>
           <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
-          {message && <Text wrap="wrap">{`옵티마이저: ${message}`}</Text>}
+          {message && (
+            <Box marginTop={1} flexDirection="column">
+              <Text bold>옵티마이저 메시지</Text>
+              <Text wrap="wrap">{message}</Text>
+            </Box>
+          )}
           {workflow.lastError && <Text wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
           {busy && <Text>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
           <Text wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
@@ -137,33 +139,46 @@ export function registerUi(
       )
     }
 
-    const actions = (
+    const acceptAction = draftReady
+      ? <Button key={KEYS.accept} hotkey="1" label="1: 입력창에 넣기 (수정 후 전송)" variant="primary" autoFocus onPress={() => undefined} />
+      : <Text dimColor>[1: 입력창에 넣기 · 사용 불가]</Text>
+    const sendActions = (
       <Box marginTop={1} flexDirection="row" flexWrap="wrap" gap={1}>
         {draftReady
-          ? <Button key={KEYS.accept} hotkey="1" label="1: 입력창으로 가져오기" variant="primary" autoFocus onPress={() => undefined} />
-          : <Text dimColor>[1: 입력창으로 가져오기 · 사용 불가]</Text>}
-        {draftReady
-          ? <Button key={KEYS.send} hotkey="2" label="2: 바로 보내기" onPress={() => undefined} />
-          : <Text dimColor>[2: 바로 보내기 · 사용 불가]</Text>}
+          ? <Button key={KEYS.send} hotkey="2" label="2: 개선안 바로 전송" onPress={() => undefined} />
+          : <Text dimColor>[2: 개선안 바로 전송 · 사용 불가]</Text>}
         {!busy
-          ? <Button key={KEYS.raw} hotkey="3" label="3: 원문 보내기" onPress={() => undefined} />
-          : <Text dimColor>[3: 원문 보내기 · 사용 불가]</Text>}
-        {retryReady
-          ? <Button key={KEYS.retry} hotkey="4" label="4: 다시 다듬기" onPress={() => undefined} />
-          : <Text dimColor>[4: 다시 다듬기 · 사용 불가]</Text>}
-        {cancelReady
-          ? <Button key={KEYS.cancel} hotkey="5" label="5: 취소" role="dismiss" onPress={() => undefined} />
-          : <Text dimColor>[5: 취소 · 사용 불가]</Text>}
+          ? <Button key={KEYS.raw} hotkey="3" label="3: 원문 그대로 전송" onPress={() => undefined} />
+          : <Text dimColor>[3: 원문 그대로 전송 · 사용 불가]</Text>}
       </Box>
     )
-    const keyHint = (
-      <Text dimColor wrap="wrap">{e.props.isFocused
-        ? '숫자키 실행 · Tab 이동 · Enter 선택 · Esc 닫기'
-        : 'ctrl+x tab으로 포커스 · 숫자키 실행 · Tab 이동 · Enter 선택 · Esc 닫기'}</Text>
-    )
+    // Arrows move focus on some hosts but scroll the pane body on others, so the
+    // hint teaches Tab instead. Only keys that actually work this phase are
+    // advertised: a busy run cannot accept or send, and a run without a draft
+    // has no Enter/2 to offer.
+    const transferring = workflow.phase === 'transferring' || workflow.phase === 'sending'
+    const keyHintText = transferring
+      ? '전송 중입니다'
+      : busy
+        ? '생성 중에는 Esc로 취소할 수 있습니다'
+        : e.props.isFocused
+          ? [
+              ...(draftReady ? ['Enter 입력창'] : []),
+              'Tab 이동',
+              ...(draftReady ? ['2 바로 전송'] : []),
+              '3 원문 전송',
+              'Esc 닫기',
+            ].join(' · ')
+          : [
+              'ctrl+x tab 포커스',
+              'Tab 이동',
+              draftReady ? '1/2/3 선택' : '3 선택',
+              'Esc 닫기',
+            ].join(' · ')
+    const keyHint = <Text dimColor wrap="wrap">{keyHintText}</Text>
     const instruction = retryReady
       ? typeof Input === 'function'
-        ? <Input key={KEYS.instruction} label="보완 내용" placeholder="수정하거나 확인할 내용을 입력하세요" submitLabel="다듬기" onSubmit={() => undefined} />
+        ? <Input key={KEYS.instruction} label="보완 내용" placeholder="수정하거나 확인할 내용을 입력하세요" submitLabel="Enter로 다시 다듬기" onSubmit={() => undefined} />
         : <Text wrap="wrap">보완은 /optimize retry &lt;보완 내용&gt;</Text>
       : <Text dimColor>지금은 보완 요청을 입력할 수 없습니다.</Text>
 
@@ -173,16 +188,23 @@ export function registerUi(
       return (
         <Box flexDirection="column" paddingX={1}>
           <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
-          {actions}
           {keyHint}
+          <Box marginTop={1}>{acceptAction}</Box>
           <Box marginTop={1} flexDirection="column">
             <Text bold>보완 요청</Text>
             {instruction}
           </Box>
+          {sendActions}
           <Box marginTop={1} flexDirection="column">
             <Text bold>현재 개선안</Text>
             <Text wrap="wrap">{previewText(draft, Math.max(32, bodyColumns - 4) * 2, '… (전체는 가져오기로 확인)')}</Text>
           </Box>
+          {message && (
+            <Box marginTop={1} flexDirection="column">
+              <Text bold>옵티마이저 메시지</Text>
+              <Text wrap="wrap">{previewText(message, Math.max(32, bodyColumns - 4) * 2, '…')}</Text>
+            </Box>
+          )}
           <Box marginTop={1} flexDirection="column">
             <Text bold>원문</Text>
             <Text wrap="wrap">{showOriginal ? workflow.original : previewText(workflow.original, Math.max(24, bodyColumns - 4), '…')}</Text>
@@ -190,7 +212,6 @@ export function registerUi(
               ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
               : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />)}
           </Box>
-          {message && <Text wrap="wrap">{`옵티마이저: ${previewText(message, Math.max(32, bodyColumns - 4) * 2, '…')}`}</Text>}
           {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
           {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
         </Box>
@@ -200,6 +221,23 @@ export function registerUi(
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+        {keyHint}
+        <Box marginTop={1}>{acceptAction}</Box>
+        <Box marginTop={1} flexDirection="column">
+          <Text bold>보완 요청</Text>
+          {instruction}
+        </Box>
+        {sendActions}
+        <Box marginTop={1} flexDirection="column">
+          <Text bold>현재 개선안</Text>
+          <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+        </Box>
+        {message && (
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>옵티마이저 메시지</Text>
+            <Text wrap="wrap">{message}</Text>
+          </Box>
+        )}
         <Box marginTop={1} flexDirection="column">
           <Text bold>원문</Text>
           <Text wrap="wrap">{showOriginal ? workflow.original : originalSummary}</Text>
@@ -209,16 +247,6 @@ export function registerUi(
               : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />
           )}
         </Box>
-        <Box marginTop={1} flexDirection="column">
-          <Text bold>현재 개선안</Text>
-          <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
-        </Box>
-        {message && (
-          <Box marginTop={1} flexDirection="column">
-            <Text bold>옵티마이저 메시지 / 질문</Text>
-            <Text wrap="wrap">{message}</Text>
-          </Box>
-        )}
         {workflow.lastError && (
           <Box marginTop={1} flexDirection="column">
             <Text bold color="error">오류</Text>
@@ -226,12 +254,6 @@ export function registerUi(
           </Box>
         )}
         {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
-        <Box marginTop={1} flexDirection="column">
-          <Text bold>보완 요청</Text>
-          {instruction}
-        </Box>
-        {actions}
-        {keyHint}
       </Box>
     )
   })
@@ -248,17 +270,12 @@ export function registerUi(
       return { element: e.element }
     }
 
-    if (e.element === KEYS.cancel) {
-      if (!['transferring', 'sending'].includes(workflow.phase)) await controller.cancel(portsOf($))
-      return { element: e.element }
-    }
     if (!canAct(workflow)) return { element: e.element }
 
     const ports = portsOf($)
     if (e.element === KEYS.accept && workflow.draft.trim()) await controller.accept(ports)
     else if (e.element === KEYS.send && workflow.draft.trim()) await controller.sendDraft(ports)
     else if (e.element === KEYS.raw) await controller.sendOriginal(ports)
-    else if (e.element === KEYS.retry && workflow.rounds < getMaxRounds()) await controller.retry(ports)
     else return next(e)
     return { element: e.element }
   })
@@ -269,6 +286,15 @@ export function registerUi(
     const instruction = e.value.trim()
     if (canAct(workflow) && workflow.ui === 'pane' && workflow.rounds < getMaxRounds() && instruction) {
       await controller.refine(portsOf($), instruction)
+      const updated = controller.getState().workflow
+      if (updated?.ui === 'pane' && updated.draft.trim() && canAct(updated)) {
+        $.ui.invalidate('ui.render')
+        try {
+          await $.ui.focus({ requestId: PANE_ID, key: KEYS.accept })
+        } catch {
+          // Focus may be unavailable after the person moves to another site.
+        }
+      }
     }
     return { element: e.element, value: e.value }
   })

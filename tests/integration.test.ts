@@ -1199,9 +1199,9 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(w.modelReads).toBe(2)
   })
 
-  // Entry 3: the pane UI's Input (refine) and retry button both go through
-  // `ui/register.tsx`'s own `portsOf`, and both re-read the model.
-  test('MG4 · pane refine·retry 경로가 모델 전환을 반영한다', { options: { uiMode: 'pane' } }, async ($, on) => {
+  // Entry 3: repeated pane Input refinements go through `ui/register.tsx`'s
+  // own `portsOf`, and each round re-reads the model.
+  test('MG4 · pane 보완 입력이 매 라운드 모델 전환을 반영한다', { options: { uiMode: 'pane' } }, async ($, on) => {
     const w = setup($, on)
     await w.start()
     w.setModelValue(OPUS_1M)
@@ -1218,7 +1218,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
 
     w.setModelValue(FABLE_51)
-    await mounted.press({ key: 'optimizer:retry' })
+    await mounted.input({ key: 'optimizer:instruction', text: '더 명확하게' })
     expect(w.completes).toHaveLength(3)
     expect(w.completes[2]?.system ?? '').toContain(`${BLOCK_TAG} fable-5-1]`)
     expect(w.completes[2]?.system ?? '').not.toContain(`${BLOCK_TAG} sonnet-5-5]`)

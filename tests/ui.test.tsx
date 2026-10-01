@@ -41,11 +41,14 @@ function state(item: Workflow | null): RuntimeState {
   }
 }
 
-function fakeController(current: RuntimeState) {
+function fakeController(current: RuntimeState, onRefine?: () => void) {
   const calls: string[] = []
   const controller = {
     getState: () => current,
-    refine: async (_ports: unknown, text: string) => { calls.push(`refine:${text}`) },
+    refine: async (_ports: unknown, text: string) => {
+      calls.push(`refine:${text}`)
+      onRefine?.()
+    },
     retry: async () => { calls.push('retry') },
     accept: async () => { calls.push('accept') },
     sendDraft: async () => { calls.push('sendDraft') },
@@ -71,7 +74,7 @@ type CapturedHook = (...args: unknown[]) => unknown
  * `ui.render`'s hook calls `$.ui.resolve(e)`, available only on the hook-side
  * `$`; the probe session.start hook captures one so the render hook can draw.
  */
-async function captureUi($: Engine, on: On, controller: OptimizerController, omittedControl?: 'Button' | 'Input'): Promise<{
+async function captureUi($: Engine, on: On, controller: OptimizerController, omittedControl?: 'Button' | 'Input', focusCalls?: string[], focusFail?: 'deny' | 'throw'): Promise<{
   render: (e: RenderInput<'Pane'>) => Promise<unknown>
   press: (e: unknown) => Promise<unknown>
   input: (e: unknown) => Promise<unknown>
@@ -93,7 +96,16 @@ async function captureUi($: Engine, on: On, controller: OptimizerController, omi
   const call = (event: string, e: unknown): Promise<unknown> => {
     const hook = hooks.get(event)
     if (hook === undefined) throw new Error(`no ${event} hook was registered`)
-    const engine = event === 'ui.render' && omittedControl
+    const engine = event === 'ui.input' && focusCalls
+      ? { ui: {
+          invalidate: (kind: string) => { focusCalls.push(`invalidate:${kind}`) },
+          focus: async (args: { requestId: string; key: string }) => {
+            focusCalls.push(`focus:${args.requestId}:${args.key}`)
+            if (focusFail === 'throw') throw new Error('focus unavailable')
+            return focusFail === 'deny' ? { deny: 'the ring did not move' } : {}
+          },
+        } }
+      : event === 'ui.render' && omittedControl
       ? {
           ui: {
             resolve: async (input: RenderInput<'Pane'>) => {
@@ -154,6 +166,12 @@ describe('optimizer UI', () => {
     expect(drawn).toContain('검토')
     expect(drawn).toContain('한국어로 작성한 개선안입니다.')
     expect(drawn).toContain('/optimize accept · send · raw · cancel · retry <보완>')
+    // The optimizer message is its own section after the draft, not an inline prefix.
+    expect(drawn).toContain('옵티마이저 메시지')
+    expect(drawn).toContain('추가 조건이 있나요?')
+    expect(drawn).not.toContain('옵티마이저: 추가 조건이 있나요?')
+    expect(drawn.indexOf('원문')).toBeLessThan(drawn.indexOf('현재 개선안'))
+    expect(drawn.indexOf('현재 개선안')).toBeLessThan(drawn.indexOf('옵티마이저 메시지'))
   })
 
   test('mobile table without Input keeps buttons and shows the retry command', async ($, on) => {
@@ -161,7 +179,7 @@ describe('optimizer UI', () => {
     const ui = await captureUi($, on, controller, 'Input')
     const drawn = textOf(await ui.render({ ...PANE, surface: 'mobile' }))
     expect(drawn).toContain('한국어로 작성한 개선안입니다.')
-    for (const label of ['입력창으로 가져오기', '바로 보내기', '원문 보내기', '다시 다듬기', '취소']) {
+    for (const label of ['입력창에 넣기', '개선안 바로 전송', '원문 그대로 전송']) {
       expect(drawn).toContain(label)
     }
     expect(drawn).toContain('/optimize retry <보완 내용>')
@@ -179,8 +197,8 @@ describe('optimizer UI', () => {
       const pane = { ...PANE, viewport: { columns, rows: 40 } }
       const drawn = textOf(await ui.render(pane))
       for (const [digit, label] of [
-        ['1', '입력창으로 가져오기'], ['2', '바로 보내기'],
-        ['3', '원문 보내기'], ['4', '다시 다듬기'], ['5', '취소'],
+        ['1', '입력창에 넣기 (수정 후 전송)'], ['2', '개선안 바로 전송'],
+        ['3', '원문 그대로 전송'],
       ]) {
         expect(drawn).toContain(`"hotkey":"${digit}"`)
         expect(drawn).toContain(`"label":"${digit}: ${label}"`)
@@ -189,25 +207,119 @@ describe('optimizer UI', () => {
       expect(drawn).toContain('"plain":true')
       expect(drawn).toContain('"label":"원문 전체 보기"')
       expect(drawn).not.toContain('"label":"0:')
-      expect(drawn).toContain('숫자키 실행 · Tab 이동 · Enter 선택 · Esc 닫기')
-      expect(drawn).not.toContain('ctrl+x tab으로 포커스')
+      expect(drawn).toContain('"autoFocus":true')
+      expect(drawn).toContain('Enter 입력창 · Tab 이동 · 2 바로 전송 · 3 원문 전송 · Esc 닫기')
+      expect(drawn).not.toContain('↑↓')
+      expect(drawn).not.toContain('ctrl+x tab 포커스')
+      expect(drawn).not.toContain('"hotkey":"4"')
+      expect(drawn).not.toContain('"hotkey":"5"')
+      expect(drawn).not.toContain('optimizer:retry')
+      expect(drawn).not.toContain('optimizer:cancel')
+      expect(drawn.indexOf('optimizer:accept')).toBeLessThan(drawn.indexOf('optimizer:instruction'))
+      expect(drawn.indexOf('optimizer:instruction')).toBeLessThan(drawn.indexOf('optimizer:send'))
+      expect(drawn.indexOf('optimizer:send')).toBeLessThan(drawn.indexOf('optimizer:raw'))
+      expect(drawn.indexOf('현재 개선안')).toBeLessThan(drawn.indexOf('옵티마이저 메시지'))
+      expect(drawn.indexOf('옵티마이저 메시지')).toBeLessThan(drawn.lastIndexOf('원문'))
 
       const unfocused = textOf(await ui.render({ ...pane, props: { ...PANE.props, isFocused: false } }))
-      expect(unfocused).toContain('ctrl+x tab으로 포커스')
+      expect(unfocused).toContain('ctrl+x tab 포커스')
     }
 
     current.workflow = workflow('generating')
     const disabled = textOf(await ui.render(PANE))
-    for (const label of ['1: 입력창으로 가져오기', '2: 바로 보내기', '3: 원문 보내기', '4: 다시 다듬기']) {
+    for (const label of ['1: 입력창에 넣기', '2: 개선안 바로 전송', '3: 원문 그대로 전송']) {
       expect(disabled).toContain(`${label} · 사용 불가`)
     }
 
     current.workflow = { ...item, phase: 'sending' }
     for (const columns of [80, 110]) {
       const sending = textOf(await ui.render({ ...PANE, viewport: { columns, rows: 40 } }))
-      expect(sending).toContain('5: 취소 · 사용 불가')
       expect(sending).toContain('0: 원문 전체 보기 · 사용 불가')
     }
+  })
+
+  test('key guidance omits arrows and matches busy and draft-less states', async ($, on) => {
+    const current = state(workflow())
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const paneAt = (isFocused: boolean) =>
+      ui.render({ ...PANE, viewport: { columns: 80, rows: 40 }, props: { ...PANE.props, isFocused } })
+
+    // A ready draft: the focused hint teaches Tab, never the arrows.
+    const focused = textOf(await paneAt(true))
+    expect(focused).toContain('Enter 입력창 · Tab 이동 · 2 바로 전송 · 3 원문 전송 · Esc 닫기')
+    expect(focused).not.toContain('↑↓')
+    expect(textOf(await paneAt(false))).toContain('ctrl+x tab 포커스 · Tab 이동 · 1/2/3 선택 · Esc 닫기')
+
+    // Busy (generating): 1/2/3 are all disabled, so the hint is a short note.
+    current.workflow = workflow('generating')
+    expect(textOf(await paneAt(true))).toContain('생성 중에는 Esc로 취소할 수 있습니다')
+    expect(textOf(await paneAt(false))).toContain('생성 중에는 Esc로 취소할 수 있습니다')
+
+    // Transferring/sending: Esc cannot cancel, so the note says it is sending.
+    current.workflow = workflow('sending')
+    expect(textOf(await paneAt(true))).toContain('전송 중입니다')
+    expect(textOf(await paneAt(false))).toContain('전송 중입니다')
+
+    // Failed with no draft: Enter and 2 must not be advertised.
+    current.workflow = { ...workflow('failed'), draft: '', lastError: '실패했습니다' }
+    const failedFocused = textOf(await paneAt(true))
+    expect(failedFocused).toContain('Tab 이동 · 3 원문 전송 · Esc 닫기')
+    expect(failedFocused).not.toContain('Enter 입력창')
+    expect(failedFocused).not.toContain('2 바로 전송')
+    const failedUnfocused = textOf(await paneAt(false))
+    expect(failedUnfocused).toContain('ctrl+x tab 포커스 · Tab 이동 · 3 선택 · Esc 닫기')
+    expect(failedUnfocused).not.toContain('1/2/3 선택')
+  })
+
+  test('refine focus refusal still returns the input result', async ($, on) => {
+    const current = state(workflow())
+    const { controller } = fakeController(current)
+    const focusCalls: string[] = []
+    const ui = await captureUi($, on, controller, undefined, focusCalls, 'deny')
+    const result = await ui.input({
+      component: 'Pane', requestId: PANE_ID, plugin: 'test', kind: 'submit', element: 'optimizer:instruction', value: '더 짧게',
+    })
+    expect(result).toEqual({ element: 'optimizer:instruction', value: '더 짧게' })
+    expect(focusCalls).toEqual(['invalidate:ui.render', `focus:${PANE_ID}:optimizer:accept`])
+  })
+
+  test('refine focus throw still returns the input result', async ($, on) => {
+    const current = state(workflow())
+    const { controller } = fakeController(current)
+    const focusCalls: string[] = []
+    const ui = await captureUi($, on, controller, undefined, focusCalls, 'throw')
+    const result = await ui.input({
+      component: 'Pane', requestId: PANE_ID, plugin: 'test', kind: 'submit', element: 'optimizer:instruction', value: '더 짧게',
+    })
+    expect(result).toEqual({ element: 'optimizer:instruction', value: '더 짧게' })
+    expect(focusCalls).toEqual(['invalidate:ui.render', `focus:${PANE_ID}:optimizer:accept`])
+  })
+
+  test('refine does not focus when the reply leaves no draft', async ($, on) => {
+    const current = state(workflow())
+    const { controller } = fakeController(current, () => {
+      current.workflow = { ...workflow('failed'), draft: '', lastError: '실패했습니다' }
+    })
+    const focusCalls: string[] = []
+    const ui = await captureUi($, on, controller, undefined, focusCalls)
+    await ui.input({
+      component: 'Pane', requestId: PANE_ID, plugin: 'test', kind: 'submit', element: 'optimizer:instruction', value: '더 짧게',
+    })
+    expect(focusCalls).toEqual([])
+  })
+
+  test('refine does not focus when the workflow moved to the composer', async ($, on) => {
+    const current = state(workflow())
+    const { controller } = fakeController(current, () => {
+      current.workflow = { ...workflow(), ui: 'composer' }
+    })
+    const focusCalls: string[] = []
+    const ui = await captureUi($, on, controller, undefined, focusCalls)
+    await ui.input({
+      component: 'Pane', requestId: PANE_ID, plugin: 'test', kind: 'submit', element: 'optimizer:instruction', value: '더 짧게',
+    })
+    expect(focusCalls).toEqual([])
   })
 
   test('expanded original keeps its plain label when the toggle becomes unavailable', async ($, on) => {
@@ -239,7 +351,7 @@ describe('optimizer UI', () => {
     }
   })
 
-  test('80-column pane keeps the header and all actions before a long draft', async ($, on) => {
+  test('80-column pane keeps the header and actions before a long draft', async ($, on) => {
     const item = workflow()
     item.original = '오래된 원문 '.repeat(30)
     item.draft = '길게 작성한 개선안 '.repeat(80)
@@ -250,8 +362,8 @@ describe('optimizer UI', () => {
       viewport: { columns: 80, rows: 40 },
       props: { ...PANE.props, bodyColumns: 74 },
     }))
-    expect(drawn.indexOf('프롬프트 옵티마이저')).toBeLessThan(drawn.indexOf('입력창으로 가져오기'))
-    for (const label of ['입력창으로 가져오기', '바로 보내기', '원문 보내기', '다시 다듬기', '취소']) {
+    expect(drawn.indexOf('프롬프트 옵티마이저')).toBeLessThan(drawn.indexOf('입력창에 넣기'))
+    for (const label of ['입력창에 넣기', '개선안 바로 전송', '원문 그대로 전송']) {
       expect(drawn.indexOf(label)).toBeLessThan(drawn.indexOf('현재 개선안'))
     }
     expect(drawn).toContain('… (전체는 가져오기로 확인)')
@@ -271,8 +383,6 @@ describe('optimizer UI', () => {
       ['optimizer:accept', 'accept'],
       ['optimizer:send', 'sendDraft'],
       ['optimizer:raw', 'sendOriginal'],
-      ['optimizer:retry', 'retry'],
-      ['optimizer:cancel', 'cancel'],
     ] as const
     for (const [key, call] of actions) {
       await press(key)
@@ -282,14 +392,14 @@ describe('optimizer UI', () => {
 
     current.workflow = workflow('generating')
     const busy = textOf(await ui.render(PANE))
-    expect(busy).toContain('1: 입력창으로 가져오기 · 사용 불가')
+    expect(busy).toContain('1: 입력창에 넣기 · 사용 불가')
     expect(busy).toContain('잠시 기다려 주세요.')
     await press('optimizer:accept')
     expect(calls).toHaveLength(actions.length)
 
     current.workflow = { ...workflow('failed'), draft: '', lastError: '다시 시도할 수 있습니다.' }
     const failed = textOf(await ui.render(PANE))
-    expect(failed).toContain('1: 입력창으로 가져오기 · 사용 불가')
+    expect(failed).toContain('1: 입력창에 넣기 · 사용 불가')
     expect(failed).toContain('다시 시도할 수 있습니다.')
     await press('optimizer:send')
     expect(calls).toHaveLength(actions.length)
@@ -298,14 +408,17 @@ describe('optimizer UI', () => {
   test('Input Enter refines; an empty instruction does not', async ($, on) => {
     const current = state(workflow())
     const { controller, calls } = fakeController(current)
-    const ui = await captureUi($, on, controller)
+    const focusCalls: string[] = []
+    const ui = await captureUi($, on, controller, undefined, focusCalls)
     const type = (value: string) =>
       ui.input({ component: 'Pane', requestId: PANE_ID, plugin: 'test', kind: 'submit', element: 'optimizer:instruction', value })
 
     await type(' 더 짧게 ')
     expect(calls).toEqual(['refine:더 짧게'])
+    expect(focusCalls).toEqual(['invalidate:ui.render', `focus:${PANE_ID}:optimizer:accept`])
     await type('   ')
     expect(calls).toEqual(['refine:더 짧게'])
+    expect(focusCalls).toHaveLength(2)
   })
 
   test('other pane requests pass through unchanged', async ($, on) => {
