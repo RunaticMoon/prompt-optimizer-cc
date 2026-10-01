@@ -3,8 +3,17 @@
   "version": "0.1.0",
   "description": "Drafts and improves the prompt you are about to send before the main session sees it: it keeps the submission out of the transcript, holds a short optimizer dialogue in its own state (a pane, or the prompt box itself on narrow terminals), and puts a finished draft back in the prompt box for your own Enter. One cheap completion per round, no fork, no transcript rewrite.",
   "author": {
-    "name": "prompt-optimizer"
+    "name": "RunaticMoon"
   },
+  "homepage": "https://github.com/RunaticMoon/prompt-optimizer-cc",
+  "repository": "https://github.com/RunaticMoon/prompt-optimizer-cc",
+  "keywords": [
+    "prompt",
+    "prompt-optimizer",
+    "hooks",
+    "claude-code"
+  ],
+  "license": "MIT",
   "userConfig": {
     "enabled": {
       "type": "boolean",

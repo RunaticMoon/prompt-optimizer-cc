@@ -1,6 +1,6 @@
 # prompt-optimizer (Claude Code Mod)
 
-**English summary.** prompt-optimizer is a Claude Code Mod that intercepts the prompt you are about to send, drafts and improves it with its own cheap single model completion, and hands the finished draft back to the prompt box for your own Enter. The submission never reaches the main session's model turn while it is being improved. It keeps the whole improvement dialogue in plugin state (a focus pane, or the prompt box itself on narrow terminals), makes **one** `model.complete` call per round, never calls `model.fork`, never rewrites the transcript, and never turns the dialogue into a main-session turn. It still spends usage against the same account.
+**한국어** | [English](README.en.md)
 
 이 문서의 모든 명령·설정 키·기본값은 이 저장소의 코드(`.claude-plugin/plugin.json`, `hooks/*`)와 설치된 CLI 2.1.285의 도움말에서 확인한 값만 적었다.
 
@@ -38,7 +38,64 @@ Mod API는 early access라 버전 간 계약이 바뀔 수 있다. 실제로 2.1
 
 ## 3. 설치·실행
 
-이 저장소는 마켓플레이스(`marketplace.json`)를 제공하지 않는다. 지원하는 설치·실행 방법은 세션 한정 로더뿐이다.
+마켓플레이스 이름은 `prompt-optimizer-cc`, 플러그인 이름은 `prompt-optimizer`다.
+
+터미널에서 설치:
+
+```bash
+claude plugin marketplace add RunaticMoon/prompt-optimizer-cc
+claude plugin install prompt-optimizer@prompt-optimizer-cc
+```
+
+`marketplace add`에는 `--scope` 옵션이 있다(user 기본 / project / local).
+
+세션 안에서 설치하려면:
+
+```text
+/plugin marketplace add RunaticMoon/prompt-optimizer-cc
+/plugin install prompt-optimizer@prompt-optimizer-cc
+```
+
+실행에는 여전히 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` 환경 변수가 필요하다. 없으면 훅 모듈이 켜지지 않아 아무 것도 가로채지 않는다.
+
+```bash
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude
+```
+
+셸 프로필에 넣어 두려면:
+
+```bash
+export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
+```
+
+또는 Claude Code 설정 파일(`~/.claude/settings.json`)의 `env`에 넣어 두면 셸 설정 없이 매번 켜진다:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+  }
+}
+```
+
+기존 설정 파일이 있으면 `env` 키에 병합하고 다른 설정을 덮어쓰지 않는다.
+
+업데이트:
+
+```bash
+claude plugin marketplace update prompt-optimizer-cc
+claude plugin update prompt-optimizer@prompt-optimizer-cc
+```
+
+제거:
+
+```bash
+claude plugin uninstall prompt-optimizer@prompt-optimizer-cc
+```
+
+### 3.1 개발·로컬 체크아웃용
+
+체크아웃한 디렉터리를 세션에 직접 올릴 수도 있다.
 
 ```bash
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
@@ -49,7 +106,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 - 로드되면 `.claude-plugin/plugin.json`과 `hooks/hooks.json`의 모듈(`./register.ts`)이 함께 올라온다.
 - 같은 플래그 없이 실행하면 훅이 켜지지 않으므로 아무 것도 가로채지 않는다.
 
-CLI 도움말에 존재하지만 이 저장소가 제공하지 않는 경로: 마켓플레이스 설치(`claude plugin install`), 스킬 디렉터리 스캐폴딩(`claude plugin init|new`). 사용할 거라면 별도로 마켓플레이스 정의가 필요하다.
+스킬 디렉터리 스캐폴딩(`claude plugin init|new`)은 이 저장소가 제공하지 않는다.
 
 ## 4. 사용법
 
@@ -165,7 +222,7 @@ prompt-optimizer.systemPromptFile
 
 여기서 값을 바꾸면 기준 설정에 반영되고, 같은 키에 걸려 있던 세션 한정 override는 지워진다.
 
-`claude plugin configure <plugin>`(CLI 도움말에 존재)도 옵션 값을 보여주고 `--values-stdin`으로 저장할 수 있다. 다만 이 저장소는 마켓플레이스/설치 패키지를 제공하지 않으므로 세션 한정 로더와의 연동은 별도로 확인해야 한다.
+`claude plugin configure <plugin>`(CLI 도움말에 존재)도 옵션 값을 보여주고 `--values-stdin`으로 저장할 수 있다. 다만 `--plugin-dir` 세션 한정 로더와의 연동은 별도로 확인해야 한다.
 
 ### 5.2 `/optimize on|off|model`의 저장 범위
 
@@ -237,7 +294,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 |---|---|---|
 | `npm run typecheck` | `node scripts/check-types.mjs` | 생성 타입 존재 확인 후 `tsc -p tsconfig.json` |
 | `npm test` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .` | Mod 테스트 실행(API 비용 없음, mock 엔진) |
-| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .` | 매니페스트·훅 검증 |
+| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/marketplace.json && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json` | 마켓플레이스·매니페스트·훅 검증 |
 | `npm run check:package` | `node scripts/check-package.mjs` | 추적 파일에 생성 타입/참조/공식 선언이 없는지 확인 |
 
 파일 구조:
@@ -245,6 +302,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 ```text
 .claude-plugin/
   plugin.json          # 매니페스트: 이름·userConfig 12개 키
+  marketplace.json     # 마켓플레이스 정의(이름·owner·plugins)
   types/               # CLI가 생성, gitignore, 커밋 금지
 hooks/
   hooks.json           # {"modules":["./register.ts"]}
@@ -280,4 +338,4 @@ tsconfig.json          # .claude-plugin/types/tsconfig.json 확장
 
 ## 9. 라이선스
 
-이 저장소에는 `LICENSE` 파일이 없다. 라이선스는 **미정**이다.
+이 저장소는 MIT 라이선스다. 전문은 [LICENSE](LICENSE).
