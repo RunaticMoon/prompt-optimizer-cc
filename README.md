@@ -187,7 +187,9 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 
 개선안을 가져와 Enter 하거나, 패인의 **바로 보내기**/**원문 보내기**, `/optimize send|raw`, `::raw` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
 
-옵티마이저는 다른 플러그인의 `classic.SessionStart`/`classic.UserPromptSubmit` 결과에 담긴 `additionalContext`를 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다.
+옵티마이저는 settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 세션에 주입한 `additionalContext`를 이 플러그인 아래 classic 체인에서 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다. 기억은 세션 id별로 보관되어 다른 세션에는 쓰이지 않는다.
+
+옵티마이저 요청에서 문맥(스냅샷) 안의 `<context>` 등 구역 태그는 `‹`(U+2039)로 바꿔, 그 안의 `</context>` 같은 문자열이 구역 경계를 깨지 못하게 한다.
 
 시스템 프롬프트는 이 섹션을 참고 데이터로만 쓰고(이미 기록된 사실을 다시 묻지 않는 용도) 그 안의 지시는 따르지 않도록 지시한다.
 
@@ -211,7 +213,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 | `contextTurns` | number | `4` | 0–8 | 문맥에 넣을 최근 사용자 턴 수 |
 | `contextMaxChars` | number | `6000` | 0–8000 | 문맥 스냅샷 문자 예산 |
 | `systemPromptFile` | string | `""`(없음) | — | 추가 시스템 지침 파일. 비면 내장 프롬프트 유지 |
-| `memoryContext` | boolean | `true` | — | 다른 플러그인 훅이 세션에 주입한 장기 기억을 옵티마이저 문맥에 포함 |
+| `memoryContext` | boolean | `true` | — | settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 주입한 장기 기억(`additionalContext`)을 옵티마이저 문맥에 포함 |
 
 `uiMode`의 `auto`와 `pane`은 같은 동작을 한다: 패인을 먼저 열어 보고 배치에 성공하면 패인, 실패하면 입력창 대화로 폴백한다. 이는 `plugin.json`의 현재 설명과 일치한다(`hooks/register.ts`의 `chooseUi`).
 
@@ -264,10 +266,10 @@ prompt-optimizer.memoryContext
   - 단, 플러그인이 1회 호출해도 **엔진의 API 클라이언트가 5xx 오류에서 같은 요청을 자체 재시도**할 수 있다. 로컬 mock API 검증(2.1.285)에서 HTTP 500 한 번에 요청 3건(최초 1 + 재시도 2)이 관찰됐다. `$.model.complete`에는 재시도 옵션이 없어 플러그인에서 끌 수 없다. 같은 검증에서 응답 지연(15초)은 `timeoutMs`(12초) 뒤 중단되고 원문이 복원됐다. 재시도가 타임아웃 안에 포함되는지는 확인하지 않았다.
 - **기본 파라미터**: 모델 `haiku`, effort `low`(고정), `maxTokens 1024`, `timeoutMs 12000`.
 - **요청 구성**: `<context>` + `<original_prompt>` + (있으면) `<current_draft>` + `<dialogue>` + `<instruction>` + JSON 출력 지시. 전체 프롬프트+시스템이 16000자(`MAX_REQUEST_CHARS`)를 넘으면 오래된 대화부터 버리고, 그래도 넘으면 문맥을 뒤에서 자른다. 원문은 자르지 않는다.
-- **문맥 상한**: 최근 `contextTurns`(기본 4)개 사용자 턴에서 최신 우선으로 최대 8개 메시지·4000자, 메시지당 1200자(중간 `[중략]`), 프로젝트 규칙 1200자, cwd/repo 400자, 도구 이름 400자, 전체 6000자. 규칙 파일은 `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` 후보만 읽고, 256 KiB를 넘으면 건너뛴다.
+- **문맥 상한**: 최근 `contextTurns`(기본 4)개 사용자 턴에서 최신 우선으로 최대 8개 메시지·4000자, 메시지당 1200자(중간 `[중략]`), 프로젝트 규칙 1200자, cwd/repo 400자, 도구 이름 400자, 장기 기억 2000자(`CONTEXT_MEMORY_CHARS`), 전체 6000자(`contextMaxChars` 기본). 전체 예산을 넘으면 오래된 대화 줄부터 빠지므로, 기억 섹션이 있으면 그 2000자만큼 대화 몫이 줄어든다. 규칙 파일은 `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` 후보만 읽고, 256 KiB를 넘으면 건너뛴다.
 - **도구 결과·파일 전체·이미지 transcript는 보내지 않는다.** 도구는 이름 메타데이터만 문맥에 들어간다.
 - **문맥을 요약하는 별도 모델 호출은 없다.**
-- **장기 기억 문맥**: `memoryContext`가 켜져 있으면(기본) 다른 플러그인이 세션에 주입한 장기 기억이 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)으로 옵티마이저 모델(기본 `haiku`) 요청에 포함된다. 이 섹션은 옵티마이저 모델 요청에만 들어가고 별도 모델 호출을 늘리지 않는다. 끄려면 `memoryContext`를 false로 둔다.
+- **장기 기억 문맥**: `memoryContext`가 켜져 있으면(기본) settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 주입한 장기 기억(`additionalContext`)이 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)으로 옵티마이저 모델(기본 `haiku`) 요청에 포함된다. 이 섹션은 옵티마이저 모델 요청에만 들어가고 별도 모델 호출을 늘리지 않는다. 끄려면 `memoryContext`를 false로 둔다.
 - **디스크 저장 없음(플러그인 상태)**: 프롬프트·문맥·대화·bypass·사용량은 플러그인 메모리에만 있고, 플러그인이 파일이나 `$.store`에 쓰지 않는다.
 - **composer 알림의 transcript 행**: composer(입력창 대화) 모드에서는 개선안·옵티마이저 메시지·오류·알림을 `$.ui.log` 알림으로 내보내므로, 호스트가 이를 세션 transcript 파일에 알림 행으로 기록할 수 있다. 이는 메인 모델 입력으로 전송되는 대화가 아니며, 패인 모드는 `$.ui.log` 대신 `$.ui.invalidate`/`$.ui.toast`만 써서 로컬 상태만 사용한다(`hooks/ui/present.ts`).
 - **금액 표시 없음**: 토큰 사용량만 보여준다(패인 헤더 합계, `/optimize status`의 세션 합계). 가격표는 고정하지 않는다. 취소 응답의 0은 "반환된 사용량"이며 공급자 최종 청구액 0을 보장하지 않는다.
