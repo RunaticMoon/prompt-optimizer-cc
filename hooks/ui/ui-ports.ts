@@ -18,6 +18,9 @@ export function paneOpenArgs(): PaneOpenArgs {
     title: '프롬프트 옵티마이저',
     focus: true,
     closeOnEscape: true,
-    rows: 18,
+    // Inline pane: header/hint (2), primary action (2 with spacing), refinement
+    // label/input (3), send actions (2), and message start (3). Longer messages
+    // and the original toggle remain scrollable, leaving room for AbovePrompt.
+    rows: 12,
   }
 }
