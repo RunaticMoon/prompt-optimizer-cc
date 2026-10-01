@@ -139,7 +139,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 버튼 의미를 명확히 분리합니다.
 
 - **입력창에 넣기:** 기본 권장 경로. 패인을 닫고 `prompt.fill`, 최종 Enter는 사용자.
-- **개선안 바로 전송:** 현재 개선안을 `prompt.submit`으로 명시적으로 전송. 출처는 `plugin`으로 유지.
+- **개선안 바로 전송:** 현재 개선안을 `prompt.submit`으로 명시적으로 전송. 출처는 `plugin`으로 유지하며 위조하지 않는다. `asUser: true`로 제출해 모델이 플러그인 메시지 틀 없이 사용자 본인의 말로 읽는다.
 - **원문 그대로 전송:** 저장한 원문을 명시적으로 전송.
 - **원문 전체 보기/접기(`0`):** 원문이 길 때 펼치거나 접는다.
 
@@ -185,7 +185,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 - 사용자 `prompt.edit` 결과에 따라 해당 초안의 bypass 텍스트를 갱신합니다.
 - 다른 플러그인의 fill, 초안 비우기, 세션 종료, 만료 시 해제합니다.
 
-직접 `개선안 바로 전송` 버튼은 `$.prompt.submit`을 사용합니다. `origin`을 `composer`로 위조하지 않습니다. 저장된 `e.context`를 보존해야 하면 자체 제출 ticket을 검증한 훅에서 붙입니다. 원래 `wait`·첨부를 재현할 수 없는 제출은 처음부터 가로채지 않습니다.
+직접 `개선안 바로 전송` 버튼은 `$.prompt.submit`을 사용합니다. `origin`을 `composer`로 위조하지 않습니다. `asUser: true`로 제출해 모델이 플러그인 메시지 틀 없이 사용자 본인의 말로 읽습니다. 저장된 `e.context`를 보존해야 하면 자체 제출 ticket을 검증한 훅에서 붙입니다. 원래 `wait`·첨부를 재현할 수 없는 제출은 처음부터 가로채지 않습니다.
 
 **④ 저렴한 문맥 수집**
 
@@ -678,7 +678,7 @@ API 기준: 설치 Claude Code 2.1.285가 생성한 선언
 - 목표: 승인된 텍스트를 중복·손실 없이 전달.
 - 입력: transfer/submit ticket, `prompt.read/fill/submit`.
 - 파일: `delivery.ts`, `delivery.test.ts`.
-- 방향: 새 초안 충돌 검사, 패인 종료 후 fill, `isFilled/refusal` 처리, 성공 시에만 bypass 발급. 직접 전송은 plugin origin 유지.
+- 방향: 새 초안 충돌 검사, 패인 종료 후 fill, `isFilled/refusal` 처리, 성공 시에만 bypass 발급. 직접 전송은 plugin origin 유지, `asUser: true`로 제출.
 - 선행: B.
 - 완료: 복원 거절·다이얼로그·새 초안·이중 클릭·downstream drop 시 텍스트 보존.
 - 검증: fill/submit 호출 횟수와 순서 검사, 메타데이터 보존 테스트.
@@ -804,7 +804,7 @@ B
 | 2회 보완 대화 | 각 답변은 optimizer에만 전달, 메인 제출 0회 |
 | 입력창에 넣기 | 정확한 개선안 복원, 사용자 Enter에 1회 전송 |
 | 복원 후 사용자 편집 | 다시 개선을 시작하지 않고 편집된 최종본 전송 |
-| 개선안 바로 전송 | plugin origin으로 정확히 1회 전송 |
+| 개선안 바로 전송 | plugin origin 유지, `asUser: true`로 정확히 1회 전송 |
 | 원문 그대로 전송 | 원문 보존, 개선안 혼입 없음 |
 | Esc 취소 | 호출 취소, 자동 전송 없음, 새 초안 덮어쓰기 없음 |
 | 타임아웃·429·인증 오류 | 무한 대기·자동 상위 모델 호출 없음, 원문 복구 가능 |

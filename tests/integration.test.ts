@@ -411,7 +411,7 @@ async function assertInv5CommandDelivery($: Engine, on: On): Promise<void> {
   await w.advance(0)
   expect(w.submits).toHaveLength(1)
   expect(w.submits[0]?.text).toBe('초안2')
-  expect(w.submits[0]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
+  expect(w.submits[0]?.origin).toEqual({ kind: 'plugin', name: PLUGIN, asUser: true })
 
   w.setBox('')
   await w.submit('원문B')
@@ -421,7 +421,7 @@ async function assertInv5CommandDelivery($: Engine, on: On): Promise<void> {
   await w.advance(0)
   expect(w.submits).toHaveLength(2)
   expect(w.submits[1]?.text).toBe('원문B')
-  expect(w.submits[1]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
+  expect(w.submits[1]?.origin).toEqual({ kind: 'plugin', name: PLUGIN, asUser: true })
 }
 
 describe('integration — session isolation and delivery accuracy', () => {

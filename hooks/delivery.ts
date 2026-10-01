@@ -4,8 +4,10 @@
  * `transferDraft` hands an approved draft back to the person's prompt box
  * without overwriting text they typed themselves, and issues a one-shot bypass
  * permit only when the fill actually landed (`docs/DESIGN.md`, ③ 제출·대기 방식).
- * `sendApproved` submits the approved text explicitly, exactly once, with the
- * engine's own `origin`.
+ * `sendApproved` submits the approved text explicitly, exactly once, under the
+ * engine's own `origin` (never forged). It passes `asUser: true`, so the model
+ * reads the text bare as the person's own words, without the engine's
+ * "The <plugin> plugin sent a message" frame.
  *
  * Neither function touches the reducer: each returns an outcome for the caller
  * to fold into state, and neither retries a submit.
@@ -127,9 +129,12 @@ export async function transferDraft(
 /**
  * Submits an approved draft explicitly, exactly once.
  *
- * The engine stamps the origin as this plugin; it is never forged. A prompt
- * sent this way carries no `context`: `PromptSubmitArgs` omits `context`, so
- * `target.context` cannot ride along and the caller must report that.
+ * The engine stamps the origin as this plugin; it is never forged. The submit
+ * passes `asUser: true`, so the model reads the text bare as the person's own
+ * words instead of the engine's "The <plugin> plugin sent a message" frame; the
+ * origin every hook sees still names the plugin. A prompt sent this way carries
+ * no `context`: `PromptSubmitArgs` omits `context`, so `target.context` cannot
+ * ride along and the caller must report that.
  *
  * @param $ the engine
  * @param target the text to submit
@@ -139,7 +144,7 @@ export async function sendApproved($: EnginePorts, target: SubmitTarget): Promis
   let result: PromptSubmitResult
   try {
     // Exactly one call. No retry on a drop, a failure, or a timeout.
-    result = await $.prompt.submit({ text: target.text })
+    result = await $.prompt.submit({ text: target.text, asUser: true })
   } catch (error) {
     return { kind: 'failed', message: messageOf(error) }
   }
