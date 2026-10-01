@@ -129,7 +129,7 @@ The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its heigh
 |---|---|
 | **입력창에 넣기 (수정 후 전송)** (Put in prompt box; edit before sending) | Closes the pane, fills the prompt box with the improved draft via `replace`, and issues a one-shot bypass. Review or edit it, then send with Enter. |
 | **보완 내용** (Refinement) input (`Enter로 다시 다듬기`, Enter to refine again) | Runs one more round with the entered refinement. Focus returns to the prompt-box button after completion. |
-| **개선안 바로 전송** (Send improved draft now) | Immediately sends the improved draft via `$.prompt.submit`. The origin is the engine-attached `plugin` and is not forged. |
+| **개선안 바로 전송** (Send improved draft now) | Immediately sends the improved draft via `$.prompt.submit`. The origin is the engine-attached `plugin` and is not forged. It submits with `asUser: true`, so the model reads it bare as the person's own words, without the plugin-message frame. |
 | **원문 그대로 전송** (Send original unchanged) | Immediately sends the stored original text without editing it. |
 
 If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력창에 넣기** (Put in prompt box), so Enter activates it. `Tab` moves through the refinement input, Send improved draft now, and Send original unchanged. Enter in the refinement input starts another refinement. Arrow keys (↑↓) depend on the pane placement (a side pane moves focus; the bottom pane on a narrow terminal scrolls the body), so the pane's key hint shows only `Tab`, and `Tab` or digits are the reliable choice. `Esc` closes and cancels the pane.
