@@ -131,7 +131,8 @@ export function register(on: On, options: PluginOptions): void {
   // Memory diagnostics, split so each kind is reported once independently (a
   // shared classic id reports at most once; see the classic hooks below):
   // `emptyIdReported` covers an id that cannot key the store, `lastMismatchId`
-  // covers an id that differs from `session.start`'s (e.g. after `/clear`), and
+  // covers the last id that differed from `session.start`'s (e.g. after
+  // `/clear`), and
   // `missingStartIdReported` covers a `session.start` that yielded no id at all.
   let emptyIdReported = false
   let lastMismatchId: string | null = null
@@ -172,7 +173,8 @@ export function register(on: On, options: PluginOptions): void {
    * needs none. An id that is missing, empty or not a string cannot key the
    * memory store, so it is reported once and the caller skips recording for it;
    * an id that differs from the id `session.start` recorded (as after a
-   * `/clear`) is reported once per id so the mismatch is visible; and a
+   * `/clear`) is reported once while it stays the latest mismatch (only the
+   * last such id is remembered, so a different one reports again); and a
    * `session.start` that yielded no id at all is reported once, since then
    * every classic id "differs" and the follow-the-classic-hook fallback is the
    * only path. Each kind keeps its own state, so toggling between them cannot
