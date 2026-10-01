@@ -104,6 +104,9 @@ export function registerUi(
     const busy = isBusy(workflow.phase)
     // RenderResultOf has no accepted/denied signal for a tree. Keep the key
     // stable as workflow.id+surface and invalidate only once per draw transition.
+    // If the engine rejects the band tree or has no room to draw it, the pane
+    // still hides the original/draft bodies; with no acceptance signal this is
+    // the accepted tradeoff.
     if (!drawnBands.has(key)) {
       drawnBands.add(key)
       $.ui.invalidate('ui.render')

@@ -146,6 +146,8 @@ If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력
 
 The pane shows the stage (`수집 중`/`생성 중`/`검토`/`실패`/`전달 중`/`전송 중`), `n/최대회` (n/max rounds), total returned tokens, and the latest optimizer message. When the band is drawn in pane mode, read the original and improved draft above the prompt; press `0` in the pane to expand or collapse an original longer than 180 characters.
 
+The pane requests 12 rows, so the optimizer message and the `0` original toggle can fall below the first screen. Scroll the pane body to see them; the digit `0` still works even when the toggle is off-screen.
+
 ### 4.3 Display by surface
 
 The pane `ui.render` hook checks the pane id without filtering by `surface`. The band `ui.render` hook draws only on `terminal` and `desktop`. On surfaces without a band, such as `vscode`, the pane also shows the original and improved draft. If a surface does not provide buttons or input elements (for example, mobile), the pane shows only a read-only text summary and points to the command path.

@@ -162,6 +162,25 @@ describe('optimizer UI', () => {
     expect(textOf(await ui.render(PANE))).toContain('한국어로 작성한 개선안입니다.')
   })
 
+  test('band yields to vscode and mobile even with an active pane workflow', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller)
+    for (const surface of ['vscode', 'mobile'] as const) {
+      const event = { ...BAND, surface }
+      expect(await ui.render(event)).toEqual({ inner: event })
+    }
+    // The same workflow still draws on a surface that has a band.
+    expect(textOf(await ui.render(BAND))).toContain('한국어로 작성한 개선안입니다.')
+  })
+
+  test('pane-mode band omits the composer guide', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller)
+    const drawn = textOf(await ui.render(BAND))
+    expect(drawn).toContain('한국어로 작성한 개선안입니다.')
+    expect(drawn).not.toContain(COMPOSER_GUIDE)
+  })
+
   test('composer band shows the full original, draft, and shared guide', async ($, on) => {
     const item = { ...workflow(), ui: 'composer' as const, original: '긴 원문 '.repeat(40) }
     const current = state(item)
