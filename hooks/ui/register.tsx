@@ -1,6 +1,6 @@
 /* @jsxRuntime classic */
 /* @jsx h */
-import type { EngineInterface, On } from 'claude-code'
+import type { EngineInterface, On, RenderViewport } from 'claude-code'
 
 import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
@@ -10,6 +10,16 @@ import { PANE_ROWS } from './ui-ports'
 
 const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
 const isBusy = (phase: Workflow['phase']): boolean => BUSY_PHASES.includes(phase)
+// At 80×24 an inline pane has six body rows, while 80×48 reaches the
+// requested twelve; 40 screen rows separates those two observed layouts.
+const COMPACT_VIEWPORT_ROWS = 40
+// The engine docks fullscreen panes from 110 columns, even below 40 rows.
+const FULLSCREEN_DOCK_COLUMNS = 110
+
+export function isCompactViewport(viewport?: RenderViewport): boolean {
+  return Boolean(viewport && viewport.rows < COMPACT_VIEWPORT_ROWS
+    && !(viewport.isFullscreen === true && viewport.columns >= FULLSCREEN_DOCK_COLUMNS))
+}
 
 const KEYS = {
   original: 'optimizer:original',
@@ -56,21 +66,63 @@ function latestOptimizerMessage(workflow: Workflow): string {
   return [...workflow.dialogue].reverse().find((entry) => entry.role === 'optimizer')?.text ?? ''
 }
 
-/** Bound compact copy by terminal cells; the complete draft remains available through action 1. */
-function previewText(value: string, maxCells: number): string {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  const chars = Array.from(normalized)
-  const cellWidth = (char: string) => char.codePointAt(0)! > 0x7f ? 2 : 1
-  const total = chars.reduce((sum, char) => sum + cellWidth(char), 0)
-  if (total <= maxCells) return normalized
-  const limit = Math.max(0, maxCells - 1)
-  let used = 0
-  let end = 0
-  while (end < chars.length && used + cellWidth(chars[end]!) <= limit) {
-    used += cellWidth(chars[end]!)
-    end++
+/** Terminal cell width for the wide characters used by the preview. */
+function cellWidth(char: string): number {
+  const code = char.codePointAt(0)!
+  if (code >= 0x300 && code <= 0x36f) return 0 // combining marks
+  return code >= 0x1100 && (
+    code <= 0x115f || code >= 0x2329 && code <= 0x232a
+    || code >= 0x2e80 && code <= 0xa4cf
+    || code >= 0xac00 && code <= 0xd7a3
+    || code >= 0xf900 && code <= 0xfaff
+    || code >= 0xfe10 && code <= 0xfe6f
+    || code >= 0xff01 && code <= 0xff60
+    || code >= 0xffe0 && code <= 0xffe6
+    || code >= 0x1f300 && code <= 0x1faff
+    || code >= 0x20000 && code <= 0x3fffd
+  ) ? 2 : 1
+}
+
+/** Hard-wrap by cells before rendering: each returned Text occupies one row. */
+export function hardWrapPreview(value: string, columns: number, maxLines: number): string[] {
+  if (columns < 1 || maxLines < 1) return []
+  const sourceLines = value.replace(/\r\n?/g, '\n').split('\n')
+  const lines: string[] = []
+  let truncated = false
+  for (let sourceIndex = 0; sourceIndex < sourceLines.length; sourceIndex++) {
+    const sourceLine = sourceLines[sourceIndex]!
+    const normalized = sourceLine.replace(/[^\S\n]+/g, ' ').trim()
+    let line = ''
+    let used = 0
+    for (const char of normalized) {
+      const width = cellWidth(char)
+      if (used + width > columns) {
+        if (!line) { // A wide glyph cannot fit a one-cell viewport.
+          line = '…'
+          used = 1
+          continue
+        }
+        lines.push(line)
+        if (lines.length >= maxLines) { truncated = true; break }
+        line = ''
+        used = 0
+      }
+      line += char
+      used += width
+    }
+    if (truncated) break
+    lines.push(line)
+    if (lines.length >= maxLines) {
+      truncated = sourceIndex < sourceLines.length - 1
+      break
+    }
   }
-  return maxCells > 0 ? `${chars.slice(0, end).join('')}…` : ''
+  if (truncated) {
+    const last = Array.from(lines[maxLines - 1] ?? '')
+    while (last.reduce((sum, char) => sum + cellWidth(char), 0) + 1 > columns) last.pop()
+    lines[maxLines - 1] = `${last.join('').trimEnd()}…`
+  }
+  return lines
 }
 
 /** Escape and the pane close mark both arrive with origin `person`. */
@@ -108,6 +160,7 @@ export function registerUi(
     observeWorkflow(workflow)
     const eligible = workflow && !e.props.hasSurvey && !e.props.view.agentId
       && (e.surface === 'terminal' || e.surface === 'desktop')
+      && !(workflow.ui === 'pane' && isCompactViewport(e.viewport))
     const key = workflow ? bandKey(workflow.id, e.surface) : undefined
     if (!eligible || !workflow || !key) {
       if (key && drawnBands.delete(key)) $.ui.invalidate('ui.render')
@@ -122,8 +175,6 @@ export function registerUi(
     const busy = isBusy(workflow.phase)
     // RenderResultOf has no accepted/denied signal for a tree. Keep the key
     // stable as workflow.id+surface and invalidate only once per draw transition.
-    // The engine has no acceptance signal for the band tree. Compact inline
-    // panes therefore keep a draft preview even when this key is recorded.
     if (!drawnBands.has(key)) {
       drawnBands.add(key)
       $.ui.invalidate('ui.render')
@@ -182,34 +233,53 @@ export function registerUi(
       )
     }
 
-    if (e.props.placement === 'inline' && e.props.scroll.bodyRows < PANE_ROWS) {
-      // Input is a one-line field; its default submit label sits beside it on
-      // focus. Keep compact copy short so it does not request another row.
-      const inputRows = 1
-      const previewRows = Math.max(0, e.props.scroll.bodyRows - inputRows - 1)
+    if (e.props.placement === 'inline' && isCompactViewport(e.viewport)) {
+      // Derive the budget from the viewport, never the rendered bodyRows:
+      // inline panes shrink to their own content height and can feed that back.
+      const estimatedRows = Math.min(PANE_ROWS, Math.max(4, Math.floor(e.viewport!.rows / 4)))
+      const previewLines = Math.max(1, estimatedRows - 3)
       const previewColumns = Math.max(1, e.props.bodyColumns - 2)
-      const preview = workflow.draft.trim() || (busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
+      const preview = workflow.draft.trim()
+        || (workflow.lastError ? `오류: ${workflow.lastError}` : '')
+        || (busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
       const compactInstruction = retryReady
         ? typeof Input === 'function'
-          ? <Input key={KEYS.instruction} label="보완 요청" placeholder="보완 내용을 입력하세요" onSubmit={() => undefined} />
+          ? <Input key={KEYS.instruction} label="보완" placeholder="보완 내용" onSubmit={() => undefined} />
           : <Text wrap="truncate-end">보완: /optimize retry &lt;내용&gt;</Text>
-        : <Text dimColor wrap="truncate-end">보완 요청 불가</Text>
+        : <Text dimColor wrap="truncate-end">보완 (사용 불가)</Text>
+      const originalPreview = showOriginal || originalChars.length <= 180
+        ? workflow.original : `${originalChars.slice(0, 180).join('')}…`
       return (
         <Box flexDirection="column" paddingX={1}>
-          {previewRows > 0 && <Text wrap="wrap">{previewText(preview, previewRows * previewColumns)}</Text>}
+          {hardWrapPreview(preview, previewColumns, previewLines).map((line, index) =>
+            <Text key={`preview:${index}`} wrap="truncate-end">{line}</Text>)}
+          {draftReady
+            ? <Button key={KEYS.accept} hotkey="1" label="넣기" plain autoFocus onPress={() => undefined} />
+            : <Text dimColor>1: 넣기 (사용 불가)</Text>}
           {compactInstruction}
-          <Box flexDirection="row">
+          <Box flexDirection="row" flexWrap="wrap">
             {draftReady
-              ? <Button key={KEYS.accept} hotkey="1" label="1 넣기" plain autoFocus onPress={() => undefined} />
-              : <Text dimColor>1 넣기</Text>}
-            <Text> · </Text>
-            {draftReady
-              ? <Button key={KEYS.send} hotkey="2" label="2 전송" plain onPress={() => undefined} />
-              : <Text dimColor>2 전송</Text>}
+              ? <Button key={KEYS.send} hotkey="2" label="전송" plain onPress={() => undefined} />
+              : <Text dimColor>2: 전송 (사용 불가)</Text>}
             <Text> · </Text>
             {!busy
-              ? <Button key={KEYS.raw} hotkey="3" label="3 원문" plain onPress={() => undefined} />
-              : <Text dimColor>3 원문</Text>}
+              ? <Button key={KEYS.raw} hotkey="3" label="원문" plain onPress={() => undefined} />
+              : <Text dimColor>3: 원문 (사용 불가)</Text>}
+          </Box>
+          {/* Keep details below the first view: their height prevents an inline
+              pane from shrinking to the compact controls and preserves context. */}
+          <Box marginTop={1} flexDirection="column">
+            <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+            {message && <Box flexDirection="column">
+              <Text bold>옵티마이저 메시지</Text>
+              <Text wrap="wrap">{message}</Text>
+            </Box>}
+            <Text bold>원문</Text>
+            <Text wrap="wrap">{originalPreview}</Text>
+            {busy
+              ? <Text dimColor>0: {originalToggleLabel} (사용 불가)</Text>
+              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />}
+            {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
           </Box>
         </Box>
       )

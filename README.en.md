@@ -137,7 +137,7 @@ Skill-directory scaffolding (`claude plugin init|new`) is not provided by this r
 
 The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its requested height is 12 rows, focus is taken on the requested pane, and it can be closed with Esc (`hooks/ui/ui-ports.ts`). Actual height depends on placement and any size the user has set.
 In pane mode on terminal and desktop, the band directly above the prompt shows the **original** (a 180-character preview by default) above the **full improved draft**. The pane keeps its phase/round/token header, key hint, actions, refinement input, full latest optimizer message, original toggle, and error/progress state. On surfaces where the band has not rendered, the pane also shows the full original and draft.
-When an inline pane receives fewer than its requested 12 rows, it prioritizes only a preview of the improved draft, the refinement input, and the `1 넣기 · 2 전송 · 3 원문` action row regardless of whether the band rendered; it omits the header and original toggle.
+For an inline pane below 40 screen rows, the first view shows an improved-draft preview → `1: 넣기` (put in prompt box) → refinement input → `2: 전송 · 3: 원문` (send / original). The band above the prompt is omitted. The header, optimizer message, original preview and `0` toggle, and errors remain below in the scrollable pane. A fullscreen dock pane at 110 columns or more keeps its existing layout.
 
 | Button / input | Behavior |
 |---|---|
