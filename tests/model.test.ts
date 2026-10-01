@@ -31,7 +31,7 @@ function config(over: Partial<OptimizerConfig> = {}): OptimizerConfig {
 }
 
 function snapshot(text: string): ContextSnapshot {
-  return { conversation: '', rules: '', location: '', tools: '', text, chars: text.length }
+  return { conversation: '', rules: '', location: '', memory: '', tools: '', text, chars: text.length }
 }
 
 function workflow(over: Partial<Workflow> = {}): Workflow {
