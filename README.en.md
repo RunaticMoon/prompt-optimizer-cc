@@ -132,7 +132,7 @@ The pane title is `프롬프트 옵티마이저` ("Prompt Optimizer"), its heigh
 | **개선안 바로 전송** (Send improved draft now) | Immediately sends the improved draft via `$.prompt.submit`. The origin is the engine-attached `plugin` and is not forged. |
 | **원문 그대로 전송** (Send original unchanged) | Immediately sends the stored original text without editing it. |
 
-If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력창에 넣기** (Put in prompt box), so Enter activates it. `Tab` moves through the refinement input, Send improved draft now, and Send original unchanged. Enter in the refinement input starts another refinement. Arrow keys may move focus or scroll depending on the Claude Code version and focus state, so `Tab` or digits are more reliable. `Esc` closes and cancels the pane.
+If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력창에 넣기** (Put in prompt box), so Enter activates it. `Tab` moves through the refinement input, Send improved draft now, and Send original unchanged. Enter in the refinement input starts another refinement. Arrow keys (↑↓) depend on the pane placement (a side pane moves focus; the bottom pane on a narrow terminal scrolls the body), so the pane's key hint shows only `Tab`, and `Tab` or digits are the reliable choice. `Esc` closes and cancels the pane.
 
 | Digit | Button |
 |---|---|
