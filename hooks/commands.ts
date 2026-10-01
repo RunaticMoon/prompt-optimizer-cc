@@ -21,7 +21,13 @@
 
 import type { CommandSpec, EngineInterface, On } from 'claude-code'
 
-import type { ConfigKey, EnginePorts, OptimizerConfig, RuntimeState } from './contracts'
+import type {
+  ConfigKey,
+  EnginePorts,
+  GuidanceStatus,
+  OptimizerConfig,
+  RuntimeState,
+} from './contracts'
 import type { ActionResult } from './controller'
 import type { UiPorts } from './ui/ui-ports'
 
@@ -57,6 +63,13 @@ export interface SettingsPort {
 export interface CommandController {
   /** The current serializable state, for `status`. */
   getState(): Readonly<RuntimeState>
+  /**
+   * The target model applied to the last request actually sent, or `null`
+   * before one is sent and after a session start/end. Optional so a host
+   * without the round-level detection still answers `status`. Reads stored
+   * state only: it never calls the model getter or any other port.
+   */
+  getGuidanceStatus?(): Readonly<GuidanceStatus> | null
   /** Starts an explicit optimization; `text` absent means the composer draft. */
   startExplicit(ports: EnginePorts, text: string | undefined, ui: 'pane' | 'composer'): Promise<void>
   /** Continues the dialogue with one supplement. */
@@ -192,13 +205,23 @@ export function parseOptimizeArgs(args: string): ParsedCommand {
 
 /**
  * The `/optimize status` body: the effective settings, the active run's stage
- * and rounds, and this session's summed usage. Pure, so it is easy to test.
+ * and rounds, this session's summed usage, and the target model applied to the
+ * last request actually sent. Pure, so it is easy to test.
+ *
+ * `guidance` is the controller's stored last-applied snapshot; `status` reads
+ * it directly and never calls the model getter or any other port.
  */
-export function formatStatus(config: OptimizerConfig, state: Readonly<RuntimeState>): string {
+export function formatStatus(
+  config: OptimizerConfig,
+  state: Readonly<RuntimeState>,
+  guidance?: Readonly<GuidanceStatus> | null,
+): string {
   const lines: string[] = [
     `프롬프트 옵티마이저: ${config.enabled ? '켜짐' : '꺼짐'}`,
     `트리거: ${config.triggerMode === 'always' ? '항상' : `접두어 "${config.triggerPrefix}"`} · UI: ${config.uiMode}`,
-    `모델: ${config.model} · 최대 토큰: ${config.maxTokens} · 타임아웃: ${config.timeoutMs}ms · 최대 라운드: ${config.maxRounds}`,
+    `옵티마이저 모델: ${config.model} · 최대 토큰: ${config.maxTokens} · 타임아웃: ${config.timeoutMs}ms · 최대 라운드: ${config.maxRounds}`,
+    `모델별 지침: ${config.modelGuidance ? '켜짐' : '꺼짐(공통 지침만 사용)'}`,
+    `마지막 최적화 대상: ${describeLastTarget(guidance)}`,
     `문맥: 최근 ${config.contextTurns}턴 · 최대 ${config.contextMaxChars}자 · raw 접두어 "${config.rawPrefix}"`,
   ]
   if (config.systemPromptFile !== '') lines.push(`시스템 프롬프트 파일: ${config.systemPromptFile}`)
@@ -216,6 +239,35 @@ export function formatStatus(config: OptimizerConfig, state: Readonly<RuntimeSta
     `이 세션 사용량: ${usage.calls}회 · 입력 ${usage.input} · 출력 ${usage.output} · 캐시 읽기 ${usage.cacheRead} · 캐시 쓰기 ${usage.cacheWrite}`,
   )
   return lines.join('\n')
+}
+
+/**
+ * The value half of the `마지막 최적화 대상` line. `null` (nothing sent yet, or
+ * a session reset) reads as not detected; a stored snapshot distinguishes a
+ * usable raw id from a deliberate skip (`disabled`) and a failure (`timeout`,
+ * `error`, …). It never reads the current model: this is the last request's
+ * applied value, not a live lookup.
+ */
+function describeLastTarget(guidance: Readonly<GuidanceStatus> | null | undefined): string {
+  if (guidance === null || guidance === undefined) return '아직 감지하지 않음'
+  const { target } = guidance
+  // A blank raw carries no id (reason `empty`), so it reads as unconfirmed.
+  if (target.raw !== null && target.raw.trim() !== '') {
+    const applied = target.profile === 'common' ? `common (${target.reason})` : target.profile
+    return `${displayRaw(target.raw)} · 적용: ${applied}`
+  }
+  if (target.reason === 'disabled') return '감지 생략 · 적용: common (disabled)'
+  return `미확인 · 적용: common (${target.reason})`
+}
+
+/**
+ * Renders a stored raw model string for one line: line breaks and other control
+ * characters become spaces, and a value over 100 chars is cut with an ellipsis.
+ * The stored value itself is never changed.
+ */
+function displayRaw(raw: string): string {
+  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+  return flat.length > 100 ? `${flat.slice(0, 100)}…` : flat
 }
 
 /**
@@ -349,7 +401,13 @@ async function dispatch(
         { kind: 'model', value: command.model },
       )
     case 'status':
-      return { text: formatStatus(deps.settings.get(), deps.controller.getState()) }
+      return {
+        text: formatStatus(
+          deps.settings.get(),
+          deps.controller.getState(),
+          deps.controller.getGuidanceStatus?.() ?? null,
+        ),
+      }
     case 'help':
       return { text: HELP_TEXT }
     case 'error':
