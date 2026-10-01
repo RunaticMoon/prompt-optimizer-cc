@@ -33,7 +33,7 @@ The optimizer classifies the request by type before refining it. A change is jud
 
 | Item | Value | Basis |
 |---|---|---|
-| Claude Code | 2.1.285 or newer | The version used in this repository for verification and type generation: `2.1.285` |
+| Claude Code | 2.1.285 or newer | The version used in this repository for verification and type generation: `2.1.285`. `asUser`, which makes a direct send read as the person's own words, was confirmed on 2.1.286. If a direct send still shows the "plugin sent a message" frame on an older version, update the CLI. |
 | Mod (function hook) support | early access | The hook modules are not turned on without the flag |
 | Required environment variable | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | Without it, `claude plugin test` refuses with "hooks modules are not turned on in this build yet (early access)" |
 | For development | Node.js + npm | Needed to run `scripts/*.mjs` and `claude plugin test` |
@@ -130,7 +130,7 @@ In pane mode on terminal and desktop, the band directly above the prompt shows t
 |---|---|
 | **입력창에 넣기 (수정 후 전송)** (Put in prompt box; edit before sending) | Closes the pane, fills the prompt box with the improved draft via `replace`, and issues a one-shot bypass. Review or edit it, then send with Enter. |
 | **보완 내용** (Refinement) input (`Enter로 다시 다듬기`, Enter to refine again) | Runs one more round with the entered refinement. Focus returns to the prompt-box button after completion. |
-| **개선안 바로 전송** (Send improved draft now) | Immediately sends the improved draft via `$.prompt.submit`. The origin is the engine-attached `plugin` and is not forged. |
+| **개선안 바로 전송** (Send improved draft now) | Immediately sends the improved draft via `$.prompt.submit`. The origin is the engine-attached `plugin` and is not forged. It submits with `asUser: true`, so the model reads it bare as the person's own words, without the plugin-message frame. |
 | **원문 그대로 전송** (Send original unchanged) | Immediately sends the stored original text without editing it. |
 
 If the pane is unfocused, use `ctrl+x tab` to focus it. Focus starts on **입력창에 넣기** (Put in prompt box), so Enter activates it. `Tab` moves through the refinement input, Send improved draft now, and Send original unchanged. Enter in the refinement input starts another refinement. Arrow keys (↑↓) depend on the pane placement (a side pane moves focus; the bottom pane on a narrow terminal scrolls the body), so the pane's key hint shows only `Tab`, and `Tab` or digits are the reliable choice. `Esc` closes and cancels the pane.
@@ -361,7 +361,7 @@ Turning `modelGuidance` off still keeps the common editing guidance, and the fix
 - **In-progress turns and waiting submissions**: submissions with a `turnId` or with `wait === true` are left to the main session's queue as is.
 - **Slash commands and shell input**: input starting with `/` or `!` is not intercepted (commands are handled by `command.run`).
 - **Overly long originals**: if the original exceeds 6000 characters (`MAX_ORIGINAL_CHARS`), it is passed through without improvement.
-- **Context loss on explicit send (Mod hooks only)**: "개선안 바로 전송" (Send improved draft now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text })`. The engine's `PromptSubmitArgs` has no `context` field, so blocks that a Mod hook above this plugin may have attached with `context` on the initial submission are not re-attached on an explicit send. Classic hooks (settings/plugin `hooks.json`), by contrast, run again on an explicit send, so the long-term memory injection is kept (verified on 2.1.286). The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
+- **Context loss on explicit send (Mod hooks only)**: "개선안 바로 전송" (Send improved draft now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text, asUser: true })`. The engine's `PromptSubmitArgs` has no `context` field, so blocks that a Mod hook above this plugin may have attached with `context` on the initial submission are not re-attached on an explicit send. Classic hooks (settings/plugin `hooks.json`), by contrast, run again on an explicit send, so the long-term memory injection is kept (verified on 2.1.286). The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
 - **Cancel refusals**: cancel is refused while already transferring to the prompt box (`transferring`) or while sending (`sending`) (respectively `입력창으로 옮기는 중이라 취소할 수 없습니다`, "Cannot cancel while transferring to the prompt box", and `전송 중이라 취소할 수 없습니다`, "Cannot cancel while sending"). At the points where an in-progress call is aborted (`collecting`/`generating`/`reviewing`/`failed`), cancel works normally.
 - **Empty raw submission drop**: if what follows `rawPrefix` is empty or only whitespace, it is dropped with `보낼 내용이 없습니다.` ("There is nothing to send."). The prefix is not delivered to the main session.
 - **Closing the pane = cancel**: pressing Esc/closing in the pane (origin `person`) cancels the job in progress and restores the original text.

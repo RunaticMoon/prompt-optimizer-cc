@@ -369,23 +369,23 @@ describe('transferDraft — bypass permit', () => {
 })
 
 describe('sendApproved', () => {
-  test('submits the approved text exactly once, with only the text', async () => {
+  test('submits the approved text exactly once, as the person’s own words', async () => {
     const { engine, calls, submits } = fakeEngine()
     const result = await sendApproved(engine, submitTarget({ text: '보낼 텍스트' }))
 
     expect(result).toEqual({ kind: 'sent', text: '보낼 텍스트' })
     expect(calls).toEqual(['prompt.submit'])
-    expect(submits).toEqual([{ text: '보낼 텍스트' }])
+    expect(submits).toEqual([{ text: '보낼 텍스트', asUser: true }])
   })
 
-  test('does not pass context: the submit arg carries text alone', async () => {
+  test('does not pass context: the submit arg carries only text and asUser', async () => {
     const { engine, submits } = fakeEngine()
     const result = await sendApproved(
       engine,
       submitTarget({ text: '본문', context: ['block-a', 'block-b'] }),
     )
 
-    expect(submits).toEqual([{ text: '본문' }])
+    expect(submits).toEqual([{ text: '본문', asUser: true }])
     expect(result).toEqual({ kind: 'sent', text: '본문' })
   })
 
