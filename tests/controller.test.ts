@@ -42,6 +42,7 @@ interface Calls {
   cwd: number
   root: number
   repo: number
+  model: number
   stat: number
   fileRead: number
   complete: number
@@ -60,6 +61,14 @@ interface HarnessOptions {
   box?: string | readonly string[]
   messages?: readonly SessionMessage[]
   files?: Readonly<Record<string, string>>
+  /**
+   * The main session's model getter. Supplying it also installs a deterministic
+   * clock, so the target-model race resolves without a real 500 ms wait. Omit it
+   * to model a host with no `session.model` port (common/unavailable).
+   */
+  model?: () => string | Promise<string>
+  /** Overrides `fs.read`; lets a test hold one file read open. */
+  read?: (path: string) => Promise<string>
   complete?: (
     request: ModelCompleteRequest,
     signal: AbortSignal | undefined,
@@ -92,6 +101,23 @@ interface Harness {
 }
 
 /**
+ * A deterministic timer for the target-model race. `sleep` never settles on its
+ * own, so a resolving getter always wins without a real wait; it rejects when
+ * its own signal aborts, exactly as the resolver expects `$.clock.sleep` to.
+ */
+function fakeClock(): NonNullable<EnginePorts['clock']> {
+  return {
+    sleep: (_ms, options) =>
+      new Promise<void>((_resolve, reject) => {
+        const signal = options?.signal
+        const onAbort = (): void => reject(new Error('sleep aborted'))
+        if (signal?.aborted === true) onAbort()
+        else signal?.addEventListener('abort', onAbort, { once: true })
+      }),
+  }
+}
+
+/**
  * A stand-in engine plus a manual schedule queue. The controller only sees the
  * `EnginePorts` surface; the counters and thrown `fork` make a stray call fail
  * loudly. The scheduled callback returns the round's promise, so `flush` can
@@ -102,6 +128,7 @@ function harness(options: HarnessOptions = {}): Harness {
   let nextId = 0
   let completions = 0
   const config: OptimizerConfig = { ...DEFAULT_CONFIG, ...options.config }
+  const modelGetter = options.model
 
   const queue: Array<() => unknown> = []
   const notices: Array<string | undefined> = []
@@ -111,6 +138,7 @@ function harness(options: HarnessOptions = {}): Harness {
     cwd: 0,
     root: 0,
     repo: 0,
+    model: 0,
     stat: 0,
     fileRead: 0,
     complete: 0,
@@ -170,7 +198,16 @@ function harness(options: HarnessOptions = {}): Harness {
         calls.repo += 1
         return null
       },
+      ...(modelGetter === undefined
+        ? {}
+        : {
+            model: async (): Promise<string> => {
+              calls.model += 1
+              return modelGetter()
+            },
+          }),
     },
+    ...(modelGetter === undefined ? {} : { clock: fakeClock() }),
     fs: {
       stat: async (path: string) => {
         calls.stat += 1
@@ -180,6 +217,7 @@ function harness(options: HarnessOptions = {}): Harness {
       },
       read: async (path: string) => {
         calls.fileRead += 1
+        if (options.read !== undefined) return options.read(path)
         const text = files[path]
         if (text === undefined) throw new Error(`ENOENT: ${path}`)
         return text
@@ -658,6 +696,58 @@ describe('accept and send', () => {
     expect(h.submits[0]?.text).toBe('원문')
   })
 
+  test('sendDraft sends when the captured workflow id still matches', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    const id = h.controller.getState().workflow?.id
+    expect(id).toBeDefined()
+
+    const result = await h.controller.sendDraft(h.ports, id)
+
+    expect(result).toEqual({ ok: true })
+    expect(h.calls.submit).toBe(1)
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('sendDraft refuses a run that replaced the captured workflow id', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const result = await h.controller.sendDraft(h.ports, 'wf-stale')
+
+    expect(result).toEqual({ ok: false, reason: '개선 작업이 바뀌어 전송하지 않았습니다.' })
+    expect(h.calls.submit).toBe(0)
+    expect(h.notices.filter(n => n === '개선 작업이 바뀌어 전송하지 않았습니다.')).toHaveLength(1)
+    // The current run is untouched, so the person can still act on it.
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+  })
+
+  test('sendOriginal refuses a replaced workflow id too', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const result = await h.controller.sendOriginal(h.ports, 'wf-stale')
+
+    expect(result).toEqual({ ok: false, reason: '개선 작업이 바뀌어 전송하지 않았습니다.' })
+    expect(h.calls.submit).toBe(0)
+  })
+
+  test('sendDraft without a workflow id keeps the previous behavior', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(await h.controller.sendDraft(h.ports)).toEqual({ ok: true })
+    expect(h.calls.submit).toBe(1)
+  })
+
   test('a dropped send returns to review with a notice', async () => {
     const h = harness({ submit: () => ({ drop: 'blocked' }) })
     h.controller.onSessionStart('sess-1')
@@ -923,5 +1013,285 @@ describe('scheduled work', () => {
     await h.flush()
 
     expect(h.notices).toContain('보완 요청을 처리하지 못했습니다: repaint failed')
+  })
+})
+
+describe('model-aware guidance', () => {
+  test('reads the main model once per round and applies its profile block', async () => {
+    const h = harness({ model: () => 'claude-opus-5-5' })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    await h.controller.refine(h.ports, '더 짧게')
+    await h.controller.retry(h.ports)
+
+    expect(h.calls.model).toBe(3)
+    expect(h.calls.complete).toBe(3)
+    for (const request of h.completes) {
+      expect(request.system).toContain('[대상 모델 편집 지침: opus-5-5]')
+    }
+  })
+
+  test('re-reads the model each round so a mid-run switch changes the system prompt', async () => {
+    let call = 0
+    const h = harness({
+      model: () => {
+        call += 1
+        return call === 1 ? 'claude-opus-5-5' : 'claude-sonnet-5-5'
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    await h.controller.refine(h.ports, '더 짧게')
+
+    expect(h.calls.model).toBe(2)
+    expect(h.completes[0]?.system).toContain('[대상 모델 편집 지침: opus-5-5]')
+    expect(h.completes[0]?.system).not.toContain('sonnet-5-5')
+    expect(h.completes[1]?.system).toContain('[대상 모델 편집 지침: sonnet-5-5]')
+    expect(h.completes[1]?.system).not.toContain('opus-5-5')
+  })
+
+  test('reads the extra prompt file once per run across many rounds', async () => {
+    const h = harness({
+      model: () => 'claude-opus-5-5',
+      config: { systemPromptFile: '/extra.md' },
+      files: { '/extra.md': '파일 추가 지침' },
+    })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    await h.controller.refine(h.ports, '더 짧게')
+    await h.controller.retry(h.ports)
+
+    expect(h.calls.fileRead).toBe(1)
+    expect(h.calls.complete).toBe(3)
+    for (const request of h.completes) {
+      expect(request.system).toContain('파일 추가 지침')
+    }
+  })
+
+  test('a disabled toggle skips the getter and applies common guidance', async () => {
+    const h = harness({ model: () => 'claude-opus-5-5', config: { modelGuidance: false } })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.model).toBe(0)
+    expect(h.calls.complete).toBe(1)
+    expect(h.completes[0]?.system).not.toContain('[대상 모델 편집 지침')
+    expect(h.controller.getGuidanceStatus()).toMatchObject({
+      workflowId: 'wf-1',
+      round: 1,
+      target: { profile: 'common', reason: 'disabled' },
+    })
+  })
+
+  test('a rejected getter falls back to common and still completes once', async () => {
+    const h = harness({ model: () => Promise.reject(new Error('getter failed')) })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.model).toBe(1)
+    expect(h.calls.complete).toBe(1)
+    expect(h.completes[0]?.system).not.toContain('[대상 모델 편집 지침')
+    expect(h.controller.getGuidanceStatus()?.target).toMatchObject({
+      profile: 'common',
+      reason: 'error',
+    })
+  })
+
+  test('a host without the model port falls back to common and still completes once', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.model).toBe(0)
+    expect(h.calls.complete).toBe(1)
+    expect(h.completes[0]?.system).not.toContain('[대상 모델 편집 지침')
+    expect(h.controller.getGuidanceStatus()?.target).toMatchObject({
+      profile: 'common',
+      reason: 'unavailable',
+    })
+  })
+
+  test('a cancel during detection completes nothing and records no status', async () => {
+    const h = harness({ model: () => new Promise<string>(() => {}) })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+
+    const queued = h.queue.shift()
+    const running = (queued as () => Promise<void>)()
+    await h.waitFor(() => h.calls.model === 1)
+
+    await h.controller.cancel(h.ports)
+    await running
+
+    expect(h.calls.complete).toBe(0)
+    expect(h.controller.getGuidanceStatus()).toBeNull()
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('a cancelled run’s late extra read cannot overwrite the next run', async () => {
+    let readCalls = 0
+    let releaseFirst: ((text: string) => void) | undefined
+    const h = harness({
+      model: () => 'claude-opus-5-5',
+      config: { systemPromptFile: '/extra.md' },
+      files: { '/extra.md': 'placeholder' },
+      read: () => {
+        readCalls += 1
+        if (readCalls === 1) {
+          return new Promise<string>(resolve => {
+            releaseFirst = resolve
+          })
+        }
+        return Promise.resolve('새 실행 지침')
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+
+    // Run A starts and hangs on its extra-file read.
+    await h.controller.onSubmit(h.ports, submit('첫 요청'), 'pane')
+    const queued = h.queue.shift()
+    const running = (queued as () => Promise<void>)()
+    await h.waitFor(() => readCalls === 1)
+
+    // Cancel A, then start run B; B reads its own extra and completes.
+    await h.controller.cancel(h.ports)
+    await h.controller.onSubmit(h.ports, submit('둘째 요청'), 'pane')
+    await h.flush()
+
+    // A's read finally lands; it must not touch B's cache.
+    releaseFirst?.('이전 실행 지침')
+    await running
+
+    const latest = h.completes.at(-1)
+    expect(latest?.system).toContain('새 실행 지침')
+    expect(latest?.system).not.toContain('이전 실행 지침')
+  })
+
+  test('getGuidanceStatus stores the last request and resets with the session', async () => {
+    const h = harness({ model: () => 'claude-opus-5-5[1m]' })
+    h.controller.onSessionStart('sess-1')
+    expect(h.controller.getGuidanceStatus()).toBeNull()
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const status = h.controller.getGuidanceStatus()
+    expect(status).not.toBeNull()
+    expect(status).toMatchObject({
+      workflowId: 'wf-1',
+      round: 1,
+      target: {
+        raw: 'claude-opus-5-5[1m]',
+        normalizedId: 'claude-opus-5-5',
+        profile: 'opus-5-5',
+        reason: 'matched',
+      },
+    })
+
+    // Reading the status must not touch the model getter.
+    const before = h.calls.model
+    h.controller.getGuidanceStatus()
+    expect(h.calls.model).toBe(before)
+
+    // The next round bumps the recorded round number.
+    await h.controller.refine(h.ports, '더')
+    expect(h.controller.getGuidanceStatus()).toMatchObject({ workflowId: 'wf-1', round: 2 })
+
+    h.controller.onSessionEnd()
+    expect(h.controller.getGuidanceStatus()).toBeNull()
+
+    h.controller.onSessionStart('sess-2')
+    expect(h.controller.getGuidanceStatus()).toBeNull()
+  })
+})
+
+describe('readMemory — long-term memory folded into the snapshot', () => {
+  test('reads the rendered memory once per run and folds it into the first snapshot', async () => {
+    let reads = 0
+    const h = harness({
+      deps: {
+        readMemory: () => {
+          reads += 1
+          return '### Injected at session start\n세션 기억'
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(reads).toBe(1)
+    const context = h.controller.getState().workflow?.context
+    expect(context?.memory).toContain('세션 기억')
+    expect(context?.text).toContain('## Long-term memory')
+    expect(context?.text).toContain('세션 기억')
+    expect(h.completes[0]?.prompt).toContain('## Long-term memory')
+    expect(h.completes[0]?.prompt).toContain('세션 기억')
+
+    // The snapshot is read once: a later round reuses it, never re-reads.
+    await h.controller.refine(h.ports, '더 짧게')
+    expect(reads).toBe(1)
+  })
+
+  test('omits the memory when memoryContext is off', async () => {
+    let reads = 0
+    const h = harness({
+      config: { memoryContext: false },
+      deps: {
+        readMemory: () => {
+          reads += 1
+          return '숨겨야 할 기억'
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(reads).toBe(1)
+    expect(h.controller.getState().workflow?.context?.memory).toBe('')
+    expect(h.completes[0]?.prompt).not.toContain('숨겨야 할 기억')
+    expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
+  })
+
+  test('treats a throwing reader as no memory and keeps the round going', async () => {
+    const h = harness({
+      deps: {
+        readMemory: () => {
+          throw new Error('memory unavailable')
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.messages).toBe(1)
+    expect(h.calls.complete).toBe(1)
+    const workflow = h.controller.getState().workflow
+    expect(workflow?.phase).toBe('reviewing')
+    expect(workflow?.context?.memory).toBe('')
+  })
+
+  test('an absent reader leaves the memory section off the snapshot', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.controller.getState().workflow?.context?.memory).toBe('')
+    expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
   })
 })

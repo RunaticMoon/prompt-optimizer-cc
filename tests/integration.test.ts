@@ -125,6 +125,12 @@ interface World {
   closes: string[]
   /** Transcript lines the plugin logged. */
   logs: string[]
+  /** How many times the plugin called `$.session.model()`. */
+  readonly modelReads: number
+  /** Sets the value the bottom `session.model` hook answers with. */
+  setModelValue(value: string): void
+  /** Makes `$.session.model()` refuse, so detection falls back to common. */
+  setModelDeny(reason?: string): void
   /** Replaces the completion behavior. */
   setModel(behavior: ModelBehavior): void
   /** Makes the next `prompt.fill` refuse. */
@@ -132,6 +138,10 @@ interface World {
   /** The simulated composer's current text. */
   box(): string
   setBox(text: string): void
+  /** The additionalContext the bottom `classic.SessionStart` hook returns. */
+  setSessionStartContext(entries: readonly string[] | undefined): void
+  /** The additionalContext the bottom `classic.UserPromptSubmit` hook returns. */
+  setPromptSubmitContext(entries: readonly string[] | undefined): void
   /** Starts the session (the plugin wires itself on this). */
   start(): Promise<void>
   /** A composer submission, with the emulated engine starting a turn on a pass. */
@@ -148,6 +158,8 @@ interface World {
   waitFor(predicate: () => boolean, spins?: number): Promise<void>
   endSession(): Promise<void>
   restartSession(id: string): Promise<void>
+  /** The harness session's id, i.e. what `$.session.id()` answers. */
+  sessionId(): string
 }
 
 /**
@@ -170,8 +182,16 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
   let sectionHooks = 0
   let sessionId = 'sess-1'
   let boxText = ''
+  let ssContext: readonly string[] | undefined
+  let upsContext: readonly string[] | undefined
   let behavior: ModelBehavior = () => answered(DRAFT)
   let fillFn: ((input: PromptFillInput) => { isFilled: boolean; refusal?: 'no_composer' | 'dialog' }) | null = null
+  // The main session's model as the bottom `session.model` hook answers it. The
+  // default `''` normalizes to the `common` profile, so the fixtures that never
+  // set a model read exactly as the built-in plugin did before model guidance.
+  let modelRaw = ''
+  let modelReads = 0
+  let modelRefusal: string | null = null
 
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: sessionId }))
@@ -180,10 +200,15 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
   on('session.cwd', () => ({ value: '/repo/sub' }))
   on('session.root', () => ({ value: '/repo' }))
   on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false, name: 'owner/repo' } }))
+  on('session.model', () => {
+    modelReads += 1
+    return modelRefusal === null ? { value: modelRaw } : { deny: modelRefusal }
+  })
   on('fs.stat', () => ({ value: { kind: 'file', size: 9, mtimeMs: 0, isLink: false } }))
   on('fs.read', () => ({ value: '규칙 텍스트' }))
   on('env.get', () => ({ value: undefined }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('config.set', (_$, e) => ({ value: e.value }))
 
   on('ui.open', (_$, e) => {
     opens.push(e.id)
@@ -239,6 +264,15 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     return { text: e.text }
   })
 
+  // The bottom classic hooks: the loaded plugin's `classic.*` hooks sit above
+  // them and observe their `additionalContext` through `next(e)`.
+  on('classic.SessionStart', () => ({
+    additionalContext: ssContext === undefined ? undefined : [...ssContext],
+  }))
+  on('classic.UserPromptSubmit', () => ({
+    additionalContext: upsContext === undefined ? undefined : [...upsContext],
+  }))
+
   const turnStart = async (): Promise<void> => {
     await $.turn.start({ text: '', turnId: `turn-${turns + 1}` })
   }
@@ -263,6 +297,16 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     opens,
     closes,
     logs,
+    get modelReads() {
+      return modelReads
+    },
+    setModelValue(value) {
+      modelRaw = value
+      modelRefusal = null
+    },
+    setModelDeny(reason = 'model getter unavailable') {
+      modelRefusal = reason
+    },
     setModel(next) {
       behavior = next
     },
@@ -272,6 +316,12 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     box: () => boxText,
     setBox: text => {
       boxText = text
+    },
+    setSessionStartContext(entries) {
+      ssContext = entries === undefined ? undefined : [...entries]
+    },
+    setPromptSubmitContext(entries) {
+      upsContext = entries === undefined ? undefined : [...entries]
     },
     async start() {
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
@@ -319,6 +369,7 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
       sessionId = id
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
     },
+    sessionId: () => sessionId,
   }
 }
 
@@ -337,22 +388,14 @@ function mountPane($: Engine) {
 }
 
 /**
- * Known product bugs, written as EXPECTED-behavior checks.
+ * Invariant 5 through the command path: `/optimize send` and `/optimize raw`
+ * deliver, once each.
  *
- * The kit's `claude-code/testing` module exports only `describe`, `expect`,
- * `mock`, `test` and `tier`; neither `test.skip`/`test.todo` nor a `{ skip }` /
- * `{ todo }` test option is honoured here, so these cannot be registered as
- * skipped tests. Each body below is kept unregistered (and the reproduction is
- * in the task report) so the suite stays green while the defect is open.
- *
- * - INV5 (P1): `/optimize send` and `/optimize raw` never deliver. The
- *   `command.run` hook calls `sendApproved`, whose `$.prompt.submit` the host
- *   refuses with: "prompt.submit: called from a command.run hook, it would wait
- *   on the turn this hook is holding; submit from a later event (turn.complete)
- *   (host check)". The pane's send/raw buttons are unaffected — see the
- *   INV5(UI) tests, which pass.
+ * The plugin defers the controller call through a `$.clock.after(0)` callback,
+ * so the submission happens after `command.run` returns (the host refuses a
+ * submit made from inside the hook); the test advances the mock clock to run it.
  */
-async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
+async function assertInv5CommandDelivery($: Engine, on: On): Promise<void> {
   const w = setup($, on)
   await w.start()
   w.setModel((_request, call) => answered(`초안${call}`))
@@ -362,7 +405,10 @@ async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
   await w.submit('더 짧게')
   await w.advance(1)
 
-  await w.run('send')
+  expect(await w.run('send')).toBe('개선안 전송을 예약했습니다.')
+  // Nothing delivered yet: the command has only queued the deferred send.
+  expect(w.submits).toHaveLength(0)
+  await w.advance(0)
   expect(w.submits).toHaveLength(1)
   expect(w.submits[0]?.text).toBe('초안2')
   expect(w.submits[0]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
@@ -370,14 +416,13 @@ async function expectedInv5CommandDelivery($: Engine, on: On): Promise<void> {
   w.setBox('')
   await w.submit('원문B')
   await w.advance(1)
-  await w.run('raw')
+  expect(await w.run('raw')).toBe('원문 전송을 예약했습니다.')
+  expect(w.submits).toHaveLength(1)
+  await w.advance(0)
   expect(w.submits).toHaveLength(2)
   expect(w.submits[1]?.text).toBe('원문B')
   expect(w.submits[1]?.origin).toEqual({ kind: 'plugin', name: PLUGIN })
 }
-
-/** The listed, unregistered expectations above, so they are not dead code. */
-const KNOWN_PRODUCT_BUGS = [{ invariant: 'INV5', expected: expectedInv5CommandDelivery }] as const
 
 describe('integration — session isolation and delivery accuracy', () => {
   // Invariant 1: a plain composer submission is dropped; nothing reaches main.
@@ -455,6 +500,12 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(w.submits).toHaveLength(1)
     expect(w.submits[0]?.text).toBe(edited)
     expect(w.completes).toHaveLength(1)
+  })
+
+  // Invariant 5, command path: `/optimize send` and `/optimize raw` deliver
+  // once, from the deferred callback (after the command hook released its turn).
+  test('INV5(command) · /optimize send·raw가 command 반환 뒤 1회 전달한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    await assertInv5CommandDelivery($, on)
   })
 
   // Invariant 5, working path: the pane's send button submits once (the host
@@ -750,6 +801,274 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(request?.model).toBe('haiku')
   })
 
+  // Long-term memory capture: the plugin's `classic.SessionStart` and
+  // `classic.UserPromptSubmit` hooks copy other plugins' `additionalContext`
+  // into the snapshot, and a fresh SessionStart clears the previous-prompt ones.
+  //
+  // The classic envelope's `session_id` is given explicitly and made to match
+  // `$.session.id()` (`w.sessionId()`, the value the harness's `session.id` hook
+  // answers). The kit stamps a classic call with the test session's own UUID
+  // otherwise, which no `session.id` hook can name; in the real engine both
+  // name the same session (the transcript file's name), which is the memory
+  // store's key.
+  test('MEM · classic 메모리 포착이 옵티마이저 스냅샷에 실린다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // 1. A SessionStart context lands in the first request's snapshot.
+    w.setSessionStartContext(['MEM-SS-1'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const first = w.completes[0]?.prompt ?? ''
+    expect(first).toContain('## Long-term memory')
+    expect(first).toContain('### Injected at session start')
+    expect(first).toContain('MEM-SS-1')
+
+    // 2. A later UserPromptSubmit context joins the next run's snapshot, beside
+    //    the session-start one.
+    await w.run('cancel')
+    w.setPromptSubmitContext(['MEM-UPS-1'])
+    await $.classic.UserPromptSubmit({ prompt: '이전 프롬프트', session_id: w.sessionId() })
+    await w.run('두번째 원문')
+    await w.advance(1)
+    const second = w.completes[1]?.prompt ?? ''
+    expect(second).toContain('MEM-SS-1')
+    expect(second).toContain('### Injected for the previous prompt')
+    expect(second).toContain('MEM-UPS-1')
+
+    // 3. A fresh SessionStart clears the previous-prompt entries.
+    await w.run('cancel')
+    w.setSessionStartContext(['MEM-SS-2'])
+    await $.classic.SessionStart({ source: 'clear', session_id: w.sessionId() })
+    await w.run('세번째 원문')
+    await w.advance(1)
+    const third = w.completes[2]?.prompt ?? ''
+    expect(third).toContain('MEM-SS-2')
+    expect(third).not.toContain('MEM-UPS-1')
+    expect(third).not.toContain('### Injected for the previous prompt')
+  })
+
+  // L-2 regression: the memory store is session-scoped. Memory captured for
+  // session A must not leak into a new session (different id) that never sees
+  // its own classic SessionStart.
+  test('MEM · 새 세션은 classic SessionStart 없이 이전 세션 기억을 물려받지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-SS-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-SS-A')
+
+    // End session A and start session B without any classic SessionStart.
+    await w.run('cancel')
+    await w.endSession()
+    await w.restartSession('sess-2')
+
+    await w.submit('새 세션 원문')
+    await w.advance(1)
+    const next = w.completes[1]?.prompt ?? ''
+    expect(next).not.toContain('MEM-SS-A')
+    expect(next).not.toContain('## Long-term memory')
+  })
+
+  // L-2 follow-up: an ending session must not wipe a next session's memory that
+  // a classic SessionStart already captured before the end arrived (e.g. a
+  // `/clear` whose new session's SessionStart lands first). `resetSession`
+  // clears only the ending session's id.
+  test('MEM · 새 세션 SessionStart가 이전 세션 end보다 먼저 와도 새 세션 기억을 지우지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // Session A captures memory and shows it.
+    w.setSessionStartContext(['MEM-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-A')
+
+    // Session B's SessionStart arrives before A's end (the reverse of the
+    // usual order), keyed by B's id.
+    w.setSessionStartContext(['MEM-B'])
+    await $.classic.SessionStart({ source: 'clear', session_id: 'sess-2' })
+
+    // Now A's session.end fires; the harness still names A.
+    await w.endSession()
+
+    // B continues under its own classic id without a `session.start`; the
+    // snapshot reads the last captured classic session, so its memory is there.
+    await w.submit('B 세션 원문')
+    await w.advance(1)
+    const br = w.completes[1]?.prompt ?? ''
+    expect(br).toContain('MEM-B')
+    expect(br).not.toContain('MEM-A')
+  })
+
+  // High-1: `/clear` ends A and the process goes on under B's classic id with
+  // no `session.start` for it. The snapshot must follow the classic hook's id,
+  // so B's SessionStart memory is used and A's is gone.
+  test('MEM · /clear(session.start 없음) 후 새 classic SessionStart 기억이 다음 개선 요청에 포함된다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // A captures its session-start memory and shows it.
+    w.setSessionStartContext(['MEM-A'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-A')
+
+    // `/clear`: the engine ends A (reason `clear`, naming A), then B's classic
+    // SessionStart arrives with a new id. No `session.start` fires for B.
+    await w.endSession()
+    w.setSessionStartContext(['MEM-B'])
+    await $.classic.SessionStart({ source: 'clear', session_id: 'sess-2' })
+
+    // Without restartSession, the next request still sees B's memory only.
+    await w.submit('B 세션 원문')
+    await w.advance(1)
+    const br = w.completes[1]?.prompt ?? ''
+    expect(br).toContain('MEM-B')
+    expect(br).not.toContain('MEM-A')
+
+    // The differing classic id is diagnosed exactly once, not per hook.
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Medium-2: the classic hook's id and the `session.start` id need not agree
+  // (e.g. a resume/clear the plugin saw no `session.start` for). Memory still
+  // follows the classic hook, and the mismatch is diagnosed once per id.
+  test('MEM · classic id가 session.start id와 달라도 기억이 보인다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-DIFF'])
+    await $.classic.SessionStart({ source: 'resume', session_id: 'sess-other' })
+    // A second classic hook for the same id must not repeat the diagnostic.
+    await $.classic.SessionStart({ source: 'resume', session_id: 'sess-other' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-DIFF')
+
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Follow-up: an invalid classic `session_id` cannot key the store, so the
+  // capture is skipped (the stored session's memory stays) and the diagnostic
+  // lands exactly once. An empty id is passed verbatim; if the harness replaced
+  // it with the test session id, this test would fail at the first assertion.
+  test('MEM · classic id가 비면 기억을 기록하지 않고 진단만 1회 남긴다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // A valid capture first, so "skipped" is observable as "unchanged".
+    w.setSessionStartContext(['MEM-KEEP'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.prompt ?? '').toContain('MEM-KEEP')
+
+    // Empty id twice: no adopt, no replacement, one diagnostic.
+    w.setSessionStartContext(['MEM-EMPTY'])
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+
+    const noId = w.logs.filter(text => text.includes('carried no session_id'))
+    expect(noId).toHaveLength(1)
+
+    await w.run('cancel')
+    await w.run('다음 원문')
+    await w.advance(1)
+    const next = w.completes[1]?.prompt ?? ''
+    expect(next).toContain('MEM-KEEP')
+    expect(next).not.toContain('MEM-EMPTY')
+  })
+
+  // Subagent guard: a classic hook raised inside a subagent carries `agent_id`,
+  // and its settings hooks must not touch the main session's memory.
+  test('MEM · 서브에이전트(agent_id) classic 훅은 기억을 바꾸지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    // The main thread captures its own memory first.
+    w.setSessionStartContext(['MEM-MAIN'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+    w.setPromptSubmitContext(['MEM-MAIN-UPS'])
+    await $.classic.UserPromptSubmit({ prompt: '메인', session_id: w.sessionId() })
+
+    // The same id from a subagent carries new context: both hooks are ignored.
+    w.setSessionStartContext(['MEM-SUB'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId(), agent_id: 'sub-1' })
+    w.setPromptSubmitContext(['MEM-SUB-UPS'])
+    await $.classic.UserPromptSubmit({ prompt: '서브', session_id: w.sessionId(), agent_id: 'sub-1' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const prompt = w.completes[0]?.prompt ?? ''
+    expect(prompt).toContain('MEM-MAIN')
+    expect(prompt).toContain('MEM-MAIN-UPS')
+    expect(prompt).not.toContain('MEM-SUB')
+    expect(prompt).not.toContain('MEM-SUB-UPS')
+  })
+
+  // A UserPromptSubmit for a different session id must not adopt or replace the
+  // stored session's memory; session changes come from SessionStart alone.
+  test('MEM · 다른 session_id의 UserPromptSubmit이 현재 세션 기억을 덮지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setSessionStartContext(['MEM-CUR'])
+    await $.classic.SessionStart({ source: 'startup', session_id: w.sessionId() })
+
+    w.setPromptSubmitContext(['MEM-OTHER'])
+    await $.classic.UserPromptSubmit({ prompt: '다른 세션', session_id: 'sess-other' })
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    const prompt = w.completes[0]?.prompt ?? ''
+    expect(prompt).toContain('MEM-CUR')
+    expect(prompt).not.toContain('MEM-OTHER')
+
+    const diagnoses = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(diagnoses).toHaveLength(1)
+  })
+
+  // Diagnostic split: the empty-id report has its own state, so toggling between
+  // an empty id and a mismatched (non-empty) id cannot make it repeat.
+  test('MEM · 빈 id와 불일치 id를 번갈아 보내도 각 진단은 1회만 남는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+    await $.classic.SessionStart({ source: 'startup', session_id: '' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+
+    const noId = w.logs.filter(text => text.includes('carried no session_id'))
+    const differs = w.logs.filter(text => text.includes('classic hook session_id differs'))
+    expect(noId).toHaveLength(1)
+    expect(differs).toHaveLength(1)
+  })
+
+  // A `session.start` that yielded no id cannot compare, so the follow-the-
+  // classic-hook fallback is reported once for observability.
+  test('MEM · session.start id가 없으면 classic id 대체 사실을 1회 진단한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    await w.restartSession('')
+
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+    await $.classic.SessionStart({ source: 'startup', session_id: 'sess-other' })
+
+    const missing = w.logs.filter(text => text.includes('session.start yielded no session id'))
+    expect(missing).toHaveLength(1)
+  })
+
   // The pane UI path: mount the real Pane and press its accept button.
   test('UI · pane 모드에서 ui.mount/press accept가 1회 채우고 우회한다', { options: { uiMode: 'pane' } }, async ($, on) => {
     const w = setup($, on)
@@ -767,5 +1086,266 @@ describe('integration — session isolation and delivery accuracy', () => {
     const passed = await w.submit(DRAFT)
     expect(passed).toEqual({ text: DRAFT })
     expect(w.submits).toHaveLength(1)
+  })
+})
+
+/**
+ * Task M — model-aware guidance through the three real entry paths.
+ *
+ * Every fixture below drives the LOADED plugin, so the `session.model` value
+ * set with `w.setModelValue(...)` is read through the very closure `portsOf`
+ * builds at the submission hook, the command hook and the pane UI hook. Each
+ * assertion checks what the one `model.complete` request carried: the
+ * `[대상 모델 편집 지침: <profile>]` block for the main session's model, while
+ * the optimizer's own `model` and `effort` stay untouched.
+ */
+
+/** The opening of the model-specific system-prompt block `composeSystemPrompt` writes. */
+const BLOCK_TAG = '[대상 모델 편집 지침:'
+
+/** The shared editing guidance that is present even when no model block is added. */
+const COMMON_TAG = '[요청 편집 지침]'
+
+/** The fixed role/JSON contract, always the last section. */
+const CONTRACT_TAG = '[고정 계약]'
+
+/** The canonical main-session ids C measured (probe-model REPORT, 2.1.286). */
+const OPUS_1M = 'claude-opus-5-5[1m]'
+const SONNET_55 = 'claude-sonnet-5-5'
+const FABLE_51 = 'claude-fable-5-1'
+const HAIKU = 'claude-haiku-4-5-20251001'
+
+/** A `config.set` input for one `/config` row, as the test `$` stamps it. */
+function configChange(key: string, value: string | boolean) {
+  return {
+    key,
+    value,
+    previous: value,
+    provider: { plugin: PLUGIN, tier: 'user' as const },
+    origin: { kind: 'plugin' as const, name: 'integration-test' },
+  }
+}
+
+describe('integration — model-aware guidance at the three entry points', () => {
+  // Entry 1: prompt.submit reserves a round; the scheduled round reads the main
+  // session's model (C's `claude-opus-5-5[1m]`) and applies its block, while the
+  // optimizer's own model and effort are unchanged.
+  test('MG1 · prompt.submit 예약 라운드가 opus-5-5[1m]을 읽어 블록을 넣는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    const dropped = await w.submit(ORIGINAL)
+    expect(dropped).toEqual({ drop: DROP_OPTIMIZING })
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    const request = w.completes[0]
+    expect(request?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(request?.system ?? '').not.toContain('sonnet-5-5')
+    expect(request?.system ?? '').toContain(COMMON_TAG)
+    expect(request?.system ?? '').toContain(CONTRACT_TAG)
+    expect(request?.model).toBe('haiku')
+    expect(request?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // Entry 1, second round: the model is read afresh on every round, so a
+  // changed main model lands on the supplement/reply round too.
+  test('MG2 · 보완 라운드가 모델을 다시 읽어 새 프로필로 바뀐다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    w.setModelValue(SONNET_55)
+    const supplement = await w.submit('더 짧게')
+    expect(supplement).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(2)
+    const request = w.completes[1]
+    expect(request?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(request?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(request?.model).toBe('haiku')
+    expect(request?.effort).toBe('low')
+    expect(w.modelReads).toBe(2)
+  })
+
+  // Entry 2: `/optimize <text>` starts a run, `/optimize retry` re-reads the
+  // model and uses the new profile.
+  test('MG3 · /optimize 시작·retry 경로가 모델 전환을 반영한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    await w.run('명시적 요청')
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.effort).toBe('low')
+
+    w.setModelValue(SONNET_55)
+    const retried = await w.run('retry')
+    expect(retried).toContain('다시 다듬')
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.effort).toBe('low')
+    expect(w.modelReads).toBe(2)
+  })
+
+  // Entry 3: the pane UI's Input (refine) and retry button both go through
+  // `ui/register.tsx`'s own `portsOf`, and both re-read the model.
+  test('MG4 · pane refine·retry 경로가 모델 전환을 반영한다', { options: { uiMode: 'pane' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    const mounted = await mountPane($)
+    w.setModelValue(SONNET_55)
+    await mounted.input({ key: 'optimizer:instruction', text: '더 짧게' })
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    w.setModelValue(FABLE_51)
+    await mounted.press({ key: 'optimizer:retry' })
+    expect(w.completes).toHaveLength(3)
+    expect(w.completes[2]?.system ?? '').toContain(`${BLOCK_TAG} fable-5-1]`)
+    expect(w.completes[2]?.system ?? '').not.toContain(`${BLOCK_TAG} sonnet-5-5]`)
+
+    for (const request of w.completes) {
+      expect(request.model).toBe('haiku')
+      expect(request.effort).toBe('low')
+    }
+    expect(w.modelReads).toBe(3)
+  })
+
+  // A listed-but-common model: Haiku 4.5 gets no model block, only the common
+  // guidance and the fixed contract.
+  test('MG5 · haiku는 common이라 모델 블록 없이 공통·고정 계약만 남는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(HAIKU)
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    const request = w.completes[0]
+    expect(request?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(request?.system ?? '').toContain(COMMON_TAG)
+    expect(request?.system ?? '').toContain(CONTRACT_TAG)
+    expect(request?.model).toBe('haiku')
+    expect(request?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // A refused getter degrades to common without failing the round: the
+  // completion still happens exactly once.
+  test('MG6 · getter 거부는 common으로 폴백하고 completion은 1회 수행한다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelDeny()
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // `modelGuidance: false` from the start: the getter is never called and no
+  // model block appears.
+  test('MG7 · modelGuidance=false는 getter를 부르지 않고 블록도 없다', { options: { uiMode: 'composer', modelGuidance: false } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.effort).toBe('low')
+    expect(w.modelReads).toBe(0)
+  })
+
+  // Toggling off at runtime through `config.set`: the first round reads the
+  // model, the next round after the toggle does not.
+  test('MG8 · config.set로 modelGuidance를 끄면 다음 라운드부터 getter를 부르지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.modelReads).toBe(1)
+
+    const set = await $.config.set(configChange(`${PLUGIN}.modelGuidance`, false))
+    expect(set).toEqual({ value: false })
+
+    const supplement = await w.submit('더 짧게')
+    expect(supplement).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').not.toContain(BLOCK_TAG)
+    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.effort).toBe('low')
+    expect(w.modelReads).toBe(1)
+  })
+
+  // The optimizer's own model is independent of the main session's model: a
+  // configured `sonnet` stays on the request while the guidance follows opus.
+  test('MG9 · 메인 모델과 별개로 요청 model·effort는 옵티마이저 설정값이다', { options: { uiMode: 'composer', model: 'sonnet' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.model).toBe('sonnet')
+    expect(w.completes[0]?.effort).toBe('low')
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+  })
+
+  // A session reset clears the last applied snapshot; the next session reads
+  // its own model and applies the matching block.
+  test('MG10 · session reset 후 새 세션이 자기 모델을 다시 읽는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModelValue(OPUS_1M)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
+
+    await w.endSession()
+    await w.restartSession('sess-2')
+    w.setModelValue(SONNET_55)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
+    expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
+    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.effort).toBe('low')
   })
 })

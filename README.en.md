@@ -18,6 +18,10 @@ Full flow (based on the code):
 6. Each time the user refines in the pane/prompt box, one round is added (3 rounds maximum by default).
 7. "입력창으로 가져오기" (Bring to prompt box) runs `prompt.fill` with the improved draft and issues a one-shot bypass. When the user edits it and presses Enter, only that draft passes through interception and goes to the main session.
 
+**What it refines**
+
+The optimizer classifies the request by type before refining it. A change is judged by the requested change and the verification result, a diagnosis by the cause, evidence, and unconfirmed points, research by a sourced answer, and writing by text in the requested format; a long-output requirement is checked as well. When a problem description, question, idea, or plan contains no change request, it is treated as a diagnosis and refined into a request that reports only the cause and evidence without modifying anything; an explicit change request is kept as a change. A short, clear request with a single goal and a simple deliverable is kept as a natural sentence, while one with several conditions, inputs, or steps, or a long-output requirement, is organized into the four fields goal/context/scope/done criteria. The add-on guidance matched to the main session model is described in 5.4.
+
 **Why and how it is separated from the main session**
 
 - The improvement dialogue lives only in the plugin's own state (`RuntimeState`) and is not recorded in the main transcript.
@@ -176,11 +180,11 @@ Command name `optimize`, description `프롬프트 옵티마이저: 개선 시�
 | `/optimize [text]` | Starts improvement with the entered text. With no argument, it takes the current prompt-box draft. |
 | `/optimize on` / `off` | Turns automatic interception on / off. |
 | `/optimize accept` | Brings the improved draft to the prompt box. |
-| `/optimize send` | Sends the improved draft now. |
-| `/optimize raw` | Sends the original text as is. |
+| `/optimize send` | Reserves a send of the improved draft. If a job is in progress or there is no improved draft to send, it does not reserve and prints the reason immediately. |
+| `/optimize raw` | Reserves a send of the original text. The reservation conditions are the same as `send`. |
 | `/optimize retry [instruction]` | Refines again with the refinement (or the last refinement if none). |
 | `/optimize cancel` | Cancels the improvement job. |
-| `/optimize status` | Shows the configuration, the current stage, and this session's usage. |
+| `/optimize status` | Shows the configuration, the current stage, and this session's usage. It includes `옵티마이저 모델:` (optimizer model), `모델별 지침: 켜짐`/`꺼짐(공통 지침만 사용)` (model-specific guidance on/off, off keeps common guidance only), the target model applied to the last optimization (5.4), and `장기 기억 문맥: 켬`/`끔` (long-term memory context on/off). |
 | `/optimize model <alias-or-id>` | Changes the optimizer model. |
 | `/optimize -- <text>` | Starts improvement even for a sentence that begins with a reserved word. |
 | `/optimize help` | Shows command help. |
@@ -189,8 +193,23 @@ Command name `optimize`, description `프롬프트 옵티마이저: 개선 시�
 - `model` with no argument returns a usage error.
 - Calling `accept`/`send`/`raw`/`cancel`/`retry` when there is no job in progress returns a single line `진행 중인 개선 작업이 없습니다. ...` ("There is no improvement job in progress. ...").
 - The command hook returns only `{ text }` and never carries `context`. In other words, running the command itself does not put the optimizer dialogue into the main model/transcript.
+- `send` and `raw` do not call `$.prompt.submit` directly inside the `command.run` hook. While the hook still holds the command turn the host refuses the submission (it would make the submission wait for the in-progress turn), so the command reserves the send with `$.clock.after(0)` and immediately prints `개선안 전송을 예약했습니다.` ("Reserved sending the improved draft.") or `원문 전송을 예약했습니다.` ("Reserved sending the original text."). If a job is in progress or there is no text to send, it does not reserve and prints the reason immediately. If the actual send later fails after the reservation, it is shown as a notification (toast).
 
 These commands first pass through the `prompt.submit` classification as slash commands, and the `command.run` hook (`matcher: { command: 'optimize' }`) handles them.
+
+### 4.7 Using it with long-term memory plugins
+
+Long-term memory plugins such as claude-mem and OpenViking inject memory into a session through classic hooks (SessionStart/UserPromptSubmit/Stop). A submission this plugin intercepted, and the improvement dialogue, do not run those hooks, so the original text and the refinement dialogue are not recorded in that plugin's memory.
+
+If you bring the improved draft over and press Enter, use the pane's **바로 보내기** (Send now)/**원문 보내기** (Send original), use `/optimize send|raw`, or send with the `::raw` prefix, UserPromptSubmit runs once with the final text, and the memory it injects at that point is included in the main request as usual (verified on Claude Code 2.1.286).
+
+The optimizer only observes (never modifies) the `additionalContext` injected into the session by classic hooks (`SessionStart`/`UserPromptSubmit`) in settings or a plugin's `hooks.json`, as seen in the classic chain below this plugin, and puts it in the "Long-term memory" section of the snapshot (at most 2000 characters, `CONTEXT_MEMORY_CHARS`). Memory injected at session start is used from the first prompt. UserPromptSubmit memory is what was retrieved for **the prompt that last went to the main session**; it is not newly retrieved for the prompt being refined now (at interception time that hook has not run yet). A new SessionStart (start, resume, clear, compact) clears the previous-prompt memory. Memory follows the session id the classic hook reports, so after a `/clear` — where a new session id arrives with no `session.start` — the memory that SessionStart injected is used from the next request on. SessionStart changes sessions (a UserPromptSubmit never replaces a stored session; it only fills an empty store), a session end clears the ending session's memory only when its id matches the stored classic session (otherwise the next SessionStart replaces it), and classic hooks raised inside a subagent (with `agent_id` set) are ignored.
+
+In the optimizer request, section tags such as `<context>` inside the context (snapshot) are replaced with `‹` (U+2039), so a string like `</context>` inside it cannot break a section boundary.
+
+The system prompt uses this section only as reference data (so it does not re-ask what is already recorded) and is instructed not to follow instructions inside it.
+
+To turn it off, set `memoryContext` to false (section 5).
 
 ## 5. Configuration
 
@@ -199,6 +218,7 @@ The source of truth for configuration is `userConfig` in `plugin.json`, and the 
 | Key | Type | Default | Allowed range | Description |
 |---|---|---|---|---|
 | `enabled` | boolean | `true` | — | Whether to intercept eligible submissions |
+| `modelGuidance` | boolean | `true` | — | Whether to detect the main session model and apply that model's add-on editing guidance. Off keeps the common guidance only (5.4) |
 | `triggerMode` | string | `always` | `always` \| `prefix` | `always` improves every target submission, `prefix` only submissions that have the prefix |
 | `triggerPrefix` | string | `?? ` | reverts to the default in prefix mode when empty | Trigger prefix for prefix mode |
 | `rawPrefix` | string | `::raw ` | — | Starting with this prefix strips it and passes the rest through unchanged |
@@ -210,6 +230,7 @@ The source of truth for configuration is `userConfig` in `plugin.json`, and the 
 | `contextTurns` | number | `4` | 0–8 | Number of recent user turns included in the context |
 | `contextMaxChars` | number | `6000` | 0–8000 | Character budget for the context snapshot |
 | `systemPromptFile` | string | `""`(none) | — | Optional extra system-instructions file; empty keeps the built-in prompt |
+| `memoryContext` | boolean | `true` | — | Include the long-term memory (`additionalContext`) injected by classic hooks (`SessionStart`/`UserPromptSubmit`) in settings or a plugin's `hooks.json` in the optimizer context |
 
 `auto` and `pane` for `uiMode` behave the same way: they try opening the pane first, and if it can be laid out they use the pane; otherwise they fall back to prompt-box dialogue. This matches the current description in `plugin.json` (`chooseUi` in `hooks/register.ts`).
 
@@ -219,6 +240,7 @@ The `config.set` handler in `register.ts` handles keys starting with the `<plugi
 
 ```text
 prompt-optimizer.enabled
+prompt-optimizer.modelGuidance
 prompt-optimizer.triggerMode
 prompt-optimizer.triggerPrefix
 prompt-optimizer.rawPrefix
@@ -230,6 +252,7 @@ prompt-optimizer.maxRounds
 prompt-optimizer.contextTurns
 prompt-optimizer.contextMaxChars
 prompt-optimizer.systemPromptFile
+prompt-optimizer.memoryContext
 ```
 
 Changing a value here is reflected in the base configuration, and any session-only override tied to the same key is cleared.
@@ -255,15 +278,78 @@ Changing a value here is reflected in the base configuration, and any session-on
 - Recommended location: `~/.claude/prompt-optimizer/system-prompt.md`.
 - This file is read only once at the start of a job (workflow) and cached for that job. It is read again when a new job/session starts.
 
+### 5.4 Model-specific prompting guidance
+
+What the optimizer produces is **the user message to be sent to the main session model**; the `model` setting (default `haiku`) is a separate model that edits that message. So the two are not confused, status labels the optimizer's own model `옵티마이저 모델:` (Korean for "Optimizer model:").
+
+- **Re-read on every optimization.** Right before the request is assembled in every round — the first call, a retry, and a refinement (`retry`/`refine`) alike — it reads the main session model with `$.session.model()` and adds that model's short add-on guidance to the optimizer's system prompt. After `/model`, the next optimization reflects the new model. A draft already placed in the prompt box is not rewritten automatically.
+- **If the model cannot be read within 500 ms or the read fails**, only the common guidance applies and the optimization proceeds as usual. Timeout, rejection, a synchronous throw, an empty value, and a missing port all fall back to common and never become an optimization failure or a change to the existing model settings.
+- **The optimizer's own model and effort do not change.** `model` (default `haiku`) and effort `low` stay as they are, and `/optimize model` changes only the optimizer model. The main conversation and the main model settings are untouched. There is no effort-based branching (the plugin cannot read the current effort).
+- **Only what takes effect as request wording is distilled.** API/harness settings such as effort, thinking, and max_tokens are excluded from the guidance; only the parts expressible as the request's goal, scope, and completion criteria are kept.
+
+**Supported models**
+
+The raw string from `$.session.model()` is preserved exactly; only a lookup copy is trimmed, lowercased, and stripped of a single trailing `[1m]` and a single trailing `-YYYYMMDD` date. Model-specific guidance is used only when the whole string matches the allowlist exactly; partial matches never map (`hooks/target-model.ts`).
+
+| Model ID | Applied profile |
+|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1` | `fable-5-1` |
+| `claude-fable-5`, `claude-mythos-5` | `fable-5` |
+| `claude-opus-5-5` | `opus-5-5` |
+| `claude-opus-5` | `opus-5` |
+| `claude-opus-4-8` | `opus-4-8` |
+| `claude-sonnet-5-5` | `sonnet-5-5` |
+| `claude-sonnet-5` | `sonnet-5` |
+| Haiku 4.5 (`claude-haiku-4-5-...`), every other model, alias-only values (`opus`, `sonnet`, …) | `common` (common guidance only) |
+
+- `[1m]` and date suffixes are ignored. For example, `claude-opus-5-5[1m]` and `claude-opus-5-5-20260901[1m]` → `claude-opus-5-5`.
+- A version-less alias, a new version outside the allowlist, an empty value, or a non-string value uses the common guidance. It never falls back to a nearby version.
+- IDs returned by other providers such as Bedrock, Vertex, and gateways have not been observed, so they use the common guidance.
+
+**Status display**
+
+`/optimize status` does not read the current model at query time; it shows only the detection result applied to the last request actually sent. Example values of `마지막 최적화 대상:` ("last optimization target"):
+
+```text
+아직 감지하지 않음
+claude-opus-5-5[1m] · 적용: opus-5-5
+미확인 · 적용: common (timeout)
+감지 생략 · 적용: common (disabled)
+```
+
+- `아직 감지하지 않음` ("not detected yet"): no optimization has been detected or sent in this session yet (including session start/reset).
+- `<raw> · 적용: <profile>` ("applied: <profile>"): detection succeeded. When it is `common`, the reason is shown too, as `· 적용: common (<reason>)`.
+- `미확인 · 적용: common (<reason>)` ("unconfirmed"): the value could not be read (timeout, error, …) and the common guidance was applied.
+- `감지 생략 · 적용: common (disabled)` ("detection skipped"): `modelGuidance` is off, so no lookup was made at all.
+
+Right after a setting change, the current toggle and the last round's applied value can differ; the `마지막 최적화 대상` ("last optimization target") label keeps them distinct.
+
+**System prompt assembly order**
+
+`composeSystemPrompt` in `hooks/system-prompt.ts` assembles the final text in this order.
+
+1. The built-in prompt (`BASE_SYSTEM_PROMPT`, which already contains the common editing guidance)
+2. The target model's add-on block — omitted when the profile is `common`. Its heading names only the code-defined profile, e.g. `[대상 모델 편집 지침: opus-5-5]` ("[Target-model editing guidance: opus-5-5]"); no raw model string is added.
+3. The user's extra instructions (`systemPromptFile`, 5.3) — added under `[추가 지침]` ("[Additional instructions]") only when non-blank after trimming.
+4. The fixed contract (`[고정 계약]`, "[Fixed contract]") — always last. It restates the role limits and the JSON output contract, and no additional instruction can override it.
+
+Turning `modelGuidance` off still keeps the common editing guidance, and the fixed contract is always appended last.
+
+**Sources**
+
+- The recommendations in [Anthropic's prompt engineering best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) and the per-model pages (Fable, Opus, Sonnet) were distilled into request wording. The source text is not downloaded at runtime or included in the repository.
+- The request classification, the four-field goal/context/scope/done-criteria structure, and the idea of resolving referents came from the `fable-prompt` skill in [oh-my-fable](https://github.com/Junhan2/oh-my-fable) (MIT). That skill's "execute after improving" procedure and its rule of copying the blocks verbatim are not adopted.
+
 ## 6. Cost and privacy
 
 - **Call count**: exactly one `$.model.complete` per round. At most `maxRounds` (default 3) per job. There is no automatic retry, higher-model fallback, or fork.
   - However, even if the plugin calls once, **the engine's API client can retry the same request itself on 5xx errors**. In local mock API verification (2.1.285), a single HTTP 500 produced 3 requests (1 initial + 2 retries). `$.model.complete` has no retry option, so the plugin cannot turn it off. In the same verification, a response delay (15 seconds) was aborted after `timeoutMs` (12 seconds) and the original text was restored. It was not checked whether retries are included within the timeout.
 - **Default parameters**: model `haiku`, effort `low` (fixed), `maxTokens 1024`, `timeoutMs 12000`.
 - **Request composition**: `<context>` + `<original_prompt>` + (if present) `<current_draft>` + `<dialogue>` + `<instruction>` + the JSON output instruction. If the full prompt + system exceeds 16000 characters (`MAX_REQUEST_CHARS`), older dialogue is dropped first, and if it still exceeds, the context is truncated from the end. The original text is not truncated.
-- **Context limits**: from the most recent `contextTurns` (default 4) user turns, newest first, at most 8 messages/4000 characters, 1200 characters per message (with `[중략]`, "[omitted]", in the middle), 1200 characters of project rules, 400 characters of cwd/repo, 400 characters of tool names, 6000 characters total. For rule files, only the candidates `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` are read, and any over 256 KiB is skipped.
+- **Context limits**: from the most recent `contextTurns` (default 4) user turns, newest first, at most 8 messages/4000 characters, 1200 characters per message (with `[중략]`, "[omitted]", in the middle), 1200 characters of project rules, 400 characters of cwd/repo, 400 characters of tool names, 2000 characters of long-term memory (`CONTEXT_MEMORY_CHARS`), and 6000 characters total (`contextMaxChars` default). When the total budget is exceeded the oldest conversation lines are dropped first, so when the memory section is present the conversation share shrinks by that 2000 characters. For rule files, only the candidates `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` are read, and any over 256 KiB is skipped.
 - **Tool results, whole files, and image transcripts are not sent.** Only tool name metadata goes into the context.
 - **There is no separate model call to summarize the context.**
+- **Long-term memory context**: when `memoryContext` is on (the default), the long-term memory (`additionalContext`) injected by classic hooks (`SessionStart`/`UserPromptSubmit`) in settings or a plugin's `hooks.json` is included in the optimizer model (default `haiku`) request as the "Long-term memory" section of the snapshot (at most 2000 characters, `CONTEXT_MEMORY_CHARS`). This section goes only into the optimizer model request and adds no separate model call. To turn it off, set `memoryContext` to false.
 - **No disk storage (plugin state)**: prompts, context, dialogue, bypasses, and usage are only in plugin memory, and the plugin does not write them to files or `$.store`.
 - **Transcript rows from composer notifications**: in composer (prompt-box dialogue) mode, the improved draft, optimizer messages, errors, and notifications are emitted as `$.ui.log` notifications, so the host may record them as notification rows in the session transcript file. This is not a dialogue sent as main-model input, and pane mode uses only `$.ui.invalidate`/`$.ui.toast` instead of `$.ui.log`, so it uses only local state (`hooks/ui/present.ts`).
 - **No monetary display**: only token usage is shown (the pane header total, and the session total in `/optimize status`). Prices are not fixed. The 0 in a cancel response is "returned usage" and does not guarantee a final provider charge of 0.
@@ -274,15 +360,19 @@ Changing a value here is reflected in the base configuration, and any session-on
 - **In-progress turns and waiting submissions**: submissions with a `turnId` or with `wait === true` are left to the main session's queue as is.
 - **Slash commands and shell input**: input starting with `/` or `!` is not intercepted (commands are handled by `command.run`).
 - **Overly long originals**: if the original exceeds 6000 characters (`MAX_ORIGINAL_CHARS`), it is passed through without improvement.
-- **Context loss on explicit send**: "바로 보내기" (Send now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text })`. The engine's `PromptSubmitArgs` has no `context` field, so additional context blocks that other hooks may have attached to the initial submission are not re-attached on an explicit send. The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
+- **Context loss on explicit send (Mod hooks only)**: "바로 보내기" (Send now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text })`. The engine's `PromptSubmitArgs` has no `context` field, so blocks that a Mod hook above this plugin may have attached with `context` on the initial submission are not re-attached on an explicit send. Classic hooks (settings/plugin `hooks.json`), by contrast, run again on an explicit send, so the long-term memory injection is kept (verified on 2.1.286). The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
 - **Cancel refusals**: cancel is refused while already transferring to the prompt box (`transferring`) or while sending (`sending`) (respectively `입력창으로 옮기는 중이라 취소할 수 없습니다`, "Cannot cancel while transferring to the prompt box", and `전송 중이라 취소할 수 없습니다`, "Cannot cancel while sending"). At the points where an in-progress call is aborted (`collecting`/`generating`/`reviewing`/`failed`), cancel works normally.
 - **Empty raw submission drop**: if what follows `rawPrefix` is empty or only whitespace, it is dropped with `보낼 내용이 없습니다.` ("There is nothing to send."). The prefix is not delivered to the main session.
 - **Closing the pane = cancel**: pressing Esc/closing in the pane (origin `person`) cancels the job in progress and restores the original text.
 - **Restore conflict protection**: if the prompt box has new content typed by the user, it is not overwritten with the improved draft (`draft-conflict`). If the fill is refused, no bypass is issued.
 - **Bypass lifetime**: a bypass issued by a restore expires after 10 minutes and is consumed only once. If the user edits, it follows the edited text; if the prompt box is cleared, it is invalidated. If another plugin fills the prompt box, the bypass follows that new text (so it no longer has effect on the original improved draft) and the next Enter is not intercepted, sending that text instead.
-- **Composer notifications may remain in the transcript**: in composer mode, the improved draft and messages go out as `$.ui.log` notifications, so the host may save them as notification rows in the session transcript file. They are not sent as main-model input, and pane mode does not use this path.
+- **Composer notifications may remain in the transcript**: in composer mode, the improved draft and messages go out as `$.ui.log` notifications, so the host may save them as notification rows in the session transcript file. Such a row is recorded with the shape `type: "system"`, `subtype: "informational"`, `isMeta: false`, and no role (measured). It does not affect transcript parsers that select user messages only (for example a memory plugin's Stop hook), but a parser that filters on `isMeta` alone can include this row. The improvement dialogue in pane mode does not remain in the transcript (measured). It is not sent as main-model input, and pane mode does not use this path.
+- **The optimizer does not newly retrieve memory for the current prompt**: the UserPromptSubmit memory in the long-term memory context (4.7) is what was retrieved for the prompt that last went to the main session; it is not newly retrieved for the prompt being refined now (at interception time that hook has not run yet).
 - **Usage is memory-only**: this session's usage is only in plugin memory (`RuntimeState.usage`) and is not saved to `$.store`. It disappears when the session ends.
 - **System prompt file fallback notification**: if `systemPromptFile` cannot be read, a `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: <사유>` notification ("Could not read the system prompt file, so the default prompt is used: <reason>") is shown once for that job, and the built-in prompt is used.
+- **The real effect of the model-specific guidance is unverified**: whether the guidance improves the actual model response depends on the model's response. There is no automated quality evaluation in this repository; the tests guarantee only the normalization, selection, and assembly contract (5.4).
+- **500 ms model-detection limit**: reading the main session model must finish within 500 ms (`TARGET_MODEL_TIMEOUT_MS`). If it does not, that round uses only the common guidance and the optimization continues. The `마지막 최적화 대상` ("last optimization target") in `/optimize status` is the last request actually sent, not the current model at query time.
+- **Provider-specific model IDs**: ID formats returned by other providers such as Bedrock, Vertex, and gateways have not been observed, so only the common guidance applies.
 - **early-access API**: the Mod contract can change (there is a return-shape change history from 2.1.277 → 2.1.285).
 - **Real terminal screen verification status**: in this repository's history, the actual terminal behavior of pane layout, focus, and fill has not yet been verified (network errors in the development environment). Verification is planned with the procedure in `docs/smoke.md`, and until then the screen behavior is **unverified**. The automated tests guarantee only the contract on the mock engine.
 
@@ -313,7 +403,7 @@ File structure:
 
 ```text
 .claude-plugin/
-  plugin.json          # manifest: name and the 12 userConfig keys
+  plugin.json          # manifest: name and the 14 userConfig keys
   marketplace.json     # Marketplace definition (name, owner, plugins)
   types/               # generated by the CLI, gitignored, do not commit
 hooks/
@@ -323,7 +413,11 @@ hooks/
   config.ts            # option normalization, reading systemPromptFile
   eligibility.ts       # submission classification rules
   context.ts           # context snapshot collection
+  memory.ts            # stores and renders the injected long-term memory
+  model-guidance.ts    # common and per-model editing guidance strings
   system-prompt.ts     # built-in prompt + fixed contract
+  target-model.ts      # main model string → guidance profile normalization
+  resolve-target-model.ts # 500 ms bounded target-model lookup (common on failure)
   model.ts             # single-completion request/response mapping
   state.ts             # pure reducer
   delivery.ts          # prompt-box restore (prompt.fill) and explicit send (prompt.submit)

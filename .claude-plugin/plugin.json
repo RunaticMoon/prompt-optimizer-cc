@@ -22,6 +22,13 @@
       "required": false,
       "default": true
     },
+    "modelGuidance": {
+      "type": "boolean",
+      "title": "Model-specific guidance",
+      "description": "Use the main session model to select rewrite guidance. Off keeps common guidance only; the optimizer model is unchanged.",
+      "required": false,
+      "default": true
+    },
     "triggerMode": {
       "type": "string",
       "title": "Trigger mode",
@@ -107,6 +114,13 @@
       "description": "Optional file with extra system instructions; empty keeps the built-in prompt.",
       "required": false,
       "default": ""
+    },
+    "memoryContext": {
+      "type": "boolean",
+      "title": "Long-term memory context",
+      "description": "Let the optimizer read context that settings or plugin hooks (SessionStart/UserPromptSubmit) injected into the session, such as claude-mem or OpenViking memories. Sent only to the optimizer model.",
+      "required": false,
+      "default": true
     }
   }
 }

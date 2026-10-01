@@ -98,6 +98,32 @@ describe('resolveConfig — enabled', () => {
   })
 })
 
+describe('resolveConfig — modelGuidance', () => {
+  test('defaults to true (matching the manifest default)', () => {
+    expect(DEFAULT_CONFIG.modelGuidance).toBe(true)
+    expect(resolveConfig({}).config.modelGuidance).toBe(true)
+    expect(resolveConfig(undefined).config.modelGuidance).toBe(true)
+  })
+
+  test('accepts a boolean', () => {
+    expect(resolveConfig({ modelGuidance: false }).config.modelGuidance).toBe(false)
+    expect(resolveConfig({ modelGuidance: true }).config.modelGuidance).toBe(true)
+  })
+
+  test('coerces the string spellings the config UI writes', () => {
+    expect(resolveConfig({ modelGuidance: 'true' }).config.modelGuidance).toBe(true)
+    expect(resolveConfig({ modelGuidance: 'false' }).config.modelGuidance).toBe(false)
+  })
+
+  test('falls back on any other value with one warning', () => {
+    for (const value of ['maybe', 3, 'yes', 1, 0, null, undefined, ['true']]) {
+      const { config, warnings } = resolveConfig({ modelGuidance: value })
+      expect(config.modelGuidance).toBe(DEFAULT_CONFIG.modelGuidance)
+      expect(warnings).toHaveLength(1)
+    }
+  })
+})
+
 describe('resolveConfig — enums', () => {
   test('triggerMode accepts only its two values', () => {
     expect(resolveConfig({ triggerMode: 'prefix' }).config.triggerMode).toBe('prefix')
@@ -259,10 +285,33 @@ describe('resolveConfig — systemPromptFile', () => {
   })
 })
 
+describe('resolveConfig — memoryContext', () => {
+  test('accepts a boolean', () => {
+    expect(resolveConfig({ memoryContext: false }).config.memoryContext).toBe(false)
+    expect(resolveConfig({ memoryContext: true }).config.memoryContext).toBe(true)
+  })
+
+  test('coerces the string spellings the config UI writes', () => {
+    expect(resolveConfig({ memoryContext: 'true' }).config.memoryContext).toBe(true)
+    expect(resolveConfig({ memoryContext: 'false' }).config.memoryContext).toBe(false)
+  })
+
+  test('falls back on any other value with one warning', () => {
+    for (const value of ['yes', 1, 0, null, undefined, ['true']]) {
+      const { config, warnings } = resolveConfig({ memoryContext: value })
+      expect(config.memoryContext).toBe(DEFAULT_CONFIG.memoryContext)
+      expect(warnings).toHaveLength(1)
+    }
+  })
+})
+
 describe('validateConfigChange', () => {
   test('returns the coerced value for a valid single change', () => {
     expect(validateConfigChange('model', '  opus  ')).toEqual({ ok: true, key: 'model', value: 'opus' })
     expect(validateConfigChange('enabled', 'false')).toEqual({ ok: true, key: 'enabled', value: false })
+    expect(validateConfigChange('modelGuidance', false)).toEqual({ ok: true, key: 'modelGuidance', value: false })
+    expect(validateConfigChange('modelGuidance', 'true')).toEqual({ ok: true, key: 'modelGuidance', value: true })
+    expect(validateConfigChange('memoryContext', 'false')).toEqual({ ok: true, key: 'memoryContext', value: false })
     expect(validateConfigChange('maxTokens', '2048')).toEqual({ ok: true, key: 'maxTokens', value: 2048 })
     expect(validateConfigChange('maxTokens', 128)).toEqual({ ok: true, key: 'maxTokens', value: 128 })
   })
@@ -276,6 +325,8 @@ describe('validateConfigChange', () => {
       ['maxTokens', 99],
       ['model', ''],
       ['enabled', 'maybe'],
+      ['modelGuidance', 'maybe'],
+      ['modelGuidance', 3],
       ['triggerMode', 'sometimes'],
       ['triggerPrefix', '/x'],
       ['rawPrefix', '!x'],

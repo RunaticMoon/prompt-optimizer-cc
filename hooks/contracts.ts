@@ -9,6 +9,8 @@ import type { EngineInterface } from 'claude-code'
 export interface OptimizerConfig {
   /** Whether the optimizer intercepts eligible submissions at all. */
   enabled: boolean
+  /** Whether the main session's model selects model-specific rewrite guidance. */
+  modelGuidance: boolean
   /** `always` intercepts every eligible prompt; `prefix` only prefixed ones. */
   triggerMode: TriggerMode
   /** Prefix that starts an optimization when `triggerMode` is `prefix`. */
@@ -31,6 +33,12 @@ export interface OptimizerConfig {
   contextMaxChars: number
   /** File with extra system instructions; empty keeps the built-in prompt. */
   systemPromptFile: string
+  /**
+   * Whether context other plugins' settings hooks injected into the main
+   * session (long-term memory: `SessionStart`/`UserPromptSubmit`
+   * `additionalContext`) joins the optimizer's snapshot.
+   */
+  memoryContext: boolean
 }
 
 /** A key of {@link OptimizerConfig}, as `config.set` reports it. */
@@ -146,10 +154,31 @@ export interface ContextSnapshot {
   location: string
   /** Recent tool metadata, capped by {@link CONTEXT_TOOLS_CHARS}. */
   tools: string
+  /** Injected long-term memory text, capped by {@link CONTEXT_MEMORY_CHARS}. */
+  memory: string
   /** The assembled snapshot text under the configured character budget. */
   text: string
   /** Length of {@link text} in characters. */
   chars: number
+}
+
+/**
+ * Context other plugins' settings hooks injected into the main session, as
+ * this plugin observed it through `classic.*` results. Read-only for the
+ * optimizer; never sent back to the main session by this plugin.
+ */
+export interface CapturedMemory {
+  /**
+   * `additionalContext` entries from the latest `SessionStart` run (startup,
+   * resume, clear or compact), replacing the previous run's.
+   */
+  sessionStart: readonly string[]
+  /**
+   * `additionalContext` entries from the latest `UserPromptSubmit` run: the
+   * memory retrieved for the PREVIOUS prompt that reached the main session,
+   * not for the prompt being optimized now.
+   */
+  lastPrompt: readonly string[]
 }
 
 /** Why a submission is left untouched by the optimizer. */
@@ -287,6 +316,7 @@ export interface SubmitTarget {
 /** Default settings; the manifest `userConfig` states the same values. */
 export const DEFAULT_CONFIG: OptimizerConfig = {
   enabled: true,
+  modelGuidance: true,
   triggerMode: 'always',
   triggerPrefix: '?? ',
   rawPrefix: '::raw ',
@@ -298,6 +328,7 @@ export const DEFAULT_CONFIG: OptimizerConfig = {
   contextTurns: 4,
   contextMaxChars: 6000,
   systemPromptFile: '',
+  memoryContext: true,
 }
 
 /** Effort sent with every optimizer completion. */
@@ -330,6 +361,9 @@ export const CONTEXT_LOCATION_CHARS = 400
 /** Cap for tool metadata inside the snapshot. */
 export const CONTEXT_TOOLS_CHARS = 400
 
+/** Cap for injected long-term memory text inside the snapshot. */
+export const CONTEXT_MEMORY_CHARS = 2000
+
 /** Most conversation messages kept in the snapshot. */
 export const CONTEXT_MESSAGES_MAX = 8
 
@@ -351,10 +385,70 @@ export const SYSTEM_PROMPT_MAX_CHARS = 4000
  * from `$.noun.method(...)` closures and hands it to the helpers instead.
  */
 export type EnginePorts = {
-  session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'>
+  session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'> &
+    Partial<Pick<EngineInterface['session'], 'model'>>
+  /** Optional so older hosts and tests without a timer degrade to common guidance. */
+  clock?: Pick<EngineInterface['clock'], 'sleep'>
   fs: Pick<EngineInterface['fs'], 'stat' | 'read'>
   env: Pick<EngineInterface['env'], 'get'>
   model: Pick<EngineInterface['model'], 'complete'>
   prompt: Pick<EngineInterface['prompt'], 'read' | 'fill' | 'submit'>
   ui: Pick<EngineInterface['ui'], 'close'>
 }
+
+/**
+ * Guidance profile chosen from the main session's model (DESIGN-model-guidance §5).
+ * `common` applies the shared rewrite guidance only.
+ */
+export type GuidanceProfile =
+  | 'common'
+  | 'fable-5-1'
+  | 'fable-5'
+  | 'opus-5-5'
+  | 'opus-5'
+  | 'opus-4-8'
+  | 'sonnet-5-5'
+  | 'sonnet-5'
+
+/** Why a target-model snapshot ended up with its profile. */
+export type ModelResolutionReason =
+  | 'matched'
+  | 'alias'
+  | 'unlisted'
+  | 'unknown'
+  | 'empty'
+  | 'disabled'
+  | 'unavailable'
+  | 'error'
+  | 'timeout'
+  | 'cancelled'
+
+/** The main session's model as read for one optimizer round. */
+export interface TargetModelSnapshot {
+  /** The getter's string exactly as returned; null when nothing was read. */
+  readonly raw: string | null
+  /** Lookup key (no `[1m]`, no date suffix); null when not a versioned model. */
+  readonly normalizedId: string | null
+  readonly profile: GuidanceProfile
+  readonly reason: ModelResolutionReason
+}
+
+/** The target model applied to the last request actually sent. */
+export interface GuidanceStatus {
+  readonly workflowId: string
+  /** `current.rounds + 1` at the time the request was sent. */
+  readonly round: number
+  readonly target: TargetModelSnapshot
+}
+
+/** How long one round waits for `session.model()` before using common guidance. */
+export const TARGET_MODEL_TIMEOUT_MS = 500
+
+/** Cap for the shared rewrite guidance text. */
+export const COMMON_GUIDANCE_MAX_CHARS = 1500
+
+/** Cap for one model-specific guidance block. */
+export const MODEL_GUIDANCE_MAX_CHARS = 800
+
+/** Cap for the assembled optimizer system prompt with the largest extra file. */
+export const GUIDANCE_SYSTEM_MAX_CHARS = 7600
