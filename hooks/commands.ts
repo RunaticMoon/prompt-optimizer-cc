@@ -22,7 +22,7 @@
 import type { CommandSpec, EngineInterface, On } from 'claude-code'
 
 import type { ConfigKey, EnginePorts, OptimizerConfig, RuntimeState } from './contracts'
-import type { ActionResult } from './controller'
+import { IN_FLIGHT_REASON, type ActionResult } from './controller'
 import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
@@ -66,9 +66,9 @@ export interface CommandController {
   /** Restores the draft into the composer. */
   accept(ports: EnginePorts): Promise<ActionResult>
   /** Sends the improved draft now. */
-  sendDraft(ports: EnginePorts): Promise<ActionResult>
+  sendDraft(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   /** Sends the stored original. */
-  sendOriginal(ports: EnginePorts): Promise<ActionResult>
+  sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   /** Cancels the active run. */
   cancel(ports: EnginePorts): Promise<ActionResult>
 }
@@ -422,9 +422,6 @@ function actionOutcome(result: ActionResult, success: string): CommandOutcome {
   return { text: result.ok ? success : result.reason }
 }
 
-/** Mirrors the controller's silent in-flight refusal (`IN_FLIGHT_REASON` there). */
-const SEND_IN_FLIGHT = '개선 작업을 처리하는 중입니다.'
-
 /**
  * Answers a `send`/`raw` intent, deferring the controller call to `schedule`.
  *
@@ -433,6 +430,8 @@ const SEND_IN_FLIGHT = '개선 작업을 처리하는 중입니다.'
  * turn.complete"). The synchronous pre-check reports the refusals the
  * controller would answer with anyway; an accepted call is handed to
  * `schedule`, which runs it once the hook has returned and released the turn.
+ * The active run's id is captured now and passed back, so the deferred call
+ * refuses a different run that replaced it before it ran.
  */
 function scheduleSend(
   deps: CommandDeps,
@@ -441,18 +440,27 @@ function scheduleSend(
   source: 'draft' | 'original',
   schedule: (fn: () => void) => void,
 ): CommandOutcome {
-  const blocker = sendBlocker(deps.controller.getState(), source)
+  const state = deps.controller.getState()
+  const blocker = sendBlocker(state, source)
   if (blocker !== null) return { text: blocker }
+  const workflowId = state.workflow?.id
 
   schedule(() => {
-    const sending = source === 'draft' ? deps.controller.sendDraft(ports) : deps.controller.sendOriginal(ports)
+    const sending =
+      source === 'draft'
+        ? deps.controller.sendDraft(ports, workflowId)
+        : deps.controller.sendOriginal(ports, workflowId)
     void sending
       .then(result => {
         // The controller notifies every failure except the in-flight refusal,
         // which it returns silently; toast only that one, never twice.
-        if (!result.ok && result.reason === SEND_IN_FLIGHT) ui.toast(result.reason)
+        if (!result.ok && result.reason === IN_FLIGHT_REASON) ui.toast(result.reason)
       })
       .catch(error => ui.toast(`전송에 실패했습니다: ${describeError(error)}`))
+      .catch(() => {
+        // A throwing toast sink must not itself become an unhandled rejection,
+        // the same double catch `controller`'s `scheduleTask` uses.
+      })
   })
   return { text: source === 'draft' ? '개선안 전송을 예약했습니다.' : '원문 전송을 예약했습니다.' }
 }
@@ -465,7 +473,7 @@ function scheduleSend(
 function sendBlocker(state: Readonly<RuntimeState>, source: 'draft' | 'original'): string | null {
   const workflow = state.workflow
   if (workflow === null) return NO_WORKFLOW
-  if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') return SEND_IN_FLIGHT
+  if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') return IN_FLIGHT_REASON
   const text = source === 'draft' ? workflow.draft : workflow.original
   if (text === '') return source === 'draft' ? '전송할 개선안이 없습니다.' : '전송할 원문이 없습니다.'
   return null

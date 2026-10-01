@@ -170,6 +170,10 @@ interface Rig {
   scheduled: Array<() => void>
   /** Every `ui.toast` the hook made. */
   toasts: string[]
+  /** Each deferred send's controller call, with the id it carried. */
+  sendCalls: Array<{ method: 'draft' | 'original'; workflowId: string | undefined }>
+  /** When set, the fake `ui.toast` throws, to probe the deferred catch. */
+  toastThrows: boolean
   /** When set, the fake `$.config.set` resolves to it. */
   configSetResult: { value?: unknown; deny?: string } | null
   /** When set, the fake `$.config.set` throws it. */
@@ -192,6 +196,7 @@ function rig(
   const ui: Array<'pane' | 'composer'> = []
   const scheduled: Array<() => void> = []
   const toasts: string[] = []
+  const sendCalls: Array<{ method: 'draft' | 'original'; workflowId: string | undefined }> = []
   const current = opts.current ?? liveState()
   const currentConfig = opts.config ?? config()
   const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult> = {
@@ -217,12 +222,14 @@ function rig(
       calls.push('accept')
       return results.accept
     },
-    sendDraft: async () => {
+    sendDraft: async (_ports, workflowId) => {
       calls.push('sendDraft')
+      sendCalls.push({ method: 'draft', workflowId })
       return results.sendDraft
     },
-    sendOriginal: async () => {
+    sendOriginal: async (_ports, workflowId) => {
       calls.push('sendOriginal')
+      sendCalls.push({ method: 'original', workflowId })
       return results.sendOriginal
     },
     cancel: async () => {
@@ -248,6 +255,8 @@ function rig(
     results,
     scheduled,
     toasts,
+    sendCalls,
+    toastThrows: false,
     configSetResult: opts.configSetResult ?? null,
     configSetError: opts.configSetError,
     deps: {
@@ -313,6 +322,7 @@ function wire(on: On, r: Rig): void {
       },
       ui: {
         toast: (text: string) => {
+          if (r.toastThrows) throw new Error('toast failed')
           r.toasts.push(text)
         },
       },
@@ -529,6 +539,31 @@ describe('registerCommands — controller intents', () => {
     await run($, 'send')
     await flushScheduled(r)
     expect(r.toasts).toEqual(['전송에 실패했습니다: boom'])
+  })
+
+  test('a deferred send carries the workflow id captured at command time', async ($, on) => {
+    const r = rig()
+    wire(on, r)
+
+    const sent = await run($, 'send')
+    expect(sent.text).toBe('개선안 전송을 예약했습니다.')
+    // A different run replaces the captured one before the callback runs; the
+    // deferred call must still name the run the person sent from.
+    r.deps.controller.getState = () => liveState({ workflow: workflow({ id: 'wf-2' }) })
+    await flushScheduled(r)
+
+    expect(r.sendCalls).toEqual([{ method: 'draft', workflowId: 'wf-1' }])
+  })
+
+  test('a throwing toast sink is contained and never becomes an unhandled rejection', async ($, on) => {
+    const r = rig({ results: { sendDraft: { ok: false, reason: '개선 작업을 처리하는 중입니다.' } } })
+    r.toastThrows = true
+    wire(on, r)
+
+    await run($, 'send')
+    await flushScheduled(r)
+
+    expect(r.toasts).toEqual([])
   })
 
   test('successful actions keep their success lines', async ($, on) => {

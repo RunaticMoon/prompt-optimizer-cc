@@ -658,6 +658,58 @@ describe('accept and send', () => {
     expect(h.submits[0]?.text).toBe('원문')
   })
 
+  test('sendDraft sends when the captured workflow id still matches', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    const id = h.controller.getState().workflow?.id
+    expect(id).toBeDefined()
+
+    const result = await h.controller.sendDraft(h.ports, id)
+
+    expect(result).toEqual({ ok: true })
+    expect(h.calls.submit).toBe(1)
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('sendDraft refuses a run that replaced the captured workflow id', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const result = await h.controller.sendDraft(h.ports, 'wf-stale')
+
+    expect(result).toEqual({ ok: false, reason: '개선 작업이 바뀌어 전송하지 않았습니다.' })
+    expect(h.calls.submit).toBe(0)
+    expect(h.notices.filter(n => n === '개선 작업이 바뀌어 전송하지 않았습니다.')).toHaveLength(1)
+    // The current run is untouched, so the person can still act on it.
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+  })
+
+  test('sendOriginal refuses a replaced workflow id too', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const result = await h.controller.sendOriginal(h.ports, 'wf-stale')
+
+    expect(result).toEqual({ ok: false, reason: '개선 작업이 바뀌어 전송하지 않았습니다.' })
+    expect(h.calls.submit).toBe(0)
+  })
+
+  test('sendDraft without a workflow id keeps the previous behavior', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(await h.controller.sendDraft(h.ports)).toEqual({ ok: true })
+    expect(h.calls.submit).toBe(1)
+  })
+
   test('a dropped send returns to review with a notice', async () => {
     const h = harness({ submit: () => ({ drop: 'blocked' }) })
     h.controller.onSessionStart('sess-1')
