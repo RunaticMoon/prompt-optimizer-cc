@@ -224,10 +224,13 @@ export function formatStatus(
     `마지막 최적화 대상: ${describeLastTarget(guidance)}`,
     `문맥: 최근 ${config.contextTurns}턴 · 최대 ${config.contextMaxChars}자`,
     config.rawPrefix !== ''
-      ? `그대로 보내기: 접두어 "${config.rawPrefix}" · ctrl+x enter`
-      : '그대로 보내기: ctrl+x enter',
+      ? `그대로 보내기: 맨 앞에 "${config.rawPrefix}" 입력(ctrl+u로 해제)`
+      : '그대로 보내기: 꺼짐',
     `장기 기억 문맥: ${config.memoryContext ? '켬' : '끔'}`,
   ]
+  if (state.rawMode !== null) {
+    lines.push('옵티마이저 끔 모드: 켜짐 (다음 제출은 그대로 전송)')
+  }
   if (config.systemPromptFile !== '') lines.push(`시스템 프롬프트 파일: ${config.systemPromptFile}`)
 
   const workflow = state.workflow

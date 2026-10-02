@@ -55,6 +55,7 @@ function liveState(over: Partial<RuntimeState> = {}): RuntimeState {
     sessionId: 'sess-1',
     workflow: workflow(),
     bypass: null,
+    rawMode: null,
     usage: {
       calls: 2,
       input: 300,
@@ -154,7 +155,7 @@ describe('formatStatus', () => {
     expect(text).toContain('접두어 "?? "')
     expect(text).toContain('옵티마이저 모델: sonnet')
     expect(text).toContain('시스템 프롬프트 파일: ~/p.md')
-    expect(text).toContain('그대로 보내기: 접두어 ">> " · ctrl+x enter')
+    expect(text).toContain('그대로 보내기: 맨 앞에 ">> " 입력(ctrl+u로 해제)')
     expect(text).toContain('장기 기억 문맥: 켬')
     expect(text).toContain('진행 중인 개선 작업: wf-1')
     expect(text).toContain('단계 reviewing')
@@ -164,10 +165,27 @@ describe('formatStatus', () => {
     expect(text).toContain('출력 150')
   })
 
-  test('shows the as-is send shortcut without a prefix when rawPrefix is empty', () => {
+  test('names the leading marker the person types for as-is send', () => {
+    const text = formatStatus(config(), liveState())
+    expect(text).toContain('그대로 보내기: 맨 앞에 ">> " 입력(ctrl+u로 해제)')
+    expect(text).not.toContain('그대로 보내기: 꺼짐')
+  })
+
+  test('says as-is send is off when rawPrefix is empty', () => {
     const text = formatStatus(config({ rawPrefix: '' }), liveState())
-    expect(text).toContain('그대로 보내기: ctrl+x enter')
-    expect(text).not.toContain('그대로 보내기: 접두어')
+    expect(text).toContain('그대로 보내기: 꺼짐')
+    expect(text).not.toContain('그대로 보내기: 맨 앞에')
+  })
+
+  test('adds the optimizer-off mode line only while the mode is armed', () => {
+    const armed = formatStatus(
+      config(),
+      liveState({ rawMode: { sessionId: 'sess-1', draft: '초안' } }),
+    )
+    expect(armed).toContain('옵티마이저 끔 모드: 켜짐 (다음 제출은 그대로 전송)')
+
+    const idle = formatStatus(config(), liveState())
+    expect(idle).not.toContain('옵티마이저 끔 모드')
   })
 
   test('says so when no run is active and names the last error when failed', () => {

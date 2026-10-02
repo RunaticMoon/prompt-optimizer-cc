@@ -5,6 +5,7 @@ import type { EngineInterface, On, RenderViewport } from 'claude-code'
 import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
+import { RAW_MODE_HINT } from '../raw-mode'
 import { COMPOSER_GUIDE, phaseLabel } from './present'
 import { PANE_ROWS } from './ui-ports'
 
@@ -184,6 +185,16 @@ export function registerUi(
     paneClosed = false
     drawnBands.clear()
   }
+
+  // The optimizer-off mode shows its hint at the end of the engine's own hint
+  // line: only the surfaces that draw `tail` are touched, everything else
+  // passes unchanged. The line repaints only when the mode flips (`register.ts`
+  // invalidates then).
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const s = controller.getState()
+    if (s.rawMode === null || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
+    return next({ ...e, props: { ...e.props, tail: RAW_MODE_HINT } })
+  })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const workflow = controller.getState().workflow

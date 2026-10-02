@@ -52,6 +52,7 @@ export function initialState(sessionId: string): RuntimeState {
     sessionId,
     workflow: null,
     bypass: null,
+    rawMode: null,
     usage: {
       calls: 0,
       input: 0,
@@ -209,7 +210,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
     case 'reset': {
       // A different session starts clean; the same session keeps its usage.
       if (event.sessionId !== base.sessionId) return initialState(event.sessionId)
-      return { ...base, workflow: null, bypass: null }
+      return { ...base, workflow: null, bypass: null, rawMode: null }
     }
 
     case 'bypass-issued': {
@@ -227,6 +228,24 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const bypass = base.bypass
       if (bypass === null || bypass.sessionId !== event.sessionId) return base
       return { ...base, bypass: { ...bypass, text: event.text } }
+    }
+
+    case 'raw-mode-armed': {
+      if (event.sessionId !== base.sessionId) return base
+      return { ...base, rawMode: { sessionId: event.sessionId, draft: event.draft } }
+    }
+
+    case 'raw-mode-seen': {
+      const mode = base.rawMode
+      if (mode === null || mode.sessionId !== event.sessionId) return base
+      if (mode.draft === event.draft) return base
+      return { ...base, rawMode: { ...mode, draft: event.draft } }
+    }
+
+    case 'raw-mode-cleared': {
+      if (event.sessionId !== base.sessionId) return base
+      if (base.rawMode === null) return base
+      return { ...base, rawMode: null }
     }
 
     default:

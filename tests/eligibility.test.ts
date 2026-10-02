@@ -30,6 +30,7 @@ function state(over: Partial<RuntimeState> = {}): RuntimeState {
     sessionId: SESSION,
     workflow: null,
     bypass: null,
+    rawMode: null,
     usage: {
       calls: 0,
       input: 0,
@@ -166,7 +167,7 @@ describe('classifySubmission — rule 4: empty', () => {
   })
 })
 
-describe('classifySubmission — rule 5: bypass', () => {
+describe('classifySubmission — rule 6: bypass', () => {
   test('a live matching ticket releases its draft', () => {
     const ticket = bypass()
     expect(classifySubmission(submit({ text: ticket.text }), config(), state({ bypass: ticket }), 9_999)).toEqual({
@@ -226,82 +227,72 @@ describe('classifySubmission — rule 5: bypass', () => {
   })
 })
 
-describe('classifySubmission — rule 6: raw prefix', () => {
-  test('the marker strips itself and keeps the rest as typed', () => {
-    expect(classifySubmission(submit({ text: '>> 로그인 오류를 고쳐줘' }), config(), state(), 0)).toEqual({
-      kind: 'raw',
-      text: '로그인 오류를 고쳐줘',
-    })
+describe('classifySubmission — rule 5: raw mode', () => {
+  const MODE = { sessionId: SESSION, draft: '초안' }
+
+  test('an armed mode sends the text as typed, marker and all', () => {
+    expect(
+      classifySubmission(submit({ text: '>> 로그인 오류를 고쳐줘' }), config(), state({ rawMode: MODE }), 0),
+    ).toEqual({ kind: 'raw', text: '>> 로그인 오류를 고쳐줘' })
   })
 
-  test('extra spacing after the marker is preserved', () => {
-    expect(classifySubmission(submit({ text: '>>  two spaces' }), config(), state(), 0)).toEqual({
-      kind: 'raw',
-      text: ' two spaces',
-    })
+  test('the mode never compares the submission to its remembered draft', () => {
+    // A paste placeholder may already have expanded, so the submitted text need
+    // not equal the mode's draft; the mode still passes it as-is.
+    expect(
+      classifySubmission(submit({ text: '상자와 다른 텍스트' }), config(), state({ rawMode: MODE }), 0),
+    ).toEqual({ kind: 'raw', text: '상자와 다른 텍스트' })
   })
 
-  test('a marker followed by only spaces is raw, untrimmed', () => {
-    expect(classifySubmission(submit({ text: '>>    ' }), config(), state(), 0)).toEqual({
-      kind: 'raw',
-      text: '   ',
-    })
+  test('a mode armed for another session is ignored', () => {
+    expect(
+      classifySubmission(
+        submit({ text: '로그인 오류를 고쳐줘' }),
+        config(),
+        state({ rawMode: { sessionId: 'sess-2', draft: '초안' } }),
+        0,
+      ),
+    ).toEqual({ kind: 'optimize', text: '로그인 오류를 고쳐줘', trigger: 'auto' })
   })
 
-  test('a bare marker with an empty remainder is raw too', () => {
-    // The controller drops the blank raw submission; the classifier still
-    // strips the marker so it never reaches the main session as its own text.
-    expect(classifySubmission(submit({ text: '>> ' }), config(), state(), 0)).toEqual({
-      kind: 'raw',
-      text: '',
-    })
-  })
-
-  test('a bare marker trimmed by the CLI is still raw', () => {
-    // The CLI strips trailing whitespace before the hook runs, so a bare
-    // marker arrives as `>>`. It must still be a blank raw escape, not
-    // ordinary text to optimize.
-    expect(classifySubmission(submit({ text: '>>' }), config(), state(), 0)).toEqual({
-      kind: 'raw',
-      text: '',
-    })
-  })
-
-  test('a longer word that merely starts with the marker is optimized', () => {
-    expect(classifySubmission(submit({ text: '>>x 그대로' }), config(), state(), 0)).toEqual({
+  test('an unarmed submission that starts with the prefix is ordinary optimize', () => {
+    expect(classifySubmission(submit({ text: '>> 그대로' }), config(), state(), 0)).toEqual({
       kind: 'optimize',
-      text: '>>x 그대로',
+      text: '>> 그대로',
       trigger: 'auto',
     })
   })
 
-  test('the marker is matched case-sensitively', () => {
+  test('the mode still escapes while the optimizer is disabled', () => {
     expect(
-      classifySubmission(submit({ text: 'raw 그대로' }), config({ rawPrefix: 'RAW ' }), state(), 0),
-    ).toEqual({ kind: 'optimize', text: 'raw 그대로', trigger: 'auto' })
+      classifySubmission(submit({ text: '>> 통과' }), config({ enabled: false }), state({ rawMode: MODE }), 0),
+    ).toEqual({ kind: 'raw', text: '>> 통과' })
   })
 
-  test('an empty raw prefix disables the escape', () => {
-    expect(
-      classifySubmission(submit({ text: '>> 그대로' }), config({ rawPrefix: '' }), state(), 0),
-    ).toEqual({ kind: 'optimize', text: '>> 그대로', trigger: 'auto' })
-  })
-
-  test('raw still escapes while the optimizer is disabled', () => {
-    expect(
-      classifySubmission(submit({ text: '>> 통과' }), config({ enabled: false }), state(), 0),
-    ).toEqual({ kind: 'raw', text: '통과' })
-  })
-
-  test('raw wins over an active composer dialogue', () => {
+  test('the mode wins over an active composer dialogue', () => {
     expect(
       classifySubmission(
         submit({ text: '>> 통과' }),
         config(),
-        state({ workflow: workflow({ ui: 'composer', phase: 'reviewing' }) }),
+        state({ rawMode: MODE, workflow: workflow({ ui: 'composer', phase: 'reviewing' }) }),
         0,
       ),
-    ).toEqual({ kind: 'raw', text: '통과' })
+    ).toEqual({ kind: 'raw', text: '>> 통과' })
+  })
+
+  test('mid-turn and queued submissions still pass before the mode', () => {
+    expect(
+      classifySubmission(submit({ text: '그대로', turnId: 'turn-7' }), config(), state({ rawMode: MODE }), 0),
+    ).toEqual({ kind: 'pass', reason: 'mid-turn' })
+    expect(
+      classifySubmission(submit({ text: '그대로', wait: true }), config(), state({ rawMode: MODE }), 0),
+    ).toEqual({ kind: 'pass', reason: 'queued' })
+  })
+
+  test('empty text is empty even with the mode armed', () => {
+    expect(
+      classifySubmission(submit({ text: '   ' }), config(), state({ rawMode: MODE }), 0),
+    ).toEqual({ kind: 'pass', reason: 'empty' })
   })
 })
 

@@ -27,6 +27,8 @@ import { collectContext } from './context'
 import { sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { buildModelRequest, completeRewrite } from './model'
+import { decideRawEdit } from './raw-mode'
+import type { RawEditFacts } from './raw-mode'
 import { resolveTargetModel } from './resolve-target-model'
 import { canStartRound, initialState, isStale, reduce } from './state'
 import { composeSystemPrompt } from './system-prompt'
@@ -122,6 +124,14 @@ export interface OptimizerController {
   sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   cancel(ports: EnginePorts): Promise<ActionResult>
   onPromptEdit(text: string): void
+  /**
+   * Applies one prompt-box edit to the optimizer-off mode. Returns the box the
+   * edit should be replaced with when the edit is consumed (arming or
+   * releasing), or `null` to let the edit pass through unchanged.
+   */
+  onComposerEdit(e: RawEditFacts): { text: string; cursor: number } | null
+  /** Clears the optimizer-off mode when it is armed (a fill, a run start). */
+  clearRawMode(): void
   onSessionStart(sessionId: string): void
   onSessionEnd(): void
 }
@@ -454,8 +464,14 @@ export function createController(deps: ControllerDeps): OptimizerController {
       decision = classifySubmission(e, deps.getConfig(), state, deps.now())
     } catch {
       // Classification itself failing must not trap the person: pass through.
+      // The mode is still one-shot, so clear it before returning.
+      if (state.rawMode !== null) apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
       return { action: 'next', text: e.text }
     }
+
+    // The optimizer-off mode is one-shot: whatever the classifier decided, a
+    // mode armed at classification time is cleared by this submission.
+    if (state.rawMode !== null) apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
 
     switch (decision.kind) {
       case 'pass':
@@ -518,6 +534,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
     text: string | undefined,
     ui: 'pane' | 'composer',
   ): Promise<void> {
+    // An explicit /optimize run supersedes the optimizer-off mode.
+    clearRawMode()
     if (state.workflow !== null) {
       notify('이미 개선 작업이 진행 중입니다.')
       return
@@ -730,12 +748,46 @@ export function createController(deps: ControllerDeps): OptimizerController {
   }
 
   function onPromptEdit(text: string): void {
+    if (state.rawMode !== null) {
+      apply({ type: 'raw-mode-seen', sessionId: state.sessionId, draft: text })
+    }
     if (state.bypass === null) return
     if (text.trim() === '') {
       apply({ type: 'bypass-revoked', sessionId: state.sessionId })
       return
     }
     apply({ type: 'bypass-edited', sessionId: state.sessionId, text })
+  }
+
+  function onComposerEdit(e: RawEditFacts): { text: string; cursor: number } | null {
+    const mode = state.rawMode
+    // The box changed on a path that reported no edit (backspace at 0, Esc, a
+    // history move, ...): the remembered draft no longer matches, so the mode
+    // is dropped rather than trusted as the person's own marker.
+    if (mode !== null && e.text !== mode.draft) {
+      apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
+    }
+    const decision = decideRawEdit(
+      e,
+      state.rawMode !== null,
+      deps.getConfig().rawPrefix,
+      state.workflow !== null,
+    )
+    switch (decision.kind) {
+      case 'arm':
+        apply({ type: 'raw-mode-armed', sessionId: state.sessionId, draft: decision.box.text })
+        return decision.box
+      case 'release':
+        apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
+        return decision.box
+      case 'pass':
+        return null
+    }
+  }
+
+  function clearRawMode(): void {
+    if (state.rawMode === null) return
+    apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
   }
 
   function onSessionStart(sessionId: string): void {
@@ -762,6 +814,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
     sendOriginal: (ports, workflowId) => send(ports, 'original', workflowId),
     cancel,
     onPromptEdit,
+    onComposerEdit,
+    clearRawMode,
     onSessionStart,
     onSessionEnd,
   }
