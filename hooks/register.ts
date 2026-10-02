@@ -20,7 +20,10 @@
  *
  * Events registered here, once each and without a matcher: `session.start`,
  * `session.end`, `prompt.submit`, `prompt.edit`, `prompt.fill`, `config.set`,
- * `classic.SessionStart` and `classic.UserPromptSubmit`. The two classic hooks
+ * `classic.SessionStart` and `classic.UserPromptSubmit`. The `prompt.edit`
+ * hook feeds the optimizer-off mode to the controller: a consumed edit (the
+ * marker typed, or ctrl+u) becomes the box the hook returns, and a state flip
+ * repaints the `PromptHint` tail `registerUi` draws. The two classic hooks
  * only observe `next(e)`'s `additionalContext` for the memory snapshot and
  * return the result unchanged; both key what they capture by the classic
  * `e.session_id`, and the snapshot reads the last session recorded through it,
@@ -265,6 +268,7 @@ export function register(on: On, options: PluginOptions): void {
       $.clock.after(1, fn)
     }
     const ports = portsOf($)
+    const wasArmed = controller.getState().rawMode !== null
     try {
       // The classifier decides the shape first; only an optimization needs a UI
       // chosen (and a pane opened) here. The controller re-reads the same state.
@@ -276,8 +280,13 @@ export function register(on: On, options: PluginOptions): void {
       // `onSubmit` never awaits a model call: it stores state and schedules the
       // first round, so this hook returns far inside its ten-second budget.
       const out = await controller.onSubmit(ports, e, ui)
+      // A submission is one-shot for the mode: repaint the hint line when it
+      // released the mode (it is cleared whatever the classifier decided).
+      if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
       return out.action === 'next' ? next({ ...e, text: out.text }) : { drop: out.reason }
     } catch {
+      // Classification or `onSubmit` failing must not leave a stale hint either.
+      if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
       return next(e)
     }
   })
@@ -287,8 +296,24 @@ export function register(on: On, options: PluginOptions): void {
     currentSchedule = fn => {
       $.clock.after(1, fn)
     }
+    // The optimizer-off mode reads the edit before the box changes; a consumed
+    // edit (the marker typed, or ctrl+u) returns the box the controller built
+    // instead of calling `next`. A throwing reader falls back to the plain path.
+    const wasArmed = controller.getState().rawMode !== null
+    let consumed: { text: string; cursor: number } | null = null
+    try {
+      consumed = controller.onComposerEdit(e)
+    } catch {
+      consumed = null
+    }
+    if (consumed !== null) {
+      if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
+      return consumed
+    }
     const r = await next(e)
-    if (controller.getState().bypass !== null) controller.onPromptEdit(r.text)
+    const s = controller.getState()
+    if (s.bypass !== null || s.rawMode !== null) controller.onPromptEdit(r.text)
+    if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
     return r
   })
 
@@ -298,6 +323,13 @@ export function register(on: On, options: PluginOptions): void {
       $.clock.after(1, fn)
     }
     const r = await next(e)
+    // Any landed fill changed the box, so the armed mode no longer describes
+    // what the person is about to send, whichever plugin made the fill.
+    if (r.isFilled) {
+      const wasArmed = controller.getState().rawMode !== null
+      controller.clearRawMode()
+      if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
+    }
     if (
       r.isFilled &&
       e.origin.kind === 'plugin' &&

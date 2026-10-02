@@ -50,7 +50,7 @@
     "rawPrefix": {
       "type": "string",
       "title": "Raw prefix",
-      "description": "Leading marker that strips itself and sends the rest of the prompt straight through.",
+      "description": "Typed at the start of the prompt box, turns the optimizer off for that prompt (shown under the prompt; ctrl+u turns it back on). Empty disables it.",
       "required": false,
       "default": ">> "
     },

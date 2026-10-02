@@ -5,6 +5,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { OptimizerController } from '../hooks/controller'
 import { PANE_ID } from '../hooks/controller'
 import { DEFAULT_CONFIG, type RuntimeState, type Workflow } from '../hooks/contracts'
+import { RAW_MODE_HINT } from '../hooks/raw-mode'
 import { COMPOSER_GUIDE, createPresenter } from '../hooks/ui/present'
 import { estimatedCompactRows, handlePaneClose, hardWrapPreview, hardWrapPreviewWithStatus, isCompactViewport, registerUi } from '../hooks/ui/register'
 import { PANE_ROWS, paneOpenArgs, type UiPorts } from '../hooks/ui/ui-ports'
@@ -85,7 +86,7 @@ type CapturedHook = (...args: unknown[]) => unknown
  * `$`; the probe session.start hook captures one so the render hook can draw.
  */
 async function captureUi($: Engine, on: On, controller: OptimizerController, omittedControl?: 'Button' | 'Input', focusCalls?: string[], focusFail?: 'deny' | 'throw', renderInvalidations?: string[]): Promise<{
-  render: (e: RenderInput<'Pane' | 'AbovePrompt'>) => Promise<unknown>
+  render: (e: RenderInput<'Pane' | 'AbovePrompt' | 'PromptHint'>) => Promise<unknown>
   press: (e: unknown) => Promise<unknown>
   input: (e: unknown) => Promise<unknown>
   close: (e: unknown) => Promise<unknown>
@@ -164,6 +165,39 @@ describe('optimizer UI', () => {
       expect(await ui.render({ ...BAND, props })).toEqual({ inner: { ...BAND, props } })
     }
     expect(textOf(await ui.render(PANE))).toContain('한국어로 작성한 개선안입니다.')
+  })
+
+  test('PromptHint adds the optimizer-off tail only while the mode is armed', async ($, on) => {
+    const current = state(workflow())
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const HINT: RenderInput<'PromptHint', 'terminal'> = {
+      component: 'PromptHint', surface: 'terminal', requestId: 'hint',
+      viewport: { columns: 80, rows: 40 },
+      props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+    }
+    // Mode off: the event passes through unchanged.
+    expect(await ui.render(HINT)).toEqual({ inner: HINT })
+
+    // Mode on: the tail is added, replacing whatever the engine offered.
+    current.rawMode = { sessionId: 'session-1', draft: '' }
+    expect(await ui.render(HINT)).toEqual({
+      inner: { ...HINT, props: { ...HINT.props, tail: RAW_MODE_HINT } },
+    })
+
+    // Only the surfaces that draw `tail` are touched.
+    for (const surface of ['mobile', 'vscode'] as const) {
+      const event: RenderInput<'PromptHint', typeof surface> = { ...HINT, surface }
+      expect(await ui.render(event)).toEqual({ inner: event })
+    }
+
+    // Mode off again: an engine tail is left as it is.
+    current.rawMode = null
+    const withTail: RenderInput<'PromptHint', 'terminal'> = {
+      ...HINT,
+      props: { ...HINT.props, tail: 'engine tail' },
+    }
+    expect(await ui.render(withTail)).toEqual({ inner: withTail })
   })
 
   test('band yields to vscode and mobile even with an active pane workflow', async ($, on) => {

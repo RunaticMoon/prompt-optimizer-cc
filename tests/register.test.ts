@@ -1,6 +1,8 @@
 import type {
   ModelCompleteRequest,
   ModelUsage,
+  PromptBox,
+  PromptEditInput,
   PromptFillInput,
   PromptSubmitInput,
 } from 'claude-code'
@@ -192,6 +194,122 @@ describe('register — the wired module', () => {
 
       // 6. The fork path is never used.
       expect(forks).toBe(0)
+    },
+  )
+
+  // The optimizer-off mode through the loaded plugin: typing the raw prefix at
+  // the very start consumes those keys, arms the mode and repaints the hint.
+  // The mode then survives ordinary edits, passes the next submission through
+  // unchanged and clears itself; ctrl+u consumes the edit without deleting the
+  // text; a landed fill clears the mode too. `ui.invalidate` is recorded at the
+  // bottom, so each state flip is observable.
+  test(
+    'prompt.edit arms the optimizer-off mode; submit passes once; ctrl+u and fill clear it',
+    { options: { uiMode: 'composer' } },
+    async ($, on) => {
+      const invalidations: string[] = []
+      const submits: PromptSubmitInput[] = []
+      let box = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('ui.invalidate', (_$, e) => {
+        invalidations.push(e.event)
+        return { value: undefined }
+      })
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.fill', (_$, e) => {
+        box = e.mode === 'append' ? box + e.text : e.text
+        return { isFilled: true, text: box }
+      })
+      on('prompt.submit', (_$, e) => {
+        submits.push(e)
+        return { text: e.text }
+      })
+
+      await $.session.start(SESSION_START)
+
+      const edit = (input: PromptEditInput): Promise<PromptBox> =>
+        ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptBox> }).edit(input)
+      // One key at the end of the box, as the core applies it when the chain
+      // does not consume the edit.
+      const type = async (key: string, inputText: string): Promise<PromptBox> => {
+        const r = await edit({
+          origin: { kind: 'composer' },
+          key: { key },
+          text: box,
+          cursor: box.length,
+          start: box.length,
+          end: box.length,
+          inputText,
+        })
+        box = r.text
+        return r
+      }
+
+      // `>` `>` ` ` arms the mode: the third edit carries the whole marker and
+      // is consumed, so the box it returns holds the rest (empty).
+      await type('>', '>')
+      await type('>', '>')
+      const armed = await type(' ', ' ')
+      expect(armed).toEqual({ text: '', cursor: 0 })
+      expect(box).toBe('')
+      expect(invalidations).toEqual(['ui.render'])
+
+      // While armed, an ordinary edit is the person's own writing: it passes,
+      // and the mode's remembered draft follows it with no extra repaint.
+      const typed = await type('그', '그대로 보낼 내용')
+      expect(typed.text).toBe('그대로 보낼 내용')
+      expect(invalidations).toEqual(['ui.render'])
+
+      // The submission is passed straight through and clears the one-shot mode.
+      const passed = await $.prompt.submit({ text: box, origin: { kind: 'composer' }, wait: false })
+      expect(passed).toEqual({ text: '그대로 보낼 내용' })
+      expect(submits.map(s => s.text)).toEqual(['그대로 보낼 내용'])
+      expect(invalidations).toEqual(['ui.render', 'ui.render'])
+
+      // Re-arm, write, then ctrl+u: the edit is consumed and only the mode goes
+      // off; the box keeps every character (a passed-through ctrl+u would have
+      // cut `start`..`end`).
+      box = ''
+      await type('>', '>')
+      await type('>', '>')
+      await type(' ', ' ')
+      await type('남', '남겨 둘 글')
+      expect(box).toBe('남겨 둘 글')
+      const released = await edit({
+        origin: { kind: 'composer' },
+        key: { key: 'u', ctrl: true },
+        text: box,
+        cursor: 3,
+        start: 0,
+        end: 3,
+        inputText: '',
+      })
+      expect(released).toEqual({ text: '남겨 둘 글', cursor: 3 })
+      expect(box).toBe('남겨 둘 글')
+      expect(invalidations).toHaveLength(4)
+
+      // Re-arm, then a landed fill (of any origin) clears the mode.
+      box = ''
+      await type('>', '>')
+      await type('>', '>')
+      await type(' ', ' ')
+      const filled = await $.prompt.fill({
+        text: '붙여넣은 내용',
+        mode: 'replace',
+        origin: { kind: 'plugin', name: 'register-test' },
+      })
+      expect(filled.isFilled).toBe(true)
+      expect(box).toBe('붙여넣은 내용')
+      expect(invalidations).toHaveLength(6)
+
+      // With the mode cleared a bare submission is intercepted as usual.
+      const afterFill = await $.prompt.submit({ text: box, origin: { kind: 'composer' }, wait: false })
+      expect(afterFill).toEqual({ drop: '프롬프트를 다듬는 중입니다.' })
     },
   )
 
