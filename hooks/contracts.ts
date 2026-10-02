@@ -102,6 +102,14 @@ export interface BypassTicket {
   expiresAt: number
 }
 
+/** The optimizer-off mode the person armed by typing `rawPrefix` at the start of the prompt box. */
+export interface RawMode {
+  /** Session the mode belongs to. */
+  sessionId: string
+  /** The prompt box text as last seen after an edit; an edit whose prior text differs means the box changed out of sight. */
+  draft: string
+}
+
 /** The metadata an approved draft needs to be submitted by the plugin. */
 export interface SubmitTicket {
   /** Session the submission belongs to. */
@@ -245,6 +253,8 @@ export interface RuntimeState {
   workflow: Workflow | null
   /** The outstanding bypass permit, or `null`. */
   bypass: BypassTicket | null
+  /** The armed optimizer-off mode, or `null`. */
+  rawMode: RawMode | null
   /** Usage accumulated for this session. */
   usage: UsageTotals
 }
@@ -275,6 +285,12 @@ export type OptimizerEvent =
   | { type: 'bypass-edited'; sessionId: string; text: string }
   /** The bypass permit was revoked (another fill, cleared draft, session end, expiry). */
   | { type: 'bypass-revoked'; sessionId: string }
+  /** The optimizer-off mode was armed by typing `rawPrefix` at the start of the prompt box. */
+  | { type: 'raw-mode-armed'; sessionId: string; draft: string }
+  /** A later edit was seen while the mode was armed; the draft follows the box. */
+  | { type: 'raw-mode-seen'; sessionId: string; draft: string }
+  /** The optimizer-off mode was cleared (submit, ctrl+u, fill, or session end). */
+  | { type: 'raw-mode-cleared'; sessionId: string }
 
 /** Where a finished draft is written back. */
 export interface TransferTarget {

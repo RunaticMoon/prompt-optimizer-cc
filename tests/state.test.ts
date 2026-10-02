@@ -7,6 +7,7 @@ import type {
   OptimizerEvent,
   OptimizerReply,
   Phase,
+  RawMode,
   RuntimeState,
   UsageTotals,
   Workflow,
@@ -55,7 +56,11 @@ function workflow(over: Partial<Workflow> = {}): Workflow {
 }
 
 function state(over: Partial<RuntimeState> = {}): RuntimeState {
-  return { sessionId: SESSION, workflow: null, bypass: null, usage: totals(), ...over }
+  return { sessionId: SESSION, workflow: null, bypass: null, rawMode: null, usage: totals(), ...over }
+}
+
+function rawMode(over: Partial<RawMode> = {}): RawMode {
+  return { sessionId: SESSION, draft: '초안', ...over }
 }
 
 function bypass(over: Partial<BypassTicket> = {}): BypassTicket {
@@ -92,6 +97,7 @@ describe('initialState', () => {
       sessionId: SESSION,
       workflow: null,
       bypass: null,
+      rawMode: null,
       usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, updatedAt: 0 },
     })
   })
@@ -560,6 +566,69 @@ describe('reduce — bypass permits', () => {
     const next = reduce(state(), { type: 'bypass-issued', ticket: dead }, 10)
     expect(next.bypass).toBe(dead)
     expect(reduce(next, { type: 'bypass-revoked', sessionId: 'sess-3' }, 10).bypass).toBeNull()
+  })
+})
+
+describe('reduce — raw mode', () => {
+  test('an armed event for this session installs the mode', () => {
+    const next = reduce(state(), { type: 'raw-mode-armed', sessionId: SESSION, draft: '초안' }, 1)
+    expect(next.rawMode).toEqual({ sessionId: SESSION, draft: '초안' })
+  })
+
+  test('an armed event for another session is refused', () => {
+    const current = state()
+    expect(
+      reduce(current, { type: 'raw-mode-armed', sessionId: 'sess-2', draft: '초안' }, 1),
+    ).toBe(current)
+  })
+
+  test('re-arming this session replaces the draft', () => {
+    const current = state({ rawMode: rawMode({ draft: '옛' }) })
+    expect(reduce(current, { type: 'raw-mode-armed', sessionId: SESSION, draft: '새' }, 1).rawMode).toEqual({
+      sessionId: SESSION,
+      draft: '새',
+    })
+  })
+
+  test('a seen event for the armed session follows the box', () => {
+    const current = state({ rawMode: rawMode({ draft: '옛' }) })
+    const next = reduce(current, { type: 'raw-mode-seen', sessionId: SESSION, draft: '새 텍스트' }, 1)
+    expect(next.rawMode).toEqual({ sessionId: SESSION, draft: '새 텍스트' })
+    expect(current.rawMode?.draft).toBe('옛')
+  })
+
+  test('a seen event with the same draft changes nothing', () => {
+    const current = state({ rawMode: rawMode({ draft: '같음' }) })
+    expect(reduce(current, { type: 'raw-mode-seen', sessionId: SESSION, draft: '같음' }, 1)).toBe(current)
+  })
+
+  test('a seen event without the mode, or from another session, is ignored', () => {
+    const none = state()
+    expect(reduce(none, { type: 'raw-mode-seen', sessionId: SESSION, draft: 'x' }, 1)).toBe(none)
+    const current = state({ rawMode: rawMode() })
+    expect(reduce(current, { type: 'raw-mode-seen', sessionId: 'sess-2', draft: 'x' }, 1)).toBe(current)
+  })
+
+  test('a cleared event for this session drops the mode', () => {
+    const current = state({ rawMode: rawMode() })
+    expect(reduce(current, { type: 'raw-mode-cleared', sessionId: SESSION }, 1).rawMode).toBeNull()
+  })
+
+  test('a cleared event from another session, or without a mode, is ignored', () => {
+    const current = state({ rawMode: rawMode() })
+    expect(reduce(current, { type: 'raw-mode-cleared', sessionId: 'sess-2' }, 1)).toBe(current)
+    const none = state()
+    expect(reduce(none, { type: 'raw-mode-cleared', sessionId: SESSION }, 1)).toBe(none)
+  })
+
+  test('resetting this session drops the mode but keeps usage', () => {
+    const current = state({
+      rawMode: rawMode(),
+      usage: totals({ calls: 2, input: 30, updatedAt: 9 }),
+    })
+    const next = reduce(current, { type: 'reset', sessionId: SESSION }, 50)
+    expect(next.rawMode).toBeNull()
+    expect(next.usage).toEqual(current.usage)
   })
 })
 

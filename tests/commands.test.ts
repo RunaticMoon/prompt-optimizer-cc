@@ -55,6 +55,7 @@ function liveState(over: Partial<RuntimeState> = {}): RuntimeState {
     sessionId: 'sess-1',
     workflow: workflow(),
     bypass: null,
+    rawMode: null,
     usage: {
       calls: 2,
       input: 300,

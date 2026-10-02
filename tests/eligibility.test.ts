@@ -30,6 +30,7 @@ function state(over: Partial<RuntimeState> = {}): RuntimeState {
     sessionId: SESSION,
     workflow: null,
     bypass: null,
+    rawMode: null,
     usage: {
       calls: 0,
       input: 0,

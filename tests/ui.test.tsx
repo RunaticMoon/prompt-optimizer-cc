@@ -46,7 +46,7 @@ function workflow(phase: Workflow['phase'] = 'reviewing'): Workflow {
 
 function state(item: Workflow | null): RuntimeState {
   return {
-    sessionId: 'session-1', workflow: item, bypass: null,
+    sessionId: 'session-1', workflow: item, bypass: null, rawMode: null,
     usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, updatedAt: 0 },
   }
 }
