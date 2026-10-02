@@ -69,21 +69,29 @@ metadata, so changing it alone is not a deployment change).
 1. **skip-release** — no deployment-target file changed. This wins even when a
    commit is marked breaking (`!` / `BREAKING CHANGE`): nothing ships, so
    nothing is released.
-2. **semver:major** — a deployment-target change that breaks existing user
-   settings or usage:
-   removing or renaming a `userConfig` key in `plugin.json`, removing an option
-   value, changing a default so existing behavior changes materially, removing
-   or changing the meaning of a `/optimize` subcommand or prefix
-   (`raw`/`trigger`), raising the minimum Claude Code version, or a `!` in the
-   commit subject / `BREAKING CHANGE` in the body.
-3. **semver:minor** — a new user-visible feature: a new `userConfig` key or
-   option value, a new command/subcommand/button/UI mode, or new behavior. A
-   `feat:` commit that touches deployment-target files lands here by default.
+2. **semver:major** — a milestone release only: the user explicitly asks for a
+   new major version (for example "make this v1.0.0" or "this is v2"), or the
+   plugin is redesigned as a whole so that its core flow and most existing usage
+   no longer apply. Do not choose major on your own because a change is
+   incompatible; incompatible changes go to minor (rule 3) with a migration
+   note. When a PR might deserve major, say why and ask the user — never apply
+   it unasked.
+3. **semver:minor** — a new user-visible feature, or a change to user-visible
+   behavior, including incompatible changes: a new `userConfig` key or option
+   value, a new command/subcommand/button/UI mode, or new behavior; removing or
+   renaming a `userConfig` key or option value, changing a default so existing
+   behavior changes, changing the meaning of a `/optimize` subcommand or a
+   prefix (`raw`/`trigger`), raising the minimum Claude Code version, a `!` in
+   the commit subject / `BREAKING CHANGE` in the body. A `feat:` commit that
+   touches deployment-target files lands here by default. Any of these breaking
+   changes must include a migration note in the PR body and README (how to keep
+   the previous behavior).
 4. **no label (patch)** — any other change to deployment-target files: bug
    fixes, refactors, performance, wording/prompt tweaks.
 
-When the call is ambiguous (minor vs major) or depends on the user's intent,
-state your reasoning and ask. If the user names a label, follow it.
+Major is reserved for the user's explicit request, so a call is never ambiguous
+between minor and major: when in doubt, decide between minor and patch, state
+your reasoning and ask. If the user names a label, follow it.
 
 ## 4. Apply it
 
@@ -131,4 +139,6 @@ version with `npm run check:version`, then compute the next one.
 | Only `docs/` and `README.md` | `skip-release` |
 | Bug fix in `hooks/model.ts` | none (patch) |
 | New `userConfig` key in `plugin.json` | `semver:minor` |
-| Renamed a `userConfig` key (old name gone) | `semver:major` |
+| Renamed a `userConfig` key (old name gone) | `semver:minor` (+ migration note in PR/README) |
+| Changed a default or a prefix's meaning | `semver:minor` (+ migration note) |
+| User asks to release v1.0.0 / v2.0.0 | `semver:major` |

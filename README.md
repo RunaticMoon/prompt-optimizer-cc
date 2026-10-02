@@ -479,7 +479,7 @@ tsconfig.json          # .claude-plugin/types/tsconfig.json 확장
 
 | PR 라벨 | 올릴 단계 |
 |---|---|
-| `semver:major` | major |
+| `semver:major` | major(v1·v2 같은 이정표 릴리스, 사용자가 요청할 때만) |
 | `semver:minor` | minor |
 | (없음) | patch |
 | `skip-release` | 올리지 않음(문서·CI만 바꾼 PR 등) |
@@ -487,6 +487,7 @@ tsconfig.json          # .claude-plugin/types/tsconfig.json 확장
 - 그래서 PR에서 version 값을 직접 고치지 않는다. 버전은 머지 후 워크플로가 올린다.
 - Claude Code는 `plugin.json`의 version으로 플러그인 업데이트를 식별하므로, version이 바뀌어야 사용자가 `/plugin` 업데이트로 새 코드를 받는다.
 - PR 라벨은 Claude Code의 `release-label` 스킬(`.claude/skills/release-label/SKILL.md`)이 정한다. 변경 내용을 읽고 `semver:`·`skip-release` 라벨이 없으면 만들고, PR에 major·minor·skip-release 중 하나를 붙인다(patch면 라벨을 붙이지 않는다).
+- 호환성이 깨지는 변경(설정 키·기본값·prefix 의미 변경 등)도 minor로 올리고, PR 본문과 README에 마이그레이션 안내(이전 동작을 유지하는 방법)를 남긴다.
 - 수동 명령은 `npm run version:bump -- <major|minor|patch|X.Y.Z>`(세 파일 동시 갱신, 새 버전 출력)와 `npm run check:version`(세 파일 버전 일치 확인)이다.
 - 포크 PR도 처리하도록 `pull_request_target`을 쓰지만, PR 코드는 실행하지 않고 `main`만 checkout한다.
 
