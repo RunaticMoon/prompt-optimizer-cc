@@ -128,7 +128,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 
 옵티마이저 끔 모드(`hooks/raw-mode.ts`·`hooks/controller.ts`):
 
-- arm은 입력창 맨 앞에서 `rawPrefix`가 완성되는 직접 타이핑에서만 일어나며, 그 접두어 글자는 상자에서 지운다. `rawPrefix`가 빈 문자열이거나 워크플로가 진행 중이면 켜지 않는다. 붙여넣은 `>> `(마크다운 인용문 등)는 글자 그대로 남아 일반 텍스트로 옵티마이저가 처리한다.
+- arm은 입력창 맨 앞에서 `rawPrefix`가 완성되는 직접 타이핑에서 일어나며, 키 없는 붙여넣기라도 길이가 접두어 이하이면(접두어만 정확히 붙여넣은 경우) 타이핑으로 본다. 그 접두어 글자는 상자에서 지운다. `rawPrefix`가 빈 문자열이거나 워크플로가 진행 중이면 켜지 않는다. 접두어보다 긴 붙여넣기(예: `>> 인용문 …`)는 글자 그대로 남아 일반 텍스트로 옵티마이저가 처리한다.
 - release는 `ctrl+u`(커서 위치 무관)다. 그 편집을 소비해 글자를 지우지 않고 모드만 끈다. 꺼진 뒤의 `ctrl+u`는 원래대로 줄 앞부분을 지운다.
 - Backspace@0·Esc·기록 이동(↑↓)·제출 후 비워짐 등 `prompt.edit`가 오지 않는 경로로 입력창이 바뀌면, 다음 편집에서 `e.text`(편집 전 상자)가 기억한 초안과 다른 것으로 감지해 모드를 푼다. 그 감지 전에 Enter하면 모드가 켜진 채 전송될 수 있다.
 - 제출 규칙 순서: eligibility에서 **empty 다음, bypass 앞**에 `rawMode` 규칙을 둔다. 모드가 켜져 있으면 텍스트 비교 없이 `{ kind: 'raw', text }`로 `next`에 그대로 통과시키고, 제출 뒤 모드는 꺼진다. 기존의 제출 시 `rawPrefix` 제거·빈 마커 드롭 규칙은 삭제한다.
@@ -632,7 +632,7 @@ API 기준: 설치 Claude Code 2.1.285가 생성한 선언
 - 목표: 어떤 제출을 개선·우회·대화 답변으로 처리할지 결정.
 - 입력: `PromptSubmitInput`, `SubmissionDecision`, trigger·bypass 규칙.
 - 파일: `eligibility.ts`, `eligibility.test.ts`.
-- 방향: 순수 함수. composer만 대상, 첨부·queue·mid-turn·SDK·plugin·peer 우회. raw 접두어 처리와 승인 초안 일치 검사.
+- 방향: 순수 함수. composer만 대상, 첨부·queue·mid-turn·SDK·plugin·peer 우회. 옵티마이저 끔 모드(rawMode) 규칙과 승인 초안 일치 검사.
 - 선행: B.
 - 완료: 출처별 매트릭스, 빈 입력·prefix·raw·bypass 경계 테스트.
 - 검증: `claude plugin test .`, `npm run typecheck`.

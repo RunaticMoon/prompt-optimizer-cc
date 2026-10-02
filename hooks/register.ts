@@ -307,6 +307,11 @@ export function register(on: On, options: PluginOptions): void {
       consumed = null
     }
     if (consumed !== null) {
+      // A consumed edit still changed the box. A restored draft's permit must
+      // follow the box the edit produced, or its ticket keeps the pre-arm text
+      // and the submit mismatches. The rawMode's draft is the same text here,
+      // so re-seeing it is harmless.
+      if (controller.getState().bypass !== null) controller.onPromptEdit(consumed.text)
       if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
       return consumed
     }

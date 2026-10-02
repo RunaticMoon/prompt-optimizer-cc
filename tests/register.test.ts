@@ -313,6 +313,90 @@ describe('register — the wired module', () => {
     },
   )
 
+  // RAW-677D Q regression: a bypass permit issued by "put the draft in the
+  // prompt box" must follow the box when the optimizer-off mode consumes an
+  // edit. The consumed path used to skip `controller.onPromptEdit`, so a permit
+  // issued over `hello` kept the pre-arm `>>hello` and the next Enter
+  // re-optimized instead of passing.
+  test(
+    'prompt.edit: a consumed edit keeps the restored-draft bypass in step',
+    { options: { uiMode: 'composer' } },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const submits: PromptSubmitInput[] = []
+      let box = 'hello'
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered('hello') }))
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.fill', (_$, e) => {
+        box = e.mode === 'append' ? box + e.text : e.text
+        return { isFilled: true, text: box }
+      })
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.submit', (_$, e) => {
+        submits.push(e)
+        return { text: e.text }
+      })
+
+      await $.session.start(SESSION_START)
+
+      // A run, then accept: the restored draft `hello` gets a bypass permit.
+      await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+      const accepted = await $.command.run({ ...COMMAND_RUN, args: 'accept' })
+      expect(accepted.text).toContain('입력창으로 가져왔습니다')
+      expect(box).toBe('hello')
+
+      const edit = (input: PromptEditInput): Promise<PromptBox> =>
+        ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptBox> }).edit(input)
+      // Type at the start of the box, so the marker lands at column 0.
+      const typeAt = async (key: string, inputText: string, cursor: number): Promise<PromptBox> => {
+        const r = await edit({
+          origin: { kind: 'composer' },
+          key: { key },
+          text: box,
+          cursor,
+          start: cursor,
+          end: cursor,
+          inputText,
+        })
+        box = r.text
+        return r
+      }
+
+      // `>` `>` ` ` at the start arms and consumes the third edit, stripping
+      // the marker: the box becomes `hello` again.
+      await typeAt('>', '>', 0)
+      await typeAt('>', '>', 1)
+      const armed = await typeAt(' ', ' ', 2)
+      expect(armed).toEqual({ text: 'hello', cursor: 0 })
+      expect(box).toBe('hello')
+
+      // ctrl+u releases, consuming the edit and keeping the box.
+      const released = await edit({
+        origin: { kind: 'composer' },
+        key: { key: 'u', ctrl: true },
+        text: box,
+        cursor: 0,
+        start: 0,
+        end: 0,
+        inputText: '',
+      })
+      expect(released).toEqual({ text: 'hello', cursor: 0 })
+      box = released.text
+
+      // The restored draft still bypasses interception exactly once.
+      const passed = await $.prompt.submit({ text: box, origin: { kind: 'composer' }, wait: false })
+      expect(passed).toEqual({ text: 'hello' })
+      expect(submits.map(s => s.text)).toEqual(['hello'])
+    },
+  )
+
   test('config.set: the row takes the clamped value the chain resolved to', { options: {} }, async ($, on) => {
     on('session.start', (_$, e) => ({ cwd: e.cwd }))
     on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
