@@ -479,7 +479,7 @@ When a PR is merged into `main`, the `Version bump` workflow (`.github/workflows
 
 | PR label | Level |
 |---|---|
-| `semver:major` | major |
+| `semver:major` | major (milestone releases like v1/v2; only when the user asks) |
 | `semver:minor` | minor |
 | (none) | patch |
 | `skip-release` | no bump (docs/CI-only PRs, etc.) |
@@ -487,6 +487,7 @@ When a PR is merged into `main`, the `Version bump` workflow (`.github/workflows
 - For that reason, do not edit the version value in a PR. The workflow bumps it after the merge.
 - Claude Code identifies plugin updates by the version in `plugin.json`, so the version must change for users to get the new code with a `/plugin` update.
 - The PR label is chosen by the Claude Code `release-label` skill (`.claude/skills/release-label/SKILL.md`): it reads the change, creates the `semver:`/`skip-release` labels when missing, and applies one of major, minor or skip-release to the PR (no label for a patch).
+- Incompatible changes (renamed config keys, changed defaults, changed prefix meanings, etc.) also go to minor, with a migration note in the PR body and README (how to keep the previous behavior).
 - The manual commands are `npm run version:bump -- <major|minor|patch|X.Y.Z>` (updates all three files at once and prints the new version) and `npm run check:version` (checks that the three files agree).
 - It uses `pull_request_target` so fork PRs are handled too, but it never runs PR code and only checks out `main`.
 
