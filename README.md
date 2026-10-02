@@ -179,18 +179,13 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 - 종료는 슬래시 명령으로 한다(아래 표).
 - **표시 방식**: composer 모드는 밴드를 갱신하면서 기존 상태 줄과 개선안·옵티마이저 메시지·오류·알림의 `$.ui.log` 출력도 유지한다(`hooks/ui/present.ts`). 밴드가 없는 표면에서는 상태 줄과 로그가 표시 수단이다. 패인 모드는 `$.ui.invalidate`/`$.ui.toast`만 쓰고 `$.ui.log`로 대화를 저장하지 않는다.
 
-### 4.5 raw 우회와 prefix 모드
+### 4.5 옵티마이저 끔 모드와 prefix 모드
 
-- **raw 우회**: `rawPrefix`(기본 `>> `)로 시작하는 제출은 접두어만 떼고 나머지를 그대로 `next`로 통과시킨다. 접두어 뒤가 비었거나 공백뿐이면 개선도 전송도 하지 않고 `보낼 내용이 없습니다.`와 함께 드롭된다(접두어가 메인 세션으로 가지 않는다).
-- **`>> ` 붙여넣기 주의**: 붙여넣은 글이 `>> `로 시작하면(예: 2단계 마크다운 인용문) raw 접두어로 인식되어 맨 앞 `>> `가 제거된 채 전송된다. `>>`만 있는 제출은 `보낼 내용이 없습니다.`로 드롭된다. 글을 한 글자도 바꾸지 않고 보내려면 `ctrl+x enter`를 쓰거나 `/config`에서 `prompt-optimizer.rawPrefix`를 다른 값으로 바꾼다.
-- **단축키 그대로 보내기**: `ctrl+x enter`(엔진 keybinding action `chat:queueSubmit`)로 제출하면 옵티마이저를 거치지 않고 텍스트가 그대로 메인 세션으로 간다. 유휴 상태에서는 즉시 전송되고, 턴이 실행 중이면 엔진 대기열에 들어가고, 엔진이 정한 시점(도구 호출이 끝난 뒤 같은 턴 안이나 턴이 끝난 뒤)에 전달된다. 어느 경우든 옵티마이저는 거치지 않는다. `wait: true`로 오는 제출이라 `hooks/eligibility.ts`의 2번 규칙에서 그대로 통과하며, raw 접두어처럼 텍스트를 바꾸지도 않는다(실측: Claude Code 2.1.286). 기본 키 대신 다른 키를 쓰려면 `~/.claude/keybindings.json`의 `Chat` 컨텍스트에 `chat:queueSubmit`을 추가로 바인딩한다(사용자 바인딩은 기본값에 추가된다). 기존 파일이 있으면 병합하고, 터미널·tmux 예약 키(`ctrl+b` 등)와의 충돌을 피한다.
-  ```json
-  {"$schema":"https://www.schemastore.org/claude-code-keybindings.json","bindings":[{"context":"Chat","bindings":{"ctrl+x r":"chat:queueSubmit"}}]}
-  ```
-  `ctrl+x ctrl+s`·`ctrl+enter`(`chat:sendNow`)는 결과가 일관되지 않아 우회 단축키로 안내하지 않는다.
+- **옵티마이저 끔 모드**: 입력창 맨 앞에 `rawPrefix`(기본 `>> `)를 **타이핑**하면 그 글자가 입력창에서 사라지고 이 모드가 켜진다. 켜진 동안 입력창 아래 힌트 줄 끝에 `⏭ 옵티마이저 끔 · ctrl+u 다시 켜기`가 보인다. 이 상태에서 Enter를 누르면 옵티마이저를 거치지 않고 그대로 메인 세션으로 전송되고 모드는 자동으로 꺼진다. 켜진 상태에서 `ctrl+u`(커서 위치 무관)는 글을 지우지 않고 모드만 끈다(꺼진 뒤의 `ctrl+u`는 원래대로 줄 앞부분 삭제). 붙여넣기·빠른 연속 입력이 아닌 직접 타이핑만 인식하며, `rawPrefix`를 빈 문자열로 두면 모드가 꺼진다.
+- **`>> ` 붙여넣기·기록 이동**: 붙여넣기로 들어온 `>> `(예: 2단계 마크다운 인용문)는 모드를 켜지 않고 글자 그대로 남아 일반 텍스트로 옵티마이저가 처리한다. 기록 이동(↑↓)이나 Esc로 입력창이 바뀐 것은 다음 편집 때 자동으로 풀리지만, 그 전에 Enter를 누르면 모드가 켜진 채 전송될 수 있다.
 - **prefix 모드**: `triggerMode`가 `prefix`이면 `triggerPrefix`(기본 `?? `)로 시작하는 제출만 개선한다. 접두어를 떼고 나머지를 trim해 원문으로 쓴다. 접두어만 있고 나머지가 비면 개선도 전송도 하지 않고 `보낼 내용이 없습니다.`와 함께 드롭된다.
 - 두 접두어가 서로 겹치면 `rawPrefix`가 우선하고 `triggerPrefix`는 기본값으로 되돌아간다(`hooks/config.ts`의 `settlePrefixes`).
-- 기본값은 0.2.x까지 `::raw `였으며, 이전 접두어를 계속 쓰려면 `/config`에서 `prompt-optimizer.rawPrefix`를 `::raw `로 지정하면 된다.
+- 0.3.0까지는 제출할 때 맨 앞 접두어(`rawPrefix`)를 떼고 나머지를 보냈으나, 이제는 그 대신 입력 모드로 바뀌었다. `rawPrefix`는 모드를 켜는 문자열이다(기본값은 0.2.x까지 `::raw `였고, 이전 접두어를 계속 쓰려면 `/config`에서 `prompt-optimizer.rawPrefix`를 `::raw `로 지정하면 된다).
 
 ### 4.6 `/optimize` 명령
 
@@ -205,7 +200,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 | `/optimize raw` | 원문 전송을 예약한다. 예약 조건은 `send`와 같다. |
 | `/optimize retry [instruction]` | 보완어(없으면 마지막 보완어)로 다시 다듬기. |
 | `/optimize cancel` | 개선 작업 취소. |
-| `/optimize status` | 설정·진행 단계·이 세션 사용량 표시. `옵티마이저 모델:`, `모델별 지침: 켜짐`/`꺼짐(공통 지침만 사용)`, 마지막 최적화에 적용한 대상 모델(5.4), `장기 기억 문맥: 켬`/`끔`을 포함한다. |
+| `/optimize status` | 설정·진행 단계·이 세션 사용량 표시. `옵티마이저 모델:`, `모델별 지침: 켜짐`/`꺼짐(공통 지침만 사용)`, 마지막 최적화에 적용한 대상 모델(5.4), `장기 기억 문맥: 켬`/`끔`을 포함한다. `그대로 보내기:` 줄은 트리거 문자열이 있으면 `그대로 보내기: 맨 앞에 ">> " 입력(ctrl+u로 해제)`, 비어 있으면 `그대로 보내기: 꺼짐`이고, 모드가 켜져 있으면 `옵티마이저 끔 모드: 켜짐 (다음 제출은 그대로 전송)`을 덧붙인다. |
 | `/optimize model <alias-or-id>` | 옵티마이저 모델 변경. |
 | `/optimize -- <text>` | 예약어로 시작하는 문장도 개선 시작. |
 | `/optimize help` | 명령 도움말 표시. |
@@ -222,7 +217,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 
 claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionStart/UserPromptSubmit/Stop)으로 세션에 기억을 주입한다. 이 플러그인이 가로챈 원문 제출과 개선 대화는 그 훅을 실행하지 않으므로, 원문과 보완 대화는 그 플러그인의 기억에 기록되지 않는다.
 
-개선안을 가져와 Enter 하거나, 패인의 **개선안 바로 전송**/**원문 그대로 전송**, `/optimize send|raw`, `>>` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
+개선안을 가져와 Enter 하거나, 패인의 **개선안 바로 전송**/**원문 그대로 전송**, `/optimize send|raw`, 옵티마이저 끔 모드(4.5)로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
 
 옵티마이저는 settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 세션에 주입한 `additionalContext`를 이 플러그인 아래 classic 체인에서 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다. 기억은 classic 훅이 보고한 세션 id를 따르므로, `/clear`처럼 `session.start` 없이 새 세션 id가 와도 그 SessionStart가 주입한 기억을 다음 요청부터 쓴다. 세션 전환은 SessionStart가 하며(UserPromptSubmit은 이미 저장된 세션을 바꾸지 않고, 저장된 세션이 없을 때만 채운다), 세션 end는 끝나는 세션 id가 저장된 classic 세션과 같을 때만 그 기억을 비우고 아니면 다음 SessionStart가 교체한다. 서브에이전트 안에서 발생한 classic 훅(`agent_id`가 있는 경우)은 무시한다.
 
@@ -242,7 +237,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 | `modelGuidance` | boolean | `true` | — | 메인 세션 모델을 감지해 그 모델의 추가 편집 지침을 적용할지 여부. 끄면 공통 지침만 쓴다(5.4) |
 | `triggerMode` | string | `always` | `always` \| `prefix` | `always`는 모든 대상 제출, `prefix`는 접두어가 있는 제출만 |
 | `triggerPrefix` | string | `?? ` | 비어 있으면 prefix 모드에서 기본값으로 복귀 | prefix 모드 트리거 접두어 |
-| `rawPrefix` | string | `>> ` | — | 이 접두어로 시작하면 접두어를 떼고 그대로 통과 |
+| `rawPrefix` | string | `>> ` | — | 맨 앞에 타이핑하면 옵티마이저 끔 모드를 켜는 문자열(빈 문자열이면 모드 끔) |
 | `uiMode` | string | `auto` | `auto` \| `pane` \| `composer` | `auto`·`pane`은 패인을 시도하고 배치되지 않으면 입력창 대화로 폴백, `composer`는 항상 입력창 |
 | `model` | string | `haiku` | 비어 있지 않은 문자열 | 옵티마이저 완성에 쓸 모델 별칭/ID |
 | `maxTokens` | number | `1024` | 128–2048 | 한 번의 완성 출력 상한 |
@@ -378,12 +373,12 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 ## 7. 제한 사항
 
 - **첨부(이미지·오디오·문서)**: 첨부가 있는 제출은 가로채지 않는다. 엔진이 원래 경로로 그대로 처리한다.
-- **진행 중 턴·대기 제출**: `turnId`가 있거나 `wait === true`인 제출은 메인 세션의 큐에 그대로 맡긴다. 대기 제출로 오는 `ctrl+x enter`도 이 경로로 옵티마이저를 건너뛴다(4.5).
+- **진행 중 턴·대기 제출**: 턴이 실행 중이거나 엔진 대기열(`wait`)로 들어온 제출(`turnId`가 있거나 `wait === true`)은 메인 세션의 큐에 그대로 맡기고 가로채지 않는다(4.5).
 - **슬래시 명령·셸 입력**: `/` 또는 `!`로 시작하는 입력은 가로채지 않는다(명령은 `command.run`이 처리).
 - **너무 긴 원문**: 원문이 6000자(`MAX_ORIGINAL_CHARS`)를 넘으면 개선하지 않고 그대로 통과시킨다.
 - **명시적 전송의 문맥 손실(Mod 훅에 한함)**: "개선안 바로 전송"·`/optimize send`·`/optimize raw`는 `$.prompt.submit({ text, asUser: true })`만 호출한다. 엔진의 `PromptSubmitArgs`에는 `context` 필드가 없어서, 처음 제출 때 이 플러그인보다 위의 Mod 훅이 `context`로 붙였을 수 있는 블록은 명시 전송 때 다시 붙지 않는다. 반면 classic 훅(settings/플러그인 `hooks.json`)은 명시 전송 때 다시 실행되므로 장기 기억 주입은 유지된다(실측 2.1.286). 입력창으로 복원한 뒤 사용자가 직접 Enter 하는 기본 경로에는 영향이 없다(그 경로는 원래 제출 문맥이 아니라 사용자가 입력창에 든 최종 텍스트를 보낸다).
 - **취소 거부**: 이미 입력창으로 옮기는 중(`transferring`)이거나 전송 중(`sending`)이면 취소가 거부된다(각각 `입력창으로 옮기는 중이라 취소할 수 없습니다`, `전송 중이라 취소할 수 없습니다`). 진행 중 호출을 중단하는 시점(`collecting`/`generating`/`reviewing`/`failed`)에는 정상적으로 취소된다.
-- **빈 raw 제출 드롭**: `rawPrefix` 뒤가 비었거나 공백뿐이면 `보낼 내용이 없습니다.`와 함께 드롭된다. 접두어가 메인 세션으로 전달되지 않는다.
+- **옵티마이저 끔 모드의 stale 감지**: 기록 이동(↑↓)·Esc처럼 `prompt.edit`가 오지 않는 경로로 입력창이 바뀌면 다음 편집 때 모드가 풀린다. 그 전에 Enter를 누르면 모드가 켜진 채 전송될 수 있다(4.5).
 - **패인 닫기 = 취소**: 패인에서 Esc/닫기를 하면(origin `person`) 진행 중 작업을 취소하고 원문을 복원한다.
 - **복원 충돌 보호**: 입력창에 사용자가 새로 쓴 내용이 있으면 개선안으로 덮어쓰지 않는다(`draft-conflict`). fill이 거부되면 bypass를 발급하지 않는다.
 - **bypass 수명**: 복원으로 발급된 bypass는 10분 후 만료되고, 한 번만 소비된다. 사용자가 편집하면 그 편집 텍스트로 따라가고, 입력창을 비우면 무효화된다. 다른 플러그인이 입력창을 채우면 bypass는 그 새 텍스트를 따라가므로(원래 개선안에는 효력이 없어진다) 다음 Enter는 가로채지 않고 그 텍스트를 보낸다.
