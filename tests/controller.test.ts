@@ -351,7 +351,7 @@ describe('onSubmit — intercepts one submission', () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
 
-    const outcome = await h.controller.onSubmit(h.ports, submit('::raw 그냥 보내기'), 'pane')
+    const outcome = await h.controller.onSubmit(h.ports, submit('>> 그냥 보내기'), 'pane')
 
     expect(outcome).toEqual({ action: 'next', text: '그냥 보내기' })
     expect(h.controller.getState().workflow).toBeNull()
@@ -361,14 +361,14 @@ describe('onSubmit — intercepts one submission', () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
 
-    const spaces = await h.controller.onSubmit(h.ports, submit('::raw    '), 'pane')
+    const spaces = await h.controller.onSubmit(h.ports, submit('>>    '), 'pane')
     expect(spaces).toEqual({ action: 'drop', reason: '보낼 내용이 없습니다.' })
     expect(h.controller.getState().workflow).toBeNull()
 
     // A bare marker leaves an empty remainder; the classifier returns it as a
     // raw decision too (task S), and the trim guard drops it rather than
     // forwarding the marker to the main session.
-    const empty = await h.controller.onSubmit(h.ports, submit('::raw '), 'pane')
+    const empty = await h.controller.onSubmit(h.ports, submit('>> '), 'pane')
     expect(empty).toEqual({ action: 'drop', reason: '보낼 내용이 없습니다.' })
     expect(h.controller.getState().workflow).toBeNull()
   })

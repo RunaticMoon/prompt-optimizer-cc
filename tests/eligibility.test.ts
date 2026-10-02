@@ -228,21 +228,21 @@ describe('classifySubmission — rule 5: bypass', () => {
 
 describe('classifySubmission — rule 6: raw prefix', () => {
   test('the marker strips itself and keeps the rest as typed', () => {
-    expect(classifySubmission(submit({ text: '::raw 로그인 오류를 고쳐줘' }), config(), state(), 0)).toEqual({
+    expect(classifySubmission(submit({ text: '>> 로그인 오류를 고쳐줘' }), config(), state(), 0)).toEqual({
       kind: 'raw',
       text: '로그인 오류를 고쳐줘',
     })
   })
 
   test('extra spacing after the marker is preserved', () => {
-    expect(classifySubmission(submit({ text: '::raw  two spaces' }), config(), state(), 0)).toEqual({
+    expect(classifySubmission(submit({ text: '>>  two spaces' }), config(), state(), 0)).toEqual({
       kind: 'raw',
       text: ' two spaces',
     })
   })
 
   test('a marker followed by only spaces is raw, untrimmed', () => {
-    expect(classifySubmission(submit({ text: '::raw    ' }), config(), state(), 0)).toEqual({
+    expect(classifySubmission(submit({ text: '>>    ' }), config(), state(), 0)).toEqual({
       kind: 'raw',
       text: '   ',
     })
@@ -251,7 +251,7 @@ describe('classifySubmission — rule 6: raw prefix', () => {
   test('a bare marker with an empty remainder is raw too', () => {
     // The controller drops the blank raw submission; the classifier still
     // strips the marker so it never reaches the main session as its own text.
-    expect(classifySubmission(submit({ text: '::raw ' }), config(), state(), 0)).toEqual({
+    expect(classifySubmission(submit({ text: '>> ' }), config(), state(), 0)).toEqual({
       kind: 'raw',
       text: '',
     })
@@ -259,46 +259,44 @@ describe('classifySubmission — rule 6: raw prefix', () => {
 
   test('a bare marker trimmed by the CLI is still raw', () => {
     // The CLI strips trailing whitespace before the hook runs, so a bare
-    // marker arrives as `::raw`. It must still be a blank raw escape, not
+    // marker arrives as `>>`. It must still be a blank raw escape, not
     // ordinary text to optimize.
-    expect(classifySubmission(submit({ text: '::raw' }), config(), state(), 0)).toEqual({
+    expect(classifySubmission(submit({ text: '>>' }), config(), state(), 0)).toEqual({
       kind: 'raw',
       text: '',
     })
   })
 
   test('a longer word that merely starts with the marker is optimized', () => {
-    expect(classifySubmission(submit({ text: '::rawx 그대로' }), config(), state(), 0)).toEqual({
+    expect(classifySubmission(submit({ text: '>>x 그대로' }), config(), state(), 0)).toEqual({
       kind: 'optimize',
-      text: '::rawx 그대로',
+      text: '>>x 그대로',
       trigger: 'auto',
     })
   })
 
   test('the marker is matched case-sensitively', () => {
-    expect(classifySubmission(submit({ text: '::RAW 그대로' }), config(), state(), 0)).toEqual({
-      kind: 'optimize',
-      text: '::RAW 그대로',
-      trigger: 'auto',
-    })
+    expect(
+      classifySubmission(submit({ text: 'raw 그대로' }), config({ rawPrefix: 'RAW ' }), state(), 0),
+    ).toEqual({ kind: 'optimize', text: 'raw 그대로', trigger: 'auto' })
   })
 
   test('an empty raw prefix disables the escape', () => {
     expect(
-      classifySubmission(submit({ text: '::raw 그대로' }), config({ rawPrefix: '' }), state(), 0),
-    ).toEqual({ kind: 'optimize', text: '::raw 그대로', trigger: 'auto' })
+      classifySubmission(submit({ text: '>> 그대로' }), config({ rawPrefix: '' }), state(), 0),
+    ).toEqual({ kind: 'optimize', text: '>> 그대로', trigger: 'auto' })
   })
 
   test('raw still escapes while the optimizer is disabled', () => {
     expect(
-      classifySubmission(submit({ text: '::raw 통과' }), config({ enabled: false }), state(), 0),
+      classifySubmission(submit({ text: '>> 통과' }), config({ enabled: false }), state(), 0),
     ).toEqual({ kind: 'raw', text: '통과' })
   })
 
   test('raw wins over an active composer dialogue', () => {
     expect(
       classifySubmission(
-        submit({ text: '::raw 통과' }),
+        submit({ text: '>> 통과' }),
         config(),
         state({ workflow: workflow({ ui: 'composer', phase: 'reviewing' }) }),
         0,
@@ -513,8 +511,8 @@ describe('classifySubmission — rule 11: prefix mode', () => {
   test('a configured trigger prefix is honored literally', () => {
     expect(
       classifySubmission(
-        submit({ text: '>> 다듬어줘' }),
-        config({ triggerMode: 'prefix', triggerPrefix: '>> ' }),
+        submit({ text: '## 다듬어줘' }),
+        config({ triggerMode: 'prefix', triggerPrefix: '## ' }),
         state(),
         0,
       ),

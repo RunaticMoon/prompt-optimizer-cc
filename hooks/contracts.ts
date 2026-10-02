@@ -319,7 +319,7 @@ export const DEFAULT_CONFIG: OptimizerConfig = {
   modelGuidance: true,
   triggerMode: 'always',
   triggerPrefix: '?? ',
-  rawPrefix: '::raw ',
+  rawPrefix: '>> ',
   uiMode: 'auto',
   model: 'haiku',
   maxTokens: 1024,

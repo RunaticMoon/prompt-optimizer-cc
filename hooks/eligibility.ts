@@ -37,7 +37,10 @@ export function classifySubmission(
   if (e.origin.kind !== 'composer') return pass('not-composer')
 
   // 2. A prompt typed over a running turn, or one asked to wait its turn, is
-  //    left to the engine's own queue.
+  //    left to the engine's own queue. `wait` is also the user-facing
+  //    send-as-is shortcut (ctrl+x enter, action `chat:queueSubmit`), so this
+  //    rule must stay: a queued submission is delivered untouched, never
+  //    intercepted.
   if (e.turnId !== undefined) return pass('mid-turn')
   if (e.wait === true) return pass('queued')
 
@@ -66,7 +69,7 @@ export function classifySubmission(
       return { kind: 'raw', text: e.text.slice(config.rawPrefix.length) }
     }
     // The CLI trims trailing whitespace before the hook sees the text, so a
-    // bare marker arrives as `::raw` rather than `::raw `. Treat exactly the
+    // bare marker arrives as `>>` rather than `>> `. Treat exactly the
     // marker (no trailing space) as a blank raw escape too, so it is dropped
     // instead of being optimized as ordinary text.
     const bareMarker = config.rawPrefix.trimEnd()
