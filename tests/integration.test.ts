@@ -667,16 +667,19 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(w.completes).toHaveLength(0)
   })
 
-  // Invariant 10c: `>>` strips itself and passes the rest untouched.
-  test('INV10 · >>는 접두어를 떼고 나머지를 그대로 보낸다', { options: { uiMode: 'composer' } }, async ($, on) => {
+  // Invariant 10c: with the mode off, a `>>` submission is ordinary text and
+  // is optimized like any other prompt (the submit-time prefix strip is gone).
+  test('INV10 · 모드가 꺼진 ">>" 제출은 일반 텍스트로 개선된다', { options: { uiMode: 'composer' } }, async ($, on) => {
     const w = setup($, on)
     await w.start()
 
-    const passed = await w.submit('>> hello world')
-    expect(passed).toEqual({ text: 'hello world' })
-    expect(w.submits).toHaveLength(1)
-    expect(w.submits[0]?.text).toBe('hello world')
-    expect(w.completes).toHaveLength(0)
+    const dropped = await w.submit('>> hello world')
+    expect(dropped).toEqual({ drop: DROP_OPTIMIZING })
+    expect(w.submits).toHaveLength(0)
+
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.prompt).toContain('>> hello world')
   })
 
   // Invariant 11: other origins, mid-turn, queued and attachments all pass.

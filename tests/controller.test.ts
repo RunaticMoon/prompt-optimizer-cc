@@ -18,6 +18,7 @@ import {
   type ControllerDeps,
   type OptimizerController,
 } from '../hooks/controller'
+import type { RawEditFacts } from '../hooks/raw-mode'
 
 const USAGE: ModelUsage = {
   input_tokens: 10,
@@ -308,6 +309,12 @@ function submit(text: string, over: Partial<PromptSubmitInput> = {}): PromptSubm
   return { text, wait: false, origin: { kind: 'composer' }, ...over }
 }
 
+/** One prompt-box edit in the engine's `prompt.edit` shape. */
+function edit(over: Partial<RawEditFacts> = {}): RawEditFacts {
+  const start = over.start ?? 0
+  return { text: '', cursor: 0, start, end: over.end ?? start, inputText: '', ...over }
+}
+
 describe('onSubmit — intercepts one submission', () => {
   test('drops it, then runs exactly one collect and one completion from the queue', async () => {
     const h = harness()
@@ -347,29 +354,45 @@ describe('onSubmit — intercepts one submission', () => {
     expect(h.controller.getState().workflow).toBeNull()
   })
 
-  test('strips the raw prefix and passes the rest through', async () => {
+  test('sends an armed raw submission as typed and clears the mode', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+    expect(h.controller.getState().rawMode).not.toBeNull()
 
     const outcome = await h.controller.onSubmit(h.ports, submit('>> 그냥 보내기'), 'pane')
 
-    expect(outcome).toEqual({ action: 'next', text: '그냥 보내기' })
+    expect(outcome).toEqual({ action: 'next', text: '>> 그냥 보내기' })
+    expect(h.controller.getState().rawMode).toBeNull()
     expect(h.controller.getState().workflow).toBeNull()
+    expect(h.calls.complete).toBe(0)
   })
 
-  test('drops a raw escape whose remainder is blank', async () => {
+  test('the mode is one-shot: the next ordinary submission is optimized', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
 
-    const spaces = await h.controller.onSubmit(h.ports, submit('>>    '), 'pane')
-    expect(spaces).toEqual({ action: 'drop', reason: '보낼 내용이 없습니다.' })
-    expect(h.controller.getState().workflow).toBeNull()
+    expect(await h.controller.onSubmit(h.ports, submit('그대로'), 'pane')).toEqual({
+      action: 'next',
+      text: '그대로',
+    })
+    expect(h.controller.getState().rawMode).toBeNull()
 
-    // A bare marker leaves an empty remainder; the classifier returns it as a
-    // raw decision too (task S), and the trim guard drops it rather than
-    // forwarding the marker to the main session.
-    const empty = await h.controller.onSubmit(h.ports, submit('>> '), 'pane')
-    expect(empty).toEqual({ action: 'drop', reason: '보낼 내용이 없습니다.' })
+    const optimized = await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    expect(optimized.action).toBe('drop')
+    expect(h.controller.getState().workflow?.original).toBe('원문')
+  })
+
+  test('drops a raw decision whose remainder is blank', async () => {
+    // Prefix mode hands back an empty raw decision for a bare trigger; the
+    // controller drops it rather than forwarding the bare trigger.
+    const h = harness({ config: { triggerMode: 'prefix' } })
+    h.controller.onSessionStart('sess-1')
+
+    const dropped = await h.controller.onSubmit(h.ports, submit('?? '), 'pane')
+
+    expect(dropped).toEqual({ action: 'drop', reason: '보낼 내용이 없습니다.' })
     expect(h.controller.getState().workflow).toBeNull()
   })
 
@@ -429,6 +452,130 @@ describe('onSubmit — intercepts one submission', () => {
 
     expect(outcome).toEqual({ action: 'next', text: '원문' })
     expect(h.controller.getState().workflow).toBeNull()
+  })
+})
+
+describe('onComposerEdit — the optimizer-off mode', () => {
+  test('arms when the marker is typed and consumes the edit', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    const box = h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+
+    expect(box).toEqual({ text: '', cursor: 0 })
+    expect(h.controller.getState().rawMode).toEqual({ sessionId: 'sess-1', draft: '' })
+  })
+
+  test('arms over existing text, keeping the text and moving the caret', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    const box = h.controller.onComposerEdit(
+      edit({ text: '>>abc', cursor: 2, start: 2, inputText: ' ', key: { key: ' ' } }),
+    )
+
+    expect(box).toEqual({ text: 'abc', cursor: 0 })
+    expect(h.controller.getState().rawMode?.draft).toBe('abc')
+  })
+
+  test('ctrl+u releases the mode, consuming the edit and keeping the box', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(
+      edit({ text: '>>본문', cursor: 2, start: 2, inputText: ' ', key: { key: ' ' } }),
+    )
+    expect(h.controller.getState().rawMode?.draft).toBe('본문')
+
+    const box = h.controller.onComposerEdit(
+      edit({ text: '본문', cursor: 2, key: { key: 'u', ctrl: true } }),
+    )
+
+    expect(box).toEqual({ text: '본문', cursor: 2 })
+    expect(h.controller.getState().rawMode).toBeNull()
+  })
+
+  test('any other edit passes while armed and keeps the mode', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+
+    const box = h.controller.onComposerEdit(
+      edit({ text: '', cursor: 0, start: 0, inputText: 'a', key: { key: 'a' } }),
+    )
+
+    expect(box).toBeNull()
+    expect(h.controller.getState().rawMode).not.toBeNull()
+  })
+
+  test('a box changed out of sight first clears the stale mode', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+
+    // The remembered draft is '', but the reported pre-edit box is not.
+    const box = h.controller.onComposerEdit(edit({ text: '몰래 바뀐 상자', cursor: 7 }))
+
+    expect(box).toBeNull()
+    expect(h.controller.getState().rawMode).toBeNull()
+  })
+
+  test('an active workflow blocks arming', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    expect(h.controller.getState().workflow).not.toBeNull()
+
+    const box = h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+
+    expect(box).toBeNull()
+    expect(h.controller.getState().rawMode).toBeNull()
+  })
+})
+
+describe('onPromptEdit — the optimizer-off mode', () => {
+  test('follows the box text while armed', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+
+    h.controller.onPromptEdit('새로 쓴 내용')
+
+    expect(h.controller.getState().rawMode?.draft).toBe('새로 쓴 내용')
+  })
+
+  test('does nothing without the mode or a permit', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    h.controller.onPromptEdit('내용')
+
+    expect(h.controller.getState().rawMode).toBeNull()
+    expect(h.controller.getState().bypass).toBeNull()
+  })
+})
+
+describe('clearRawMode and startExplicit', () => {
+  test('clearRawMode drops an armed mode and is a no-op otherwise', () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+
+    h.controller.clearRawMode()
+    expect(h.controller.getState().rawMode).toBeNull()
+
+    h.controller.clearRawMode()
+    expect(h.controller.getState().rawMode).toBeNull()
+  })
+
+  test('startExplicit clears an armed mode', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+
+    await h.controller.startExplicit(h.ports, '원문', 'pane')
+
+    expect(h.controller.getState().rawMode).toBeNull()
+    expect(h.controller.getState().workflow?.original).toBe('원문')
   })
 })
 

@@ -170,33 +170,27 @@ describe('register — the wired module', () => {
       expect(submits[0]?.text).toBe(DRAFT)
       expect(modelCalls).toHaveLength(1)
 
-      // 4. The raw marker strips itself and passes the rest through untouched.
-      await $.prompt.submit({ text: '>> hello', origin: { kind: 'composer' }, wait: false })
-      expect(submits).toHaveLength(2)
-      expect(submits[1]?.text).toBe('hello')
-      expect(modelCalls).toHaveLength(1)
-
-      // 5. A plugin's own submission is never intercepted.
+      // 4. A plugin's own submission is never intercepted.
       await $.prompt.submit({
         text: '다른 플러그인 제출',
         origin: { kind: 'plugin', name: 'other-plugin' },
         wait: false,
       })
-      expect(submits).toHaveLength(3)
-      expect(submits[2]?.text).toBe('다른 플러그인 제출')
+      expect(submits).toHaveLength(2)
+      expect(submits[1]?.text).toBe('다른 플러그인 제출')
       expect(modelCalls).toHaveLength(1)
 
-      // 6. `/optimize off` turns interception off and mirrors the row into
+      // 5. `/optimize off` turns interception off and mirrors the row into
       //    persistent settings.
       const off = await $.command.run({ ...COMMAND_RUN, args: 'off' })
       expect(off.text).toBe('자동 가로채기를 껐습니다.\n설정에 저장했습니다.')
       expect(configSets).toEqual([['prompt-optimizer.enabled', false]])
       await $.prompt.submit({ text: '그대로 보내기', origin: { kind: 'composer' }, wait: false })
-      expect(submits).toHaveLength(4)
-      expect(submits[3]?.text).toBe('그대로 보내기')
+      expect(submits).toHaveLength(3)
+      expect(submits[2]?.text).toBe('그대로 보내기')
       expect(modelCalls).toHaveLength(1)
 
-      // 7. The fork path is never used.
+      // 6. The fork path is never used.
       expect(forks).toBe(0)
     },
   )

@@ -37,10 +37,8 @@ export function classifySubmission(
   if (e.origin.kind !== 'composer') return pass('not-composer')
 
   // 2. A prompt typed over a running turn, or one asked to wait its turn, is
-  //    left to the engine's own queue. `wait` is also the user-facing
-  //    send-as-is shortcut (ctrl+x enter, action `chat:queueSubmit`), so this
-  //    rule must stay: a queued submission is delivered untouched, never
-  //    intercepted.
+  //    left to the engine's own queue: a queued submission is delivered
+  //    untouched, never intercepted.
   if (e.turnId !== undefined) return pass('mid-turn')
   if (e.wait === true) return pass('queued')
 
@@ -50,7 +48,15 @@ export function classifySubmission(
   // 4. Nothing to improve.
   if (e.text.trim() === '') return pass('empty')
 
-  // 5. A live bypass permit releases exactly its own draft, once.
+  // 5. The optimizer-off mode the person armed in the composer: the prompt goes
+  //    to the main session exactly as typed. No text comparison here: a paste
+  //    placeholder may already have expanded, so the submission need not equal
+  //    the remembered draft.
+  if (state.rawMode !== null && state.rawMode.sessionId === state.sessionId) {
+    return { kind: 'raw', text: e.text }
+  }
+
+  // 6. A live bypass permit releases exactly its own draft, once.
   const ticket = state.bypass
   if (
     ticket !== null &&
@@ -59,23 +65,6 @@ export function classifySubmission(
     e.text === ticket.text
   ) {
     return { kind: 'bypass', text: e.text, ticket }
-  }
-
-  // 6. An explicit raw marker strips itself and sends the rest untouched. An
-  //    empty or whitespace-only remainder is raw too; the controller drops a
-  //    blank raw submission so the marker never reaches the main session.
-  if (config.rawPrefix !== '') {
-    if (e.text.startsWith(config.rawPrefix)) {
-      return { kind: 'raw', text: e.text.slice(config.rawPrefix.length) }
-    }
-    // The CLI trims trailing whitespace before the hook sees the text, so a
-    // bare marker arrives as `>>` rather than `>> `. Treat exactly the
-    // marker (no trailing space) as a blank raw escape too, so it is dropped
-    // instead of being optimized as ordinary text.
-    const bareMarker = config.rawPrefix.trimEnd()
-    if (bareMarker !== '' && e.text.trimEnd() === bareMarker) {
-      return { kind: 'raw', text: '' }
-    }
   }
 
   // 7. Commands and shell input belong to the engine, even while a dialogue
@@ -99,7 +88,8 @@ export function classifySubmission(
     return { kind: 'busy', workflowId: workflow.id }
   }
 
-  // 9. The optimizer is off. Raw (6) and an active reply (8) above still win.
+  // 9. The optimizer is off. The raw mode (5) and an active reply (8) above
+  //    still win.
   if (config.enabled === false) return pass('disabled')
 
   // 10. Originals too long to improve are left alone.
@@ -115,8 +105,9 @@ export function classifySubmission(
       if (text === '') return { kind: 'raw', text: '' }
       return { kind: 'optimize', text, trigger: 'prefix' }
     }
-    // Same CLI trim problem as rule 6: `??` arrives without its trailing space.
-    // Recognize the bare trigger as empty input, not as untriggered text.
+    // The CLI trims trailing whitespace before the hook sees the text, so the
+    // bare trigger arrives without its trailing space. Recognize it as empty
+    // input, not as untriggered text.
     const bareTrigger = config.triggerPrefix.trimEnd()
     if (bareTrigger !== '' && e.text.trimEnd() === bareTrigger) {
       return { kind: 'raw', text: '' }
