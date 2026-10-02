@@ -222,7 +222,10 @@ export function formatStatus(
     `옵티마이저 모델: ${config.model} · 최대 토큰: ${config.maxTokens} · 타임아웃: ${config.timeoutMs}ms · 최대 라운드: ${config.maxRounds}`,
     `모델별 지침: ${config.modelGuidance ? '켜짐' : '꺼짐(공통 지침만 사용)'}`,
     `마지막 최적화 대상: ${describeLastTarget(guidance)}`,
-    `문맥: 최근 ${config.contextTurns}턴 · 최대 ${config.contextMaxChars}자 · raw 접두어 "${config.rawPrefix}"`,
+    `문맥: 최근 ${config.contextTurns}턴 · 최대 ${config.contextMaxChars}자`,
+    config.rawPrefix !== ''
+      ? `그대로 보내기: 접두어 "${config.rawPrefix}" · ctrl+x enter`
+      : '그대로 보내기: ctrl+x enter',
     `장기 기억 문맥: ${config.memoryContext ? '켬' : '끔'}`,
   ]
   if (config.systemPromptFile !== '') lines.push(`시스템 프롬프트 파일: ${config.systemPromptFile}`)

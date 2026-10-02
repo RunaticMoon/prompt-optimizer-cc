@@ -154,6 +154,7 @@ describe('formatStatus', () => {
     expect(text).toContain('접두어 "?? "')
     expect(text).toContain('옵티마이저 모델: sonnet')
     expect(text).toContain('시스템 프롬프트 파일: ~/p.md')
+    expect(text).toContain('그대로 보내기: 접두어 ">> " · ctrl+x enter')
     expect(text).toContain('장기 기억 문맥: 켬')
     expect(text).toContain('진행 중인 개선 작업: wf-1')
     expect(text).toContain('단계 reviewing')
@@ -161,6 +162,12 @@ describe('formatStatus', () => {
     expect(text).toContain('이 세션 사용량: 2회')
     expect(text).toContain('입력 300')
     expect(text).toContain('출력 150')
+  })
+
+  test('shows the as-is send shortcut without a prefix when rawPrefix is empty', () => {
+    const text = formatStatus(config({ rawPrefix: '' }), liveState())
+    expect(text).toContain('그대로 보내기: ctrl+x enter')
+    expect(text).not.toContain('그대로 보내기: 접두어')
   })
 
   test('says so when no run is active and names the last error when failed', () => {

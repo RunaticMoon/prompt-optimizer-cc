@@ -182,6 +182,11 @@ If the pane cannot be laid out or `uiMode` is `composer`, the improvement dialog
 ### 4.5 Raw bypass and prefix mode
 
 - **Raw bypass**: a submission starting with `rawPrefix` (default `>> `) has only the prefix stripped and the rest passed through to `next` unchanged. If what follows the prefix is empty or only whitespace, it neither refines nor sends and is dropped with `보낼 내용이 없습니다.` ("There is nothing to send.") (the prefix does not go to the main session).
+- **Send-as-is shortcut**: submitting with `ctrl+x enter` (the engine's keybinding action `chat:queueSubmit`) reaches the main session untouched, without going through the optimizer. When idle it is sent immediately; while a turn is running it enters the engine's queue and is sent after the turn ends. It arrives as `wait: true`, so rule 2 in `hooks/eligibility.ts` passes it as is, and unlike the raw prefix it does not alter the text at all (measured on Claude Code 2.1.286). To use a different key, bind `chat:queueSubmit` additionally in the `Chat` context of `~/.claude/keybindings.json` (a user binding is added to the defaults). Merge with an existing file and avoid clashes with terminal/tmux reserved keys (such as `ctrl+b`).
+  ```json
+  {"$schema":"https://www.schemastore.org/claude-code-keybindings.json","bindings":[{"context":"Chat","bindings":{"ctrl+x r":"chat:queueSubmit"}}]}
+  ```
+  `ctrl+x ctrl+s` and `ctrl+enter` (`chat:sendNow`) give inconsistent results, so they are not advertised as bypass shortcuts.
 - **Prefix mode**: when `triggerMode` is `prefix`, only submissions starting with `triggerPrefix` (default `?? `) are improved. The prefix is stripped and the rest is trimmed to become the original text. If the rest is empty, it passes through.
 - If the two prefixes overlap, `rawPrefix` wins and `triggerPrefix` reverts to its default (`settlePrefixes` in `hooks/config.ts`).
 - Up to 0.2.x the default was `::raw `; to keep using the previous prefix, set `prompt-optimizer.rawPrefix` to `::raw ` in `/config`.
@@ -372,7 +377,7 @@ Turning `modelGuidance` off still keeps the common editing guidance, and the fix
 ## 7. Limitations
 
 - **Attachments (images/audio/documents)**: submissions with attachments are not intercepted. The engine handles them by their original path.
-- **In-progress turns and waiting submissions**: submissions with a `turnId` or with `wait === true` are left to the main session's queue as is.
+- **In-progress turns and waiting submissions**: submissions with a `turnId` or with `wait === true` are left to the main session's queue as is. A waiting submission from `ctrl+x enter` also takes this path and skips the optimizer (4.5).
 - **Slash commands and shell input**: input starting with `/` or `!` is not intercepted (commands are handled by `command.run`).
 - **Overly long originals**: if the original exceeds 6000 characters (`MAX_ORIGINAL_CHARS`), it is passed through without improvement.
 - **Context loss on explicit send (Mod hooks only)**: "개선안 바로 전송" (Send improved draft now), `/optimize send`, and `/optimize raw` call only `$.prompt.submit({ text, asUser: true })`. The engine's `PromptSubmitArgs` has no `context` field, so blocks that a Mod hook above this plugin may have attached with `context` on the initial submission are not re-attached on an explicit send. Classic hooks (settings/plugin `hooks.json`), by contrast, run again on an explicit send, so the long-term memory injection is kept (verified on 2.1.286). The default path, where the user restores to the prompt box and presses Enter themselves, is unaffected (that path sends the final text the user put in the prompt box, not the original submission context).
