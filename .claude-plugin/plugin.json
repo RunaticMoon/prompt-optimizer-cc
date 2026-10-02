@@ -52,7 +52,7 @@
       "title": "Raw prefix",
       "description": "Leading marker that strips itself and sends the rest of the prompt straight through.",
       "required": false,
-      "default": "::raw "
+      "default": ">> "
     },
     "uiMode": {
       "type": "string",

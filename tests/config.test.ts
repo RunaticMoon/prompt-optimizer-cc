@@ -233,16 +233,16 @@ describe('resolveConfig — prefixes', () => {
   })
 
   test('lets rawPrefix win when triggerPrefix is its prefix', () => {
-    const { config, warnings } = resolveConfig({ triggerMode: 'prefix', triggerPrefix: '::', rawPrefix: '::raw ' })
+    const { config, warnings } = resolveConfig({ triggerMode: 'prefix', triggerPrefix: '>>', rawPrefix: '>> ' })
     expect(config.triggerPrefix).toBe(DEFAULT_CONFIG.triggerPrefix)
-    expect(config.rawPrefix).toBe('::raw ')
+    expect(config.rawPrefix).toBe('>> ')
     expect(warnings).toHaveLength(1)
   })
 
   test('lets rawPrefix win when the two are equal', () => {
-    const { config, warnings } = resolveConfig({ triggerMode: 'prefix', triggerPrefix: '::raw ', rawPrefix: '::raw ' })
+    const { config, warnings } = resolveConfig({ triggerMode: 'prefix', triggerPrefix: '>> ', rawPrefix: '>> ' })
     expect(config.triggerPrefix).toBe(DEFAULT_CONFIG.triggerPrefix)
-    expect(config.rawPrefix).toBe('::raw ')
+    expect(config.rawPrefix).toBe('>> ')
     expect(warnings).toHaveLength(1)
   })
 
@@ -266,7 +266,7 @@ describe('resolveConfig — prefixes', () => {
     expect(prefix.config.triggerPrefix).toBe(DEFAULT_CONFIG.triggerPrefix)
     expect(prefix.warnings).toHaveLength(1)
 
-    const always = resolveConfig({ triggerMode: 'always', triggerPrefix: '', rawPrefix: '::raw ' })
+    const always = resolveConfig({ triggerMode: 'always', triggerPrefix: '', rawPrefix: '>> ' })
     expect(always.config.triggerPrefix).toBe('')
     expect(always.warnings).toEqual([])
   })

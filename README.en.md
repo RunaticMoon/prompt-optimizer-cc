@@ -181,9 +181,10 @@ If the pane cannot be laid out or `uiMode` is `composer`, the improvement dialog
 
 ### 4.5 Raw bypass and prefix mode
 
-- **Raw bypass**: a submission starting with `rawPrefix` (default `::raw `) has only the prefix stripped and the rest passed through to `next` unchanged. If what follows the prefix is empty or only whitespace, it neither refines nor sends and is dropped with `보낼 내용이 없습니다.` ("There is nothing to send.") (the prefix does not go to the main session).
+- **Raw bypass**: a submission starting with `rawPrefix` (default `>> `) has only the prefix stripped and the rest passed through to `next` unchanged. If what follows the prefix is empty or only whitespace, it neither refines nor sends and is dropped with `보낼 내용이 없습니다.` ("There is nothing to send.") (the prefix does not go to the main session).
 - **Prefix mode**: when `triggerMode` is `prefix`, only submissions starting with `triggerPrefix` (default `?? `) are improved. The prefix is stripped and the rest is trimmed to become the original text. If the rest is empty, it passes through.
 - If the two prefixes overlap, `rawPrefix` wins and `triggerPrefix` reverts to its default (`settlePrefixes` in `hooks/config.ts`).
+- Up to 0.2.x the default was `::raw `; to keep using the previous prefix, set `prompt-optimizer.rawPrefix` to `::raw ` in `/config`.
 
 ### 4.6 The `/optimize` command
 
@@ -215,7 +216,7 @@ These commands first pass through the `prompt.submit` classification as slash co
 
 Long-term memory plugins such as claude-mem and OpenViking inject memory into a session through classic hooks (SessionStart/UserPromptSubmit/Stop). A submission this plugin intercepted, and the improvement dialogue, do not run those hooks, so the original text and the refinement dialogue are not recorded in that plugin's memory.
 
-If you bring the improved draft over and press Enter, use the pane's **개선안 바로 전송** (Send improved draft now)/**원문 그대로 전송** (Send original unchanged), use `/optimize send|raw`, or send with the `::raw` prefix, UserPromptSubmit runs once with the final text, and the memory it injects at that point is included in the main request as usual (verified on Claude Code 2.1.286).
+If you bring the improved draft over and press Enter, use the pane's **개선안 바로 전송** (Send improved draft now)/**원문 그대로 전송** (Send original unchanged), use `/optimize send|raw`, or send with the `>>` prefix, UserPromptSubmit runs once with the final text, and the memory it injects at that point is included in the main request as usual (verified on Claude Code 2.1.286).
 
 The optimizer only observes (never modifies) the `additionalContext` injected into the session by classic hooks (`SessionStart`/`UserPromptSubmit`) in settings or a plugin's `hooks.json`, as seen in the classic chain below this plugin, and puts it in the "Long-term memory" section of the snapshot (at most 2000 characters, `CONTEXT_MEMORY_CHARS`). Memory injected at session start is used from the first prompt. UserPromptSubmit memory is what was retrieved for **the prompt that last went to the main session**; it is not newly retrieved for the prompt being refined now (at interception time that hook has not run yet). A new SessionStart (start, resume, clear, compact) clears the previous-prompt memory. Memory follows the session id the classic hook reports, so after a `/clear` — where a new session id arrives with no `session.start` — the memory that SessionStart injected is used from the next request on. SessionStart changes sessions (a UserPromptSubmit never replaces a stored session; it only fills an empty store), a session end clears the ending session's memory only when its id matches the stored classic session (otherwise the next SessionStart replaces it), and classic hooks raised inside a subagent (with `agent_id` set) are ignored.
 
@@ -235,7 +236,7 @@ The source of truth for configuration is `userConfig` in `plugin.json`, and the 
 | `modelGuidance` | boolean | `true` | — | Whether to detect the main session model and apply that model's add-on editing guidance. Off keeps the common guidance only (5.4) |
 | `triggerMode` | string | `always` | `always` \| `prefix` | `always` improves every target submission, `prefix` only submissions that have the prefix |
 | `triggerPrefix` | string | `?? ` | reverts to the default in prefix mode when empty | Trigger prefix for prefix mode |
-| `rawPrefix` | string | `::raw ` | — | Starting with this prefix strips it and passes the rest through unchanged |
+| `rawPrefix` | string | `>> ` | — | Starting with this prefix strips it and passes the rest through unchanged |
 | `uiMode` | string | `auto` | `auto` \| `pane` \| `composer` | `auto`·`pane` try the pane and fall back to prompt-box dialogue when it cannot be laid out; `composer` always uses the prompt box |
 | `model` | string | `haiku` | non-empty string | Model alias/id used for the optimizer completions |
 | `maxTokens` | number | `1024` | 128–2048 | Output cap for one completion |

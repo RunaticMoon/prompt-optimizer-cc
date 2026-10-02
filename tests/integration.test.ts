@@ -667,12 +667,12 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(w.completes).toHaveLength(0)
   })
 
-  // Invariant 10c: `::raw` strips itself and passes the rest untouched.
-  test('INV10 · ::raw는 접두어를 떼고 나머지를 그대로 보낸다', { options: { uiMode: 'composer' } }, async ($, on) => {
+  // Invariant 10c: `>>` strips itself and passes the rest untouched.
+  test('INV10 · >>는 접두어를 떼고 나머지를 그대로 보낸다', { options: { uiMode: 'composer' } }, async ($, on) => {
     const w = setup($, on)
     await w.start()
 
-    const passed = await w.submit('::raw hello world')
+    const passed = await w.submit('>> hello world')
     expect(passed).toEqual({ text: 'hello world' })
     expect(w.submits).toHaveLength(1)
     expect(w.submits[0]?.text).toBe('hello world')

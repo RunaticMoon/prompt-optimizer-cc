@@ -181,9 +181,10 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 
 ### 4.5 raw 우회와 prefix 모드
 
-- **raw 우회**: `rawPrefix`(기본 `::raw `)로 시작하는 제출은 접두어만 떼고 나머지를 그대로 `next`로 통과시킨다. 접두어 뒤가 비었거나 공백뿐이면 개선도 전송도 하지 않고 `보낼 내용이 없습니다.`와 함께 드롭된다(접두어가 메인 세션으로 가지 않는다).
+- **raw 우회**: `rawPrefix`(기본 `>> `)로 시작하는 제출은 접두어만 떼고 나머지를 그대로 `next`로 통과시킨다. 접두어 뒤가 비었거나 공백뿐이면 개선도 전송도 하지 않고 `보낼 내용이 없습니다.`와 함께 드롭된다(접두어가 메인 세션으로 가지 않는다).
 - **prefix 모드**: `triggerMode`가 `prefix`이면 `triggerPrefix`(기본 `?? `)로 시작하는 제출만 개선한다. 접두어를 떼고 나머지를 trim해 원문으로 쓴다. 나머지가 비면 통과.
 - 두 접두어가 서로 겹치면 `rawPrefix`가 우선하고 `triggerPrefix`는 기본값으로 되돌아간다(`hooks/config.ts`의 `settlePrefixes`).
+- 기본값은 0.2.x까지 `::raw `였으며, 이전 접두어를 계속 쓰려면 `/config`에서 `prompt-optimizer.rawPrefix`를 `::raw `로 지정하면 된다.
 
 ### 4.6 `/optimize` 명령
 
@@ -215,7 +216,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 
 claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionStart/UserPromptSubmit/Stop)으로 세션에 기억을 주입한다. 이 플러그인이 가로챈 원문 제출과 개선 대화는 그 훅을 실행하지 않으므로, 원문과 보완 대화는 그 플러그인의 기억에 기록되지 않는다.
 
-개선안을 가져와 Enter 하거나, 패인의 **개선안 바로 전송**/**원문 그대로 전송**, `/optimize send|raw`, `::raw` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
+개선안을 가져와 Enter 하거나, 패인의 **개선안 바로 전송**/**원문 그대로 전송**, `/optimize send|raw`, `>>` 접두어로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
 
 옵티마이저는 settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 세션에 주입한 `additionalContext`를 이 플러그인 아래 classic 체인에서 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다. 기억은 classic 훅이 보고한 세션 id를 따르므로, `/clear`처럼 `session.start` 없이 새 세션 id가 와도 그 SessionStart가 주입한 기억을 다음 요청부터 쓴다. 세션 전환은 SessionStart가 하며(UserPromptSubmit은 이미 저장된 세션을 바꾸지 않고, 저장된 세션이 없을 때만 채운다), 세션 end는 끝나는 세션 id가 저장된 classic 세션과 같을 때만 그 기억을 비우고 아니면 다음 SessionStart가 교체한다. 서브에이전트 안에서 발생한 classic 훅(`agent_id`가 있는 경우)은 무시한다.
 
@@ -235,7 +236,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 | `modelGuidance` | boolean | `true` | — | 메인 세션 모델을 감지해 그 모델의 추가 편집 지침을 적용할지 여부. 끄면 공통 지침만 쓴다(5.4) |
 | `triggerMode` | string | `always` | `always` \| `prefix` | `always`는 모든 대상 제출, `prefix`는 접두어가 있는 제출만 |
 | `triggerPrefix` | string | `?? ` | 비어 있으면 prefix 모드에서 기본값으로 복귀 | prefix 모드 트리거 접두어 |
-| `rawPrefix` | string | `::raw ` | — | 이 접두어로 시작하면 접두어를 떼고 그대로 통과 |
+| `rawPrefix` | string | `>> ` | — | 이 접두어로 시작하면 접두어를 떼고 그대로 통과 |
 | `uiMode` | string | `auto` | `auto` \| `pane` \| `composer` | `auto`·`pane`은 패인을 시도하고 배치되지 않으면 입력창 대화로 폴백, `composer`는 항상 입력창 |
 | `model` | string | `haiku` | 비어 있지 않은 문자열 | 옵티마이저 완성에 쓸 모델 별칭/ID |
 | `maxTokens` | number | `1024` | 128–2048 | 한 번의 완성 출력 상한 |

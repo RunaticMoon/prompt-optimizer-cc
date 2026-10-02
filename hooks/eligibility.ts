@@ -66,7 +66,7 @@ export function classifySubmission(
       return { kind: 'raw', text: e.text.slice(config.rawPrefix.length) }
     }
     // The CLI trims trailing whitespace before the hook sees the text, so a
-    // bare marker arrives as `::raw` rather than `::raw `. Treat exactly the
+    // bare marker arrives as `>>` rather than `>> `. Treat exactly the
     // marker (no trailing space) as a blank raw escape too, so it is dropped
     // instead of being optimized as ordinary text.
     const bareMarker = config.rawPrefix.trimEnd()

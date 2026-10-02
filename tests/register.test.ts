@@ -171,7 +171,7 @@ describe('register — the wired module', () => {
       expect(modelCalls).toHaveLength(1)
 
       // 4. The raw marker strips itself and passes the rest through untouched.
-      await $.prompt.submit({ text: '::raw hello', origin: { kind: 'composer' }, wait: false })
+      await $.prompt.submit({ text: '>> hello', origin: { kind: 'composer' }, wait: false })
       expect(submits).toHaveLength(2)
       expect(submits[1]?.text).toBe('hello')
       expect(modelCalls).toHaveLength(1)

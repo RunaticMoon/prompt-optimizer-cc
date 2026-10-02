@@ -114,7 +114,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 
 | 기능 | 동작 |
 |---|---|
-| `::raw 원문` | 접두어를 제거하고 즉시 `next({...e,text})` |
+| `>> 원문` | 접두어를 제거하고 즉시 `next({...e,text})` |
 | `/optimize off` | 자동 가로채기 해제 |
 | `/optimize on` | 자동 가로채기 활성화 |
 | `triggerMode='prefix'` | 기본 `?? `로 시작한 제출만 개선 |
@@ -270,7 +270,7 @@ interface OptimizerConfig {
   enabled: boolean                 // true
   triggerMode: 'always' | 'prefix'  // always
   triggerPrefix: string             // "?? "
-  rawPrefix: string                 // "::raw "
+  rawPrefix: string                 // ">> "
   uiMode: 'auto' | 'pane' | 'composer'
   model: string                    // haiku
   maxTokens: number                // 1024; 허용 128..2048
