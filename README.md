@@ -182,12 +182,13 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 ### 4.5 raw 우회와 prefix 모드
 
 - **raw 우회**: `rawPrefix`(기본 `>> `)로 시작하는 제출은 접두어만 떼고 나머지를 그대로 `next`로 통과시킨다. 접두어 뒤가 비었거나 공백뿐이면 개선도 전송도 하지 않고 `보낼 내용이 없습니다.`와 함께 드롭된다(접두어가 메인 세션으로 가지 않는다).
-- **단축키 그대로 보내기**: `ctrl+x enter`(엔진 keybinding action `chat:queueSubmit`)로 제출하면 옵티마이저를 거치지 않고 텍스트가 그대로 메인 세션으로 간다. 유휴 상태에서는 즉시 전송되고, 턴이 실행 중이면 엔진 큐에 들어갔다가 턴이 끝난 뒤 전송된다. `wait: true`로 오는 제출이라 `hooks/eligibility.ts`의 2번 규칙에서 그대로 통과하며, raw 접두어처럼 텍스트를 바꾸지도 않는다(실측: Claude Code 2.1.286). 기본 키 대신 다른 키를 쓰려면 `~/.claude/keybindings.json`의 `Chat` 컨텍스트에 `chat:queueSubmit`을 추가로 바인딩한다(사용자 바인딩은 기본값에 추가된다). 기존 파일이 있으면 병합하고, 터미널·tmux 예약 키(`ctrl+b` 등)와의 충돌을 피한다.
+- **`>> ` 붙여넣기 주의**: 붙여넣은 글이 `>> `로 시작하면(예: 2단계 마크다운 인용문) raw 접두어로 인식되어 맨 앞 `>> `가 제거된 채 전송된다. `>>`만 있는 제출은 `보낼 내용이 없습니다.`로 드롭된다. 글을 한 글자도 바꾸지 않고 보내려면 `ctrl+x enter`를 쓰거나 `/config`에서 `prompt-optimizer.rawPrefix`를 다른 값으로 바꾼다.
+- **단축키 그대로 보내기**: `ctrl+x enter`(엔진 keybinding action `chat:queueSubmit`)로 제출하면 옵티마이저를 거치지 않고 텍스트가 그대로 메인 세션으로 간다. 유휴 상태에서는 즉시 전송되고, 턴이 실행 중이면 엔진 대기열에 들어가고, 엔진이 정한 시점(도구 호출이 끝난 뒤 같은 턴 안이나 턴이 끝난 뒤)에 전달된다. 어느 경우든 옵티마이저는 거치지 않는다. `wait: true`로 오는 제출이라 `hooks/eligibility.ts`의 2번 규칙에서 그대로 통과하며, raw 접두어처럼 텍스트를 바꾸지도 않는다(실측: Claude Code 2.1.286). 기본 키 대신 다른 키를 쓰려면 `~/.claude/keybindings.json`의 `Chat` 컨텍스트에 `chat:queueSubmit`을 추가로 바인딩한다(사용자 바인딩은 기본값에 추가된다). 기존 파일이 있으면 병합하고, 터미널·tmux 예약 키(`ctrl+b` 등)와의 충돌을 피한다.
   ```json
   {"$schema":"https://www.schemastore.org/claude-code-keybindings.json","bindings":[{"context":"Chat","bindings":{"ctrl+x r":"chat:queueSubmit"}}]}
   ```
   `ctrl+x ctrl+s`·`ctrl+enter`(`chat:sendNow`)는 결과가 일관되지 않아 우회 단축키로 안내하지 않는다.
-- **prefix 모드**: `triggerMode`가 `prefix`이면 `triggerPrefix`(기본 `?? `)로 시작하는 제출만 개선한다. 접두어를 떼고 나머지를 trim해 원문으로 쓴다. 나머지가 비면 통과.
+- **prefix 모드**: `triggerMode`가 `prefix`이면 `triggerPrefix`(기본 `?? `)로 시작하는 제출만 개선한다. 접두어를 떼고 나머지를 trim해 원문으로 쓴다. 접두어만 있고 나머지가 비면 개선도 전송도 하지 않고 `보낼 내용이 없습니다.`와 함께 드롭된다.
 - 두 접두어가 서로 겹치면 `rawPrefix`가 우선하고 `triggerPrefix`는 기본값으로 되돌아간다(`hooks/config.ts`의 `settlePrefixes`).
 - 기본값은 0.2.x까지 `::raw `였으며, 이전 접두어를 계속 쓰려면 `/config`에서 `prompt-optimizer.rawPrefix`를 `::raw `로 지정하면 된다.
 
