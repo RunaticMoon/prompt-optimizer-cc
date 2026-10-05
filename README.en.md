@@ -2,7 +2,7 @@
 
 [한국어](README.md) | **English**
 
-Every command, configuration key, and default in this document is taken only from values confirmed in this repository's code (`.claude-plugin/plugin.json`, `hooks/*`) and in the help of the installed CLI 2.1.285.
+Every command, configuration key, and default in this document is taken only from values confirmed in this repository's code (`.claude-plugin/plugin.json`, `hooks/*`) and in the help of the installed CLI 2.1.289.
 
 ## 1. Introduction
 
@@ -33,12 +33,12 @@ The optimizer classifies the request by type before refining it. A change is jud
 
 | Item | Value | Basis |
 |---|---|---|
-| Claude Code | 2.1.285 or newer | The version used in this repository for verification and type generation: `2.1.285`. `asUser`, which makes a direct send read as the person's own words, was confirmed on 2.1.286. If a direct send still shows the "plugin sent a message" frame on an older version, update the CLI. |
-| Mod (function hook) support | early access | The hook modules are not turned on without the flag |
-| Required environment variable | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | Without it, `claude plugin test` refuses with "hooks modules are not turned on in this build yet (early access)" |
+| Claude Code | 2.1.287 or newer | On 2.1.287 or newer, where Mods became GA, it works without the flag. The version used in this repository for verification and type generation: `2.1.289`. `asUser`, which makes a direct send read as the person's own words, was confirmed on 2.1.286. If a direct send still shows the "plugin sent a message" frame on an older version, update the CLI. |
+| Mod (function hook) support | GA (2.1.287 or newer) | Became GA in 2.1.287 and turns on without an environment variable |
+| Legacy environment variable | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | Not needed on 2.1.287 or newer. Needed only on 2.1.285–2.1.286 to turn the hook modules on |
 | For development | Node.js + npm | Needed to run `scripts/*.mjs` and `claude plugin test` |
 
-The Mod API is early access, so the contract can change between versions. Indeed, the `model.complete` return shape changed between 2.1.277 → 2.1.285 (`docs/DESIGN.md`). Each time you upgrade the CLI, verify again with `npm run typecheck`.
+The Mod feature itself became GA in 2.1.287, but the declaration the CLI generates still says "EARLY ACCESS: this surface may change between releases without notice", so the contract can change. Indeed, the `model.complete` return shape changed between 2.1.277 → 2.1.285 (`docs/DESIGN.md`). Each time you upgrade the CLI, regenerate the types and verify with `npm run typecheck`.
 
 ## 3. Installation and running
 
@@ -62,29 +62,7 @@ To install from inside a session:
 /plugin install prompt-optimizer@prompt-optimizer-cc
 ```
 
-Running it still requires the `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` environment variable. Without it, the hook modules are not turned on and nothing is intercepted.
-
-```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude
-```
-
-To put it in your shell profile:
-
-```bash
-export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
-```
-
-Or put it in the `env` of your Claude Code settings file (`~/.claude/settings.json`) so it is on in every session without shell setup:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
-  }
-}
-```
-
-If the settings file already exists, merge into its `env` key instead of overwriting other settings.
+On 2.1.287 or newer it works right after installation with no extra setup. Only on 2.1.285–2.1.286 does the hook module need the `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` environment variable (the previous way).
 
 Update:
 
@@ -114,13 +92,12 @@ claude plugin uninstall prompt-optimizer@prompt-optimizer-cc
 You can also load a checked-out directory directly into a session.
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  claude --plugin-dir /path/to/prompt-optimizer
+claude --plugin-dir /path/to/prompt-optimizer
 ```
 
 - `--plugin-dir <path>`: loads the plugin into that session only (`claude --help`). It accepts a directory or a `.zip`, and can be given repeatedly.
 - When it loads, the modules from `.claude-plugin/plugin.json` and `hooks/hooks.json` (`./register.ts`) come up together.
-- Running without the same flag leaves the hooks off, so nothing is intercepted.
+- On 2.1.287 or newer the hooks load directly with this command. On 2.1.285–2.1.286 the legacy environment variable from the installation section above is needed.
 
 Skill-directory scaffolding (`claude plugin init|new`) is not provided by this repository.
 
@@ -389,7 +366,8 @@ Turning `modelGuidance` off still keeps the common editing guidance, and the fix
 - **The real effect of the model-specific guidance is unverified**: whether the guidance improves the actual model response depends on the model's response. There is no automated quality evaluation in this repository; the tests guarantee only the normalization, selection, and assembly contract (5.4).
 - **500 ms model-detection limit**: reading the main session model must finish within 500 ms (`TARGET_MODEL_TIMEOUT_MS`). If it does not, that round uses only the common guidance and the optimization continues. The `마지막 최적화 대상` ("last optimization target") in `/optimize status` is the last request actually sent, not the current model at query time.
 - **Provider-specific model IDs**: ID formats returned by other providers such as Bedrock, Vertex, and gateways have not been observed, so only the common guidance applies.
-- **early-access API**: the Mod contract can change (there is a return-shape change history from 2.1.277 → 2.1.285).
+- **Mod API contract can change**: the generated declaration still says `EARLY ACCESS: this surface may change between releases without notice`, so the contract can change (there is a return-shape change history from 2.1.277 → 2.1.285). After a CLI update, regenerate the types and verify with `npm run typecheck`.
+- **Organization-managed policy (`allowManagedModsOnly`)**: when this policy is on, only Mods managed by the organization are loaded, so this plugin is not loaded (CLI message: "mods are limited to your organization's by policy (allowManagedModsOnly); … was not loaded").
 - **Real terminal screen verification status**: in this repository's history, the actual terminal behavior of pane layout, focus, and fill has not yet been verified (network errors in the development environment). Verification is planned with the procedure in `docs/smoke.md`, and until then the screen behavior is **unverified**. The automated tests guarantee only the contract on the mock engine.
 
 ## 8. Development
@@ -398,21 +376,22 @@ Turning `modelGuidance` off still keeps the common editing guidance, and the fix
 npm ci
 ```
 
-Type declarations are generated by the CLI into `.claude-plugin/types/` when it loads the Mod. This folder is gitignored and is not committed. If it is still missing, generate it once with the following command that the typecheck script points to (`scripts/check-types.mjs`):
+Type declarations are generated by the CLI into `.claude-plugin/types/` when it loads the Mod. This also creates `claude-code/`, `claude-code-tools/`, `claude-code-mcp/`, and `tsconfig.json` there. This folder is gitignored and is not committed. If it is still missing, generate it once with the following command that the typecheck script points to (`scripts/check-types.mjs`):
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  claude --plugin-dir . -p "type generation" \
+claude --plugin-dir . -p "type generation" \
   --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
+
+This command makes one short model call through `-p`, so it uses a little of your account usage. A normal interactive session opened with `--plugin-dir .` writes the same declarations.
 
 Check commands:
 
 | Command | What actually runs | What it does |
 |---|---|---|
 | `npm run typecheck` | `node scripts/check-types.mjs` | Checks that the generated types exist, then runs `tsc -p tsconfig.json` |
-| `npm test` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .` | Runs the Mod tests (no API cost, mock engine) |
-| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/marketplace.json && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json` | Validates the marketplace, manifest and hooks |
+| `npm test` | `claude plugin test .` | Runs the Mod tests (no API cost, mock engine) |
+| `npm run validate` | `claude plugin validate .claude-plugin/marketplace.json && claude plugin validate .claude-plugin/plugin.json` | Validates the marketplace, manifest and hooks |
 | `npm run check:package` | `node scripts/check-package.mjs` | Checks that no generated types/references/official declarations are among the tracked files |
 | `npm run version:bump` | `node scripts/bump-version.mjs <major\|minor\|patch\|X.Y.Z>` | Bumps the version in all three files (`plugin.json`, `package.json`, `package-lock.json`) together and prints the new version |
 | `npm run check:version` | `node scripts/bump-version.mjs --check` | Checks that the three files' versions agree |

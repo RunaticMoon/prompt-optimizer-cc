@@ -2,7 +2,7 @@
 
 **한국어** | [English](README.en.md)
 
-이 문서의 모든 명령·설정 키·기본값은 이 저장소의 코드(`.claude-plugin/plugin.json`, `hooks/*`)와 설치된 CLI 2.1.285의 도움말에서 확인한 값만 적었다.
+이 문서의 모든 명령·설정 키·기본값은 이 저장소의 코드(`.claude-plugin/plugin.json`, `hooks/*`)와 설치된 CLI 2.1.289의 도움말에서 확인한 값만 적었다.
 
 ## 1. 소개
 
@@ -33,12 +33,12 @@
 
 | 항목 | 값 | 근거 |
 |---|---|---|
-| Claude Code | 2.1.285 이상 | 이 저장소에서 검증·타입 생성에 사용한 버전: `2.1.285`. 바로 전송을 사용자 본인의 말로 보내는 `asUser`는 2.1.286에서 확인했다. 그보다 낮은 버전에서 바로 전송에 "plugin sent a message" 틀이 붙으면 CLI를 업데이트한다. |
-| Mod(함수 훅) 지원 | early access | 플래그 없이는 훅 모듈이 켜지지 않는다 |
-| 필수 환경 변수 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | 없으면 `claude plugin test`가 "hooks modules are not turned on in this build yet (early access)"로 거부 |
+| Claude Code | 2.1.287 이상 | Mod가 정식이 된 2.1.287 이상이면 플래그 없이 동작한다. 이 저장소에서 검증·타입 생성에 사용한 버전: `2.1.289`. 바로 전송을 사용자 본인의 말로 보내는 `asUser`는 2.1.286에서 확인했다. 그보다 낮은 버전에서 바로 전송에 "plugin sent a message" 틀이 붙으면 CLI를 업데이트한다. |
+| Mod(함수 훅) 지원 | 정식 기능 (2.1.287 이상) | 2.1.287에서 정식이 되었고 환경 변수 없이 켜진다 |
+| 레거시 환경 변수 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | 2.1.287 이상에서는 불필요. 2.1.285–2.1.286에서만 훅 모듈을 켜기 위해 필요 |
 | 개발용 | Node.js + npm | `scripts/*.mjs`, `claude plugin test` 실행에 필요 |
 
-Mod API는 early access라 버전 간 계약이 바뀔 수 있다. 실제로 2.1.277 → 2.1.285 사이에 `model.complete` 반환형이 바뀌었다(`docs/DESIGN.md`). CLI를 올릴 때마다 `npm run typecheck`로 다시 확인한다.
+Mod 기능 자체는 2.1.287에서 정식이 되었지만, CLI가 생성하는 선언은 여전히 "EARLY ACCESS: this surface may change between releases without notice"라고 표기하므로 계약이 바뀔 수 있다. 실제로 2.1.277 → 2.1.285 사이에 `model.complete` 반환형이 바뀌었다(`docs/DESIGN.md`). CLI를 올릴 때마다 타입을 다시 생성하고 `npm run typecheck`로 확인한다.
 
 ## 3. 설치·실행
 
@@ -62,29 +62,7 @@ HTTPS URL을 쓰는 이유: `소유자/저장소` 형식은 SSH가 설정된 PC�
 /plugin install prompt-optimizer@prompt-optimizer-cc
 ```
 
-실행에는 여전히 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` 환경 변수가 필요하다. 없으면 훅 모듈이 켜지지 않아 아무 것도 가로채지 않는다.
-
-```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude
-```
-
-셸 프로필에 넣어 두려면:
-
-```bash
-export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
-```
-
-또는 Claude Code 설정 파일(`~/.claude/settings.json`)의 `env`에 넣어 두면 셸 설정 없이 매번 켜진다:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
-  }
-}
-```
-
-기존 설정 파일이 있으면 `env` 키에 병합하고 다른 설정을 덮어쓰지 않는다.
+2.1.287 이상에서는 설치 후 별도 설정 없이 바로 동작한다. 2.1.285–2.1.286에서만 훅 모듈을 켜기 위해 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` 환경 변수가 필요하다(이전 방식).
 
 업데이트:
 
@@ -114,13 +92,12 @@ claude plugin uninstall prompt-optimizer@prompt-optimizer-cc
 체크아웃한 디렉터리를 세션에 직접 올릴 수도 있다.
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  claude --plugin-dir /path/to/prompt-optimizer
+claude --plugin-dir /path/to/prompt-optimizer
 ```
 
 - `--plugin-dir <path>`: 해당 세션에만 플러그인을 로드한다(`claude --help`). 디렉터리 또는 `.zip`을 받고, 반복 지정할 수 있다.
 - 로드되면 `.claude-plugin/plugin.json`과 `hooks/hooks.json`의 모듈(`./register.ts`)이 함께 올라온다.
-- 같은 플래그 없이 실행하면 훅이 켜지지 않으므로 아무 것도 가로채지 않는다.
+- 2.1.287 이상에서는 이 명령으로 훅이 바로 로드된다. 2.1.285–2.1.286에서는 위 설치 절의 레거시 환경 변수가 필요하다.
 
 스킬 디렉터리 스캐폴딩(`claude plugin init|new`)은 이 저장소가 제공하지 않는다.
 
@@ -389,7 +366,8 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 - **모델별 지침의 실제 효과는 미검증**: 지침이 실제 모델 응답의 품질을 높이는지는 모델 응답에 달려 있다. 이 저장소에는 자동 품질 평가가 없고, 테스트는 정규화·선택·조립 계약만 보장한다(5.4).
 - **모델 감지 500ms 제한**: 메인 세션 모델 조회는 500ms(`TARGET_MODEL_TIMEOUT_MS`) 안에 끝나야 한다. 넘으면 그 라운드는 공통 지침만 쓰고 최적화는 계속된다. `/optimize status`의 `마지막 최적화 대상`은 마지막으로 실제 보낸 요청 기준이며 조회 시점의 현재 모델이 아니다.
 - **provider별 모델 ID**: Bedrock·Vertex·게이트웨이 등 다른 provider가 돌려주는 ID 형식은 확인되지 않아 공통 지침만 적용한다.
-- **early-access API**: Mod 계약이 바뀔 수 있다(2.1.277 → 2.1.285에서 반환형 변경 이력).
+- **Mod API 계약 변경 가능**: 생성 선언이 여전히 `EARLY ACCESS: this surface may change between releases without notice`로 표기되며 계약이 바뀔 수 있다(2.1.277 → 2.1.285에서 반환형 변경 이력). CLI 업데이트 후 타입을 다시 생성하고 `npm run typecheck`로 확인한다.
+- **조직 관리 정책(`allowManagedModsOnly`)**: 이 정책이 켜진 환경에서는 조직이 관리하는 Mod만 로드되어 이 플러그인이 로드되지 않는다(CLI 메시지: "mods are limited to your organization's by policy (allowManagedModsOnly); … was not loaded").
 - **실제 터미널 화면 검증 상태**: 이 저장소 이력에서는 패인 배치·포커스·fill의 실제 터미널 동작을 아직 검증하지 못했다(개발 환경의 네트워크 오류). `docs/smoke.md`의 절차로 검증 예정이며, 그때까지 화면 동작은 **미검증**이다. 자동 테스트는 mock 엔진에서의 계약만 보장한다.
 
 ## 8. 개발
@@ -398,21 +376,22 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 npm ci
 ```
 
-타입 선언은 CLI가 Mod를 로드할 때 `.claude-plugin/types/`에 생성한다. 이 폴더는 gitignore 대상이며 커밋하지 않는다. 아직 없으면 타입체크 스크립트가 안내하는 다음 명령으로 한 번 생성한다(`scripts/check-types.mjs`):
+타입 선언은 CLI가 Mod를 로드할 때 `.claude-plugin/types/`에 생성한다. 이때 `claude-code/`, `claude-code-tools/`, `claude-code-mcp/`와 `tsconfig.json`이 함께 생긴다. 이 폴더는 gitignore 대상이며 커밋하지 않는다. 아직 없으면 타입체크 스크립트가 안내하는 다음 명령으로 한 번 생성한다(`scripts/check-types.mjs`):
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  claude --plugin-dir . -p "type generation" \
+claude --plugin-dir . -p "type generation" \
   --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
+
+이 명령은 `-p`로 짧은 모델 호출을 1회 하므로 계정 사용량이 조금 소모된다. `--plugin-dir .`로 여는 일반 대화형 세션도 같은 선언을 생성한다.
 
 검사 명령:
 
 | 명령 | 실제 실행 | 하는 일 |
 |---|---|---|
 | `npm run typecheck` | `node scripts/check-types.mjs` | 생성 타입 존재 확인 후 `tsc -p tsconfig.json` |
-| `npm test` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .` | Mod 테스트 실행(API 비용 없음, mock 엔진) |
-| `npm run validate` | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/marketplace.json && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .claude-plugin/plugin.json` | 마켓플레이스·매니페스트·훅 검증 |
+| `npm test` | `claude plugin test .` | Mod 테스트 실행(API 비용 없음, mock 엔진) |
+| `npm run validate` | `claude plugin validate .claude-plugin/marketplace.json && claude plugin validate .claude-plugin/plugin.json` | 마켓플레이스·매니페스트·훅 검증 |
 | `npm run check:package` | `node scripts/check-package.mjs` | 추적 파일에 생성 타입/참조/공식 선언이 없는지 확인 |
 | `npm run version:bump` | `node scripts/bump-version.mjs <major\|minor\|patch\|X.Y.Z>` | 세 파일(`plugin.json`·`package.json`·`package-lock.json`)의 버전을 함께 올리고 새 버전을 출력 |
 | `npm run check:version` | `node scripts/bump-version.mjs --check` | 세 파일의 버전이 서로 일치하는지 확인 |
