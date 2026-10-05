@@ -383,6 +383,8 @@ claude --plugin-dir . -p "type generation" \
   --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
 
+This command makes one short model call through `-p`, so it uses a little of your account usage. A normal interactive session opened with `--plugin-dir .` writes the same declarations.
+
 Check commands:
 
 | Command | What actually runs | What it does |

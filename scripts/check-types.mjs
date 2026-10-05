@@ -27,7 +27,8 @@ if (!existsSync(typesFile)) {
       'Claude Code 2.1.287+ loads mods without a flag; on 2.1.285–2.1.286 prefix the command with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.',
       '',
       'Any real load works (a normal interactive session with --plugin-dir .',
-      'writes them too); the command above is the headless, no-network form.',
+      'writes them too); the command above is the headless form. It makes one',
+      'short model call, so it uses a little of your account usage.',
       'The folder is gitignored, so regenerate it after a CLI update.',
     ].join('\n'),
   )

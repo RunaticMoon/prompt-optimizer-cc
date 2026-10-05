@@ -383,6 +383,8 @@ claude --plugin-dir . -p "type generation" \
   --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
 
+이 명령은 `-p`로 짧은 모델 호출을 1회 하므로 계정 사용량이 조금 소모된다. `--plugin-dir .`로 여는 일반 대화형 세션도 같은 선언을 생성한다.
+
 검사 명령:
 
 | 명령 | 실제 실행 | 하는 일 |
