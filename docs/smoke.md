@@ -16,11 +16,10 @@
 ### 1.1 플러그인 로드
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  claude --plugin-dir /path/to/prompt-optimizer
+claude --plugin-dir /path/to/prompt-optimizer
 ```
 
-- Claude Code 2.1.285 이상. 플래그가 없으면 함수 훅이 켜지지 않는다.
+- Claude Code 2.1.287 이상(Mods 정식, 플래그 불필요). 2.1.285–2.1.286은 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`이 필요하다.
 - 세션에 한해 로드된다(세션 한정 `--plugin-dir` 로더). 마켓플레이스로 설치하는 경로는 `README.md` 3장을 참고한다.
 
 ### 1.2 과금 없는 방법 A — `model.complete` mock 훅 (권장, 설계 실험에서 검증)
@@ -28,9 +27,8 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
 별도의 mock Mod를 함께 로드해 옵티마이저의 완성만 가로챈다. 두 번째 `--plugin-dir`로 얹는다.
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  claude --plugin-dir /path/to/prompt-optimizer \
-         --plugin-dir /tmp/popt-smoke-mock
+claude --plugin-dir /path/to/prompt-optimizer \
+       --plugin-dir /tmp/popt-smoke-mock
 ```
 
 mock Mod의 `register.ts`는 `model.complete` 훅 하나로 고정 JSON을 돌려주면 된다. 반환형은 2.1.285의 `ModelCompleteResult`를 따른다(설계 실험 기록 기준):
@@ -56,8 +54,7 @@ on('model.complete', () => ({
 헤드리스로 한 줄 검증할 때(실험에서 사용한 형태):
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  claude --plugin-dir /path/to/prompt-optimizer --plugin-dir /tmp/popt-smoke-mock \
+claude --plugin-dir /path/to/prompt-optimizer --plugin-dir /tmp/popt-smoke-mock \
   -p "model" --model haiku --no-session-persistence \
   --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
@@ -139,4 +136,4 @@ mock 방법: A(model.complete) 또는 B(HTTP + ANTHROPIC_BASE_URL) + 기동 명�
 기대와 다른 점:
 ```
 
-실패 항목은 옵티마이저 자체 결함, mock 환경 문제, CLI/Mod early-access 차이를 구분해 적고, 수정은 원 소유자 모듈로 되돌린다.
+실패 항목은 옵티마이저 자체 결함, mock 환경 문제, CLI 버전 간 Mod API 차이를 구분해 적고, 수정은 원 소유자 모듈로 되돌린다.

@@ -1,5 +1,7 @@
 # 설계: 프롬프트 옵티마이저 Mod (POPT-F94F A)
 
+> 참고(2026-10-05): Claude Code 2.1.287에서 Mods가 정식 기능이 되어 이 문서의 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` 플래그는 2.1.287 이상에서 필요 없다. 생성 선언은 여전히 EARLY ACCESS로 표기되어 API 계약은 버전 간 바뀔 수 있다.
+
 > 설계 에이전트(📐 A) 산출물 원문. 실험 파일은 /tmp/popt-f94f-mod-probe, /tmp/popt-f94f-runtime (저장소 외부).
 
 📐[POPT-F94F] A 설계 완료. **제출을 먼저 `drop`하고, 플러그인 자체 상태에서 개선 대화를 진행한 뒤 입력창에 복원하는 구조**를 권장합니다. 제품 저장소는 변경하지 않았습니다.

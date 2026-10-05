@@ -402,7 +402,7 @@ npm run check:package
 git diff --check
 ```
 
-`npm test`는 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .`, validate는 두 manifest에 대한 `claude plugin validate`다. typecheck는 CLI가 생성한 `.claude-plugin/types/`가 필요하다. 없으면 `scripts/check-types.mjs` 안내대로 권한 있는 로컬 로드로 생성하며 사내 타입을 복사하지 않는다. 기존 약 360개라는 수치는 배경 정보이고 최종 보고에서는 실제 실행 건수/exit code를 사용한다. B는 제품 테스트를 실행하지 않으며 구현 완료 후 O가 담당한다.
+`npm test`는 `claude plugin test .`, validate는 두 manifest에 대한 `claude plugin validate`다. typecheck는 CLI가 생성한 `.claude-plugin/types/`가 필요하다. 없으면 `scripts/check-types.mjs` 안내대로 권한 있는 로컬 로드로 생성하며 사내 타입을 복사하지 않는다. 기존 약 360개라는 수치는 배경 정보이고 최종 보고에서는 실제 실행 건수/exit code를 사용한다. B는 제품 테스트를 실행하지 않으며 구현 완료 후 O가 담당한다.
 
 C의 probe는 getter 형식/타이밍을 확인했으며, 변경된 plugin의 세 포트와 예정된 `clock.sleep` race까지 입증한 것은 아니다. O는 같은 격리 로컬 mock 방식으로 실제 plugin 로드와 `/model` 변경 → 다음 최적화 system 선택을 확인한다. API 과금 호출이 필요한 방식으로 대체하지 않는다. `clock.sleep`은 선언된 API이지만 새 호출 위치에서의 로더 허용 여부는 통합 테스트/실제 로드로 검증한다.
 
