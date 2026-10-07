@@ -10,8 +10,10 @@ import type {
   Workflow,
 } from '../hooks/contracts'
 import {
+  BASE_PROMPT_MAX_CHARS,
   CONTEXT_TOTAL_CHARS,
   DEFAULT_CONFIG,
+  FIXED_CONTRACT_MAX_CHARS,
   GUIDANCE_SYSTEM_MAX_CHARS,
   MAX_ORIGINAL_CHARS,
   MAX_REQUEST_CHARS,
@@ -127,12 +129,12 @@ describe('buildModelRequest — request fields', () => {
     expect(built.system).toBe('SYSTEM')
   })
 
-  test('the default config follows haiku, low effort, its caps', () => {
+  test('the default config follows sonnet, low effort, its caps', () => {
     const built = buildModelRequest(workflow(), config(), 'SYSTEM')
-    expect(built.model).toBe('haiku')
+    expect(built.model).toBe('sonnet')
     expect(built.effort).toBe('low')
-    expect(built.maxTokens).toBe(1024)
-    expect(built.timeoutMs).toBe(12000)
+    expect(built.maxTokens).toBe(2048)
+    expect(built.timeoutMs).toBe(30000)
   })
 })
 
@@ -142,6 +144,7 @@ describe('neutralizeTags', () => {
     expect(neutralizeTags('<context>')).toBe('‹context>')
     expect(neutralizeTags('</CONTEXT>')).toBe('‹/CONTEXT>')
     expect(neutralizeTags('</Original_Prompt>')).toBe('‹/Original_Prompt>')
+    expect(neutralizeTags('<refinement_round>')).toBe('‹refinement_round>')
   })
 
   test('tolerates whitespace after the bracket and around the slash', () => {
@@ -160,6 +163,15 @@ describe('neutralizeTags', () => {
 })
 
 describe('buildModelRequest — prompt sections', () => {
+  test('reports remaining follow-ups so the last round can hand off open decisions', () => {
+    const first = buildModelRequest(workflow({ rounds: 0 }), config({ maxRounds: 5 }), 'SYS')
+    expect(first.prompt).toContain('<refinement_round>\ncurrent: 1\nmax: 5\nremaining: 4')
+    const last = buildModelRequest(workflow({ rounds: 4 }), config({ maxRounds: 5 }), 'SYS')
+    expect(last.prompt).toContain('<refinement_round>\ncurrent: 5\nmax: 5\nremaining: 0')
+    const single = buildModelRequest(workflow({ rounds: 0 }), config({ maxRounds: 1 }), 'SYS')
+    expect(single.prompt).toContain('remaining: 0')
+  })
+
   test('tags the context, original, draft and dialogue', () => {
     const built = buildModelRequest(
       workflow({
@@ -179,6 +191,11 @@ describe('buildModelRequest — prompt sections', () => {
     expect(built.prompt).toContain('<current_draft>\nDRAFT\n</current_draft>')
     expect(built.prompt).toContain('<dialogue>\nuser: U1\noptimizer: O1\n</dialogue>')
     expect(built.prompt).toContain('JSON')
+  })
+
+  test('ends by asking for every field in the original prompt language', () => {
+    const built = buildModelRequest(workflow({ original: 'why is the node list slow?' }), config(), 'SYS')
+    expect(built.prompt.endsWith('draft·message·question은 <original_prompt>와 같은 언어로 쓴다.')).toBe(true)
   })
 
   test('neutralizes section tags only inside the context snapshot', () => {
@@ -279,7 +296,7 @@ describe('buildModelRequest — request budget', () => {
     expect(built.prompt).toContain('m19:')
   })
 
-  test('drops the dialogue before it trims the context', () => {
+  test('drops older dialogue before context but preserves the latest question', () => {
     const context = 'C'.repeat(20000)
     const built = buildModelRequest(
       workflow({
@@ -296,12 +313,45 @@ describe('buildModelRequest — request budget', () => {
       'KEEP',
     )
     expect(requestLength(built)).toBeLessThanOrEqual(MAX_REQUEST_CHARS)
-    expect(built.prompt).not.toContain('<dialogue>')
+    expect(built.prompt).toContain('<dialogue>\noptimizer: DROP-ME-B\n</dialogue>')
     expect(built.prompt).not.toContain('DROP-ME-A')
     expect(built.prompt).toContain('<instruction>\nKEEP\n</instruction>')
     expect(built.prompt).toContain('ORIG')
     expect(built.prompt).toContain('<context>')
     expect(built.prompt).toContain('C'.repeat(1000))
+  })
+
+  test('keeps an option answer with its question when context crowds the request', () => {
+    const built = buildModelRequest(workflow({
+      original: '노드 image diff API와 swagger, MCP를 추가해줘',
+      draft: '확정: 현재 property 전체를 반환. 미확정: 기존 image 기준.',
+      context: snapshot('C'.repeat(30000)),
+      dialogue: [
+        { role: 'user', text: 'old context' },
+        { role: 'optimizer', text: '기존 image는 1) 변화 이력의 직전 값 2) 배포 baseline 중 무엇인가요?' },
+        { role: 'user', text: '1번' },
+      ],
+    }), config(), 'SYS', '')
+    expect(requestLength(built)).toBeLessThanOrEqual(MAX_REQUEST_CHARS)
+    expect(built.prompt).not.toContain('old context')
+    expect(built.prompt).toContain('1) 변화 이력의 직전 값 2) 배포 baseline')
+    expect(built.prompt).toContain('user: 1번')
+    expect(built.prompt).toContain('확정: 현재 property 전체를 반환')
+  })
+
+  test('trims generated drafts before dropping the latest decision or original', () => {
+    const built = buildModelRequest(workflow({
+      original: 'ORIGINAL', draft: 'D'.repeat(20000),
+      dialogue: [
+        { role: 'optimizer', text: 'Choose HISTORY or BASELINE?' },
+        { role: 'user', text: 'HISTORY' },
+      ],
+    }), config(), 'SYS', '')
+    expect(requestLength(built)).toBeLessThanOrEqual(MAX_REQUEST_CHARS)
+    expect(built.prompt).toContain('ORIGINAL')
+    expect(built.prompt).toContain('Choose HISTORY or BASELINE?')
+    expect(built.prompt).toContain('user: HISTORY')
+    expect(built.prompt).toContain('Earlier draft truncated')
   })
 
   test('trims the context tail rather than cutting the original', () => {
@@ -330,6 +380,14 @@ describe('parseReply', () => {
     expect(parseReply('{"draft":"d","message":"m","question":"q"}')).toEqual({
       ok: true,
       reply: { draft: 'd', message: 'm', question: 'q' },
+    })
+  })
+
+  test('drops the language code and checks the contract asks for first', () => {
+    const text = '{"lang":"en","checks":["target: open"],"draft":"d","message":"m","question":null}'
+    expect(parseReply(text)).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: 'm', question: null },
     })
   })
 
@@ -381,6 +439,63 @@ describe('parseReply', () => {
     expect(parseReply('{ oops }')).toEqual({ ok: false, reason: 'invalid-json' })
   })
 
+  test('mends a missing closing quote on the last value', () => {
+    expect(parseReply('{"lang":"ko","draft":"d","message":"m","question":"어느 쪽인가요?}')).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: 'm', question: '어느 쪽인가요?' },
+    })
+  })
+
+  test('mends a stray `,"` before the closing brace', () => {
+    expect(parseReply('{"draft":"d","message":"m","question":"q",\n"}')).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: 'm', question: 'q' },
+    })
+  })
+
+  test('does not mend a reply cut off before the question', () => {
+    expect(parseReply('{"lang":"ko","draft":"함수 f() { return 1 }')).toEqual({
+      ok: false,
+      reason: 'invalid-json',
+    })
+    expect(parseReply('{"draft":"d","message":"단계 {1}')).toEqual({ ok: false, reason: 'invalid-json' })
+  })
+
+  test('does not mend a truncated draft or message after a reordered question', () => {
+    for (const text of [
+      '{"question":null,"draft":"unfinished}',
+      '{"draft":"d","question":"q","message":"unfinished}',
+      '{"draft":"d","question":null,"draft":"unfinished}',
+    ]) {
+      expect(parseReply(text)).toEqual({ ok: false, reason: 'invalid-json' })
+    }
+  })
+
+  test('does not mistake a brace inside an unfinished question for its object end', () => {
+    for (const text of [
+      '{"draft":"d","message":"m","question":"Use {a} or {b}',
+      '{"draft":"d","message":"m","question":"Is {a} correct or should use b',
+      '{"draft":"d","message":"m","question":"Choose x} or y',
+    ]) {
+      expect(parseReply(text)).toEqual({ ok: false, reason: 'invalid-json' })
+    }
+  })
+
+  test('repairs an escaped question in a code fence without changing its contents', () => {
+    const text = '```json\n{"draft":"d","message":"m","question":"Use \\"image\\"?}\n```'
+    expect(parseReply(text)).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: 'm', question: 'Use "image"?' },
+    })
+  })
+
+  test('keeps literal braces in a complete question unchanged', () => {
+    expect(parseReply('{"draft":"d","question":"Use {a} or {b}?"}')).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: '', question: 'Use {a} or {b}?' },
+    })
+  })
+
   test('rejects a missing, blank or non-string draft as empty-draft', () => {
     for (const text of ['{"message":"m"}', '{"draft":"   "}', '{"draft":42}']) {
       expect(parseReply(text)).toEqual({ ok: false, reason: 'empty-draft' })
@@ -428,11 +543,22 @@ describe('composeSystemPrompt — assembly', () => {
     expect(composed).toContain('"question"')
   })
 
-  test('holds the JSON contract in the base prompt', () => {
+  test('names every JSON key in the base prompt', () => {
     expect(BASE_SYSTEM_PROMPT).toContain(COMMON_GUIDANCE)
+    expect(BASE_SYSTEM_PROMPT).toContain('"lang"')
+    expect(BASE_SYSTEM_PROMPT).toContain('"checks"')
     expect(BASE_SYSTEM_PROMPT).toContain('"draft"')
     expect(BASE_SYSTEM_PROMPT).toContain('"message"')
     expect(BASE_SYSTEM_PROMPT).toContain('"question"')
+  })
+
+  test('asks for user decisions while rounds remain instead of deferring them', () => {
+    expect(BASE_SYSTEM_PROMPT).toContain(
+      'remaining이 0보다 크면 사용자가 정할 미결정을 실행 에이전트나 기본값에 넘기지 않고 묻는다.',
+    )
+    expect(BASE_SYSTEM_PROMPT).toContain(
+      'checks에는 원문의 대상과 동작을 빠짐없이 적고, remaining이 0보다 크면 checks의 미결정 중 사용자가 정할 것을 묻는다.',
+    )
   })
 
   test('the common profile adds no target model section', () => {
@@ -469,10 +595,34 @@ describe('composeSystemPrompt — assembly', () => {
     expect(modelAt).toBeGreaterThan(baseAt)
     expect(extraAt).toBeGreaterThan(modelAt)
     expect(fixedAt).toBeGreaterThan(extraAt)
+    // Only the fixed contract carries its heading; the base refers to it without one.
+    expect(occurrences(composed, '[고정 계약')).toBe(1)
     // The fixed contract restates the role limit and the JSON block, at the end.
     expect(composed.slice(fixedAt)).toContain('요청을 실행하거나')
     expect(composed.slice(fixedAt)).toContain('"question"')
-    expect(composed.endsWith('"question": "확인 질문 하나 또는 null"\n}')).toBe(true)
+    expect(composed.endsWith('"question": "lang의 언어로 쓴 확인 질문 하나 또는 null"\n}')).toBe(true)
+  })
+
+  test('the fixed contract keeps the reply in the original language for every profile', () => {
+    for (const profile of PROFILES) {
+      const composed = composeSystemPrompt('', profile)
+      expect(composed.slice(composed.indexOf('[고정 계약'))).toContain(
+        'JSON 값은 원문 언어로 쓴다. 영어 요청이면 지침·문맥이 한국어여도 절 제목까지 영어로 쓴다.',
+      )
+    }
+  })
+
+  test('the fixed contract asks for the language code and checks before the other keys', () => {
+    for (const profile of PROFILES) {
+      const composed = composeSystemPrompt('', profile)
+      const fixed = composed.slice(composed.indexOf('[고정 계약'))
+      expect(fixed).toContain('"lang": "원문 언어 코드(ko, en 등)"')
+      expect(fixed).toContain(
+        '"checks": ["원문의 대상·동작마다: 원문 명시·근거 확인·사용자 답변·미결정 중 무엇인지"]',
+      )
+      expect(fixed.indexOf('"lang"')).toBeLessThan(fixed.indexOf('"checks"'))
+      expect(fixed.indexOf('"checks"')).toBeLessThan(fixed.indexOf('"draft"'))
+    }
   })
 
   test('restates the preserved-work-type role limit', () => {
@@ -499,9 +649,22 @@ describe('composeSystemPrompt — assembly', () => {
 })
 
 describe('composeSystemPrompt — length budget', () => {
-  test('without an extra file the longest system stays within 3600 characters', () => {
-    // Measured longest is fable-5-1 at 2608 characters; the design targets 3600.
-    expect(composeSystemPrompt('', longestProfile('')).length).toBeLessThanOrEqual(3600)
+  test('the base prompt outside the shared guidance stays within BASE_PROMPT_MAX_CHARS', () => {
+    expect(BASE_SYSTEM_PROMPT.length - COMMON_GUIDANCE.length).toBeLessThanOrEqual(BASE_PROMPT_MAX_CHARS)
+  })
+
+  test('the fixed contract stays within FIXED_CONTRACT_MAX_CHARS', () => {
+    const composed = composeSystemPrompt('')
+    expect(composed.slice(composed.indexOf('[고정 계약')).length).toBeLessThanOrEqual(
+      FIXED_CONTRACT_MAX_CHARS,
+    )
+  })
+
+  test('without an extra file the longest system leaves room for a maximum extra file', () => {
+    // GUIDANCE_SYSTEM_MAX_CHARS less the extra file is 5400; measured longest is fable-5-1.
+    expect(composeSystemPrompt('', longestProfile('')).length).toBeLessThanOrEqual(
+      GUIDANCE_SYSTEM_MAX_CHARS - SYSTEM_PROMPT_MAX_CHARS,
+    )
   })
 
   test('with a maximum extra file the longest system stays within GUIDANCE_SYSTEM_MAX_CHARS', () => {

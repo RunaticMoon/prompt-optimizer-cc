@@ -318,7 +318,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       }
       let context: ContextSnapshot | null = null
       try {
-        context = await collectContext(ports, config, memory)
+        context = await collectContext(ports, config, memory, workflow.original)
       } catch {
         context = null
       }
@@ -406,6 +406,21 @@ export function createController(deps: ControllerDeps): OptimizerController {
     const stale = isStale(state, workflowId, generation)
 
     if (result.kind === 'ok') {
+      // There is no follow-up completion at the limit. Keep a model's stray
+      // question in the handoff instead of inviting an answer we cannot use.
+      if (current.rounds + 1 >= config.maxRounds && result.reply.question !== null) {
+        const heading = /[가-힣]/.test(result.reply.draft)
+          ? '미확정 사항 (구현 전 확인)'
+          : 'Open decision (resolve before implementation)'
+        result = {
+          ...result,
+          reply: {
+            ...result.reply,
+            draft: `${result.reply.draft}\n\n${heading}:\n${result.reply.question}`,
+            question: null,
+          },
+        }
+      }
       apply({ type: 'reply', workflowId, generation, reply: result.reply, usage: result.usage })
       if (stale) return
       const question = result.reply.question

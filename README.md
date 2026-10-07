@@ -15,12 +15,18 @@
 3. 같은 제출 훅 안에서 패인을 열거나(사용자의 키 입력 안에서 열어야 좁은 터미널에도 배치된다) 입력창 대화 모드를 고른다(`hooks/register.ts`의 `chooseUi`).
 4. 제출 훅은 모델을 기다리지 않고 `{ drop: '프롬프트를 다듬는 중입니다.' }`를 반환한다. 원문은 메인 모델로 가지 않는다.
 5. `$.clock.after(1, ...)`로 예약된 작업이 문맥을 한 번 읽고(`hooks/context.ts`) `$.model.complete`를 한 번 호출한다(`hooks/model.ts`).
-6. 사용자가 패인/입력창에서 보완하면 라운드가 하나씩 추가된다(기본 최대 3회).
+6. 사용자가 패인/입력창에서 질문에 답하거나 보완하면 라운드가 하나씩 추가된다(최초 생성을 포함해 기본 최대 5회).
 7. "입력창에 넣기"로 개선안을 `prompt.fill`하고 일회용 bypass를 발급한다. 사용자가 편집하고 Enter를 누르면 그 초안만 가로채기를 통과해 메인 세션으로 간다.
 
 **무엇을 다듬는가**
 
-옵티마이저는 요청을 유형으로 구분해 다듬는다. 변경은 요청한 변경과 확인 결과, 진단은 원인·근거·미확인 사항, 조사는 출처 있는 답, 글쓰기는 지정한 형식의 글을 결과물로 삼고, 긴 산출물 요구도 함께 확인한다. 문제 설명·질문·아이디어·계획에는 변경 요청이 없으면 진단으로 다뤄 원인과 근거만 보고하고 수정하지 않으며, 명시적 수정 요청은 변경으로 유지한다. 목표 하나와 간단한 결과물만 있는 짧고 명확한 요청은 자연스러운 문장으로 유지하고, 여러 조건·입력·단계가 있거나 긴 산출물을 요구하면 목표/맥락/범위/완료 기준 네 필드로 정리한다. 메인 세션 모델에 맞춘 추가 지침은 5.4에서 설명한다.
+옵티마이저는 문장 교정에 그치지 않고 구현·검증 가능한 요구사항을 만들도록 설계되어 있다. 먼저 원문과 최근 대화, 읽기 전용으로 수집한 저장소 근거에서 확인된 사실을 찾는다. 결과·범위·계약을 크게 바꾸는 결정이 남으면, 뒤의 결정을 좌우하는 질문부터 **라운드당 하나씩** 묻는다. 가능한 경우 선택지 2–3개와 추천·이유를 제시하며, 사용자가 답하면 합의한 선택을 초안에 누적한다. 추천이나 이전 초안의 가정을 사용자 동의로 취급하지 않는다. 원문이 여러 대상·동작으로 읽히거나 용어집 정의와 다른 뜻일 수 있으면 그 해석도 사용자 결정으로 보고 묻는다. 라운드가 남아 있으면 사용자가 정할 결정을 실행 에이전트나 기본값으로 넘기지 않으므로, 복합 요청에서는 질문이 여러 라운드 이어질 수 있다. 언제든 현재 초안을 입력창에 넣어 보낼 수 있다.
+
+복합 요청은 필요한 만큼 **목표 / 근거·맥락 / 합의된 결정 / 범위·계약 / 완료 기준 / 미결정**으로 정리한다. 입력·출력, 실패·경계 사례, 일관된 도메인 용어와 중요한 결정의 이유를 구체화한다. 미결정은 사용자 답변이나 근거로 해결될 때까지 남기며 추천안을 합의로 확정하지 않는다. 단순하고 명확한 요청은 짧게 유지하며, 진단·조사·계획·글쓰기를 실행 요청으로 바꾸지 않는다. 진단·조사에는 증상·환경 인터뷰를 붙이지 않고, 사용자만 아는 사실이 조사 대상 자체를 바꿀 때만 묻는다. 메인 세션도 받는 프로젝트 규칙(`CLAUDE.md` 등)은 별도 절이나 목록으로 옮기지 않으며, 특정 결정을 막거나 바꾸는 규칙만 그 결정의 근거로 한 번 언급한다. 마지막 허용 라운드에는 추가 질문 없이 남은 미결정을 초안에 표시한다. 메인 세션 모델에 맞춘 추가 지침은 5.4에서 설명한다.
+
+예를 들어 `노드별 현재 property와 기존 image와의 diff를 반환하는 API, 내부 swagger와 MCP를 추가해줘`라면 “기존 image”가 변화 이력의 직전 이미지인지, 배포 기준 이미지인지에 따라 계약이 달라진다. 용어집에 정의가 있어도 사용자가 확인하기 전에는 합의로 쓰지 않고 이 기준을 먼저 묻는다. 이어서 property도 diff 대상인지 같은 남은 의미를 묻고 노출 범위를 구체화한다. “내부 swagger”도 OpenAPI 문서와 Swagger UI 중 어느 범위인지 구분한다. 실제로 읽지 않은 경로·명령을 꾸며 넣거나 Swagger UI를 임의로 제외하지 않는다.
+
+이 과정은 제한된 문맥을 사용하는 프롬프트 편집이다. 저장소 전체를 탐색하는 실행 에이전트는 아니며, API 구현이나 용어집·ADR 파일 생성은 하지 않는다. 남은 저장소 확인 사항은 후속 작업이 확인할 대상과 목적으로 초안에 남긴다.
 
 **메인 세션과 분리되는 이유와 방식**
 
@@ -216,10 +222,10 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 | `triggerPrefix` | string | `?? ` | 비어 있으면 prefix 모드에서 기본값으로 복귀 | prefix 모드 트리거 접두어 |
 | `rawPrefix` | string | `>> ` | — | 맨 앞에 타이핑하면 옵티마이저 끔 모드를 켜는 문자열(빈 문자열이면 모드 끔) |
 | `uiMode` | string | `auto` | `auto` \| `pane` \| `composer` | `auto`·`pane`은 패인을 시도하고 배치되지 않으면 입력창 대화로 폴백, `composer`는 항상 입력창 |
-| `model` | string | `haiku` | 비어 있지 않은 문자열 | 옵티마이저 완성에 쓸 모델 별칭/ID |
-| `maxTokens` | number | `1024` | 128–2048 | 한 번의 완성 출력 상한 |
-| `timeoutMs` | number | `12000` | 1000–30000 | 한 번의 완성 시간 제한(ms) |
-| `maxRounds` | number | `3` | 1–5 | 한 작업에서 허용하는 최대 완성 횟수 |
+| `model` | string | `sonnet` | 비어 있지 않은 문자열 | 옵티마이저 완성에 쓸 모델 별칭/ID |
+| `maxTokens` | number | `2048` | 128–2048 | 한 번의 완성 출력 상한 |
+| `timeoutMs` | number | `30000` | 1000–30000 | 한 번의 완성 시간 제한(ms) |
+| `maxRounds` | number | `5` | 1–5 | 최초 생성을 포함한 한 작업의 최대 완성 횟수 |
 | `contextTurns` | number | `4` | 0–8 | 문맥에 넣을 최근 사용자 턴 수 |
 | `contextMaxChars` | number | `6000` | 0–8000 | 문맥 스냅샷 문자 예산 |
 | `systemPromptFile` | string | `""`(없음) | — | 추가 시스템 지침 파일. 비면 내장 프롬프트 유지 |
@@ -273,11 +279,11 @@ prompt-optimizer.memoryContext
 
 ### 5.4 모델별 프롬프팅 가이드
 
-옵티마이저가 만드는 것은 **메인 세션 모델에게 보낼 사용자 메시지**이고, 설정 `model`(기본 `haiku`)은 그 메시지를 편집하는 별도 모델이다. 두 모델을 혼동하지 않도록 status는 옵티마이저 자신의 모델을 `옵티마이저 모델:`로 표시한다.
+옵티마이저가 만드는 것은 **메인 세션 모델에게 보낼 사용자 메시지**이고, 설정 `model`(기본 `sonnet`)은 그 메시지를 편집하는 별도 모델이다. 두 모델을 혼동하지 않도록 status는 옵티마이저 자신의 모델을 `옵티마이저 모델:`로 표시한다.
 
 - **매 최적화마다 다시 읽는다.** 첫 호출·재시도·보완(`retry`/`refine`) 등 매 라운드의 요청 조립 직전에 `$.session.model()`로 메인 세션 모델을 읽어, 그 모델의 짧은 추가 지침을 옵티마이저 시스템 프롬프트에 넣는다. `/model`로 바꾸면 다음 최적화부터 새 모델이 반영된다. 이미 입력창에 채운 초안은 자동으로 다시 쓰지 않는다.
 - **500ms 안에 읽지 못하거나 실패하면** 공통 지침만 적용하고 최적화는 그대로 진행한다. timeout·rejection·동기 예외·빈 값·포트 누락은 모두 공통으로 폴백하며 최적화 실패·기존 모델 설정 변경으로 이어지지 않는다.
-- **옵티마이저 자신의 모델과 effort는 바뀌지 않는다.** `model`(기본 `haiku`)과 effort `low`는 그대로이고 `/optimize model`은 옵티마이저 모델만 바꾼다. 메인 대화·메인 모델 설정도 건드리지 않는다. effort 기반 분기는 없다(플러그인이 현재 effort를 읽을 수 없다).
+- **옵티마이저 자신의 모델과 effort는 바뀌지 않는다.** `model`(기본 `sonnet`)과 effort `low`는 그대로이고 `/optimize model`은 옵티마이저 모델만 바꾼다. 메인 대화·메인 모델 설정도 건드리지 않는다. effort 기반 분기는 없다(플러그인이 현재 effort를 읽을 수 없다).
 - **요청 문구로 효과가 있는 내용만 증류한다.** effort·thinking·max_tokens 같은 API/하네스 설정은 지침에서 제외하고, 요청의 목표·범위·완료 조건으로 표현되는 부분만 담는다.
 
 **지원 모델**
@@ -332,17 +338,23 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 
 - [Anthropic 프롬프팅 모범 사례](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/claude-prompting-best-practices)(영문판은 `/docs/en/...`)와 모델별 페이지(Fable·Opus·Sonnet)의 권고를 요청 문구로 증류했다. 실행 중 원문을 내려받지 않고 저장소에도 포함하지 않는다.
 - 요청 분류, 목표/맥락/범위/완료 기준 네 필드 구조, 지시어 해소 아이디어는 [oh-my-fable](https://github.com/Junhan2/oh-my-fable)(MIT)의 `fable-prompt` 스킬을 참고했다. 그 스킬의 "개선 후 실행" 절차와 블록 원문 복사 규칙은 채택하지 않는다.
+- 요구사항 질문은 [grill-me](https://github.com/mattpocock/skills/blob/main/skills/productivity/grill-me/SKILL.md), [grill-with-docs](https://github.com/mattpocock/skills/blob/main/skills/engineering/grill-with-docs/SKILL.md), [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)의 결정 의존성과 사실·사용자 결정 구분을 참고했다. 여러 질문·서브에이전트 탐색 대신 기존 UI의 한 질문과 제한된 읽기 전용 스냅샷으로 적용한다.
+- 용어와 결정 이유는 [domain-modeling](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md), [ADR 형식](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/ADR-FORMAT.md), [용어집 형식](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/GLOSSARY-FORMAT.md)을 참고했다. 합의된 용어·중요한 절충을 초안에 담으며, 해당 스킬을 실행하거나 문서 파일을 자동 생성하지 않는다.
 
 ## 6. 비용·프라이버시
 
-- **호출 수**: 라운드당 정확히 `$.model.complete` 1회. 작업당 최대 `maxRounds`(기본 3)회. 자동 재시도·상위 모델 폴백·fork는 없다.
+- **호출 수**: 라운드당 정확히 `$.model.complete` 1회. 작업당 최대 `maxRounds`(기본 5)회. 자동 재시도·상위 모델 폴백·fork는 없다.
   - 단, 플러그인이 1회 호출해도 **엔진의 API 클라이언트가 5xx 오류에서 같은 요청을 자체 재시도**할 수 있다. 로컬 mock API 검증(2.1.285)에서 HTTP 500 한 번에 요청 3건(최초 1 + 재시도 2)이 관찰됐다. `$.model.complete`에는 재시도 옵션이 없어 플러그인에서 끌 수 없다. 같은 검증에서 응답 지연(15초)은 `timeoutMs`(12초) 뒤 중단되고 원문이 복원됐다. 재시도가 타임아웃 안에 포함되는지는 확인하지 않았다.
-- **기본 파라미터**: 모델 `haiku`, effort `low`(고정), `maxTokens 1024`, `timeoutMs 12000`.
-- **요청 구성**: `<context>` + `<original_prompt>` + (있으면) `<current_draft>` + `<dialogue>` + `<instruction>` + JSON 출력 지시. 전체 프롬프트+시스템이 16000자(`MAX_REQUEST_CHARS`)를 넘으면 오래된 대화부터 버리고, 그래도 넘으면 문맥을 뒤에서 자른다. 원문은 자르지 않는다.
-- **문맥 상한**: 최근 `contextTurns`(기본 4)개 사용자 턴에서 최신 우선으로 최대 8개 메시지·4000자, 메시지당 1200자(중간 `[중략]`), 프로젝트 규칙 1200자, cwd/repo 400자, 도구 이름 400자, 장기 기억 2000자(`CONTEXT_MEMORY_CHARS`), 전체 6000자(`contextMaxChars` 기본). 전체 예산을 넘으면 오래된 대화 줄부터 빠지므로, 기억 섹션이 있으면 그 2000자만큼 대화 몫이 줄어든다. 규칙 파일은 `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `cwd/CLAUDE.md` 후보만 읽고, 256 KiB를 넘으면 건너뛴다.
-- **도구 결과·파일 전체·이미지 transcript는 보내지 않는다.** 도구는 이름 메타데이터만 문맥에 들어간다.
+- **기본 파라미터**: 모델 `sonnet`, effort `low`(고정), `maxTokens 2048`, `timeoutMs 30000`. 요구사항 초안과 질문을 담도록 출력·시간·라운드 기본 한도를 늘렸다. 기존에 저장한 설정값은 유지된다. 0.4.x 기본값을 유지하려면 `/config`에서 `prompt-optimizer.model=haiku`, `maxTokens=1024`, `timeoutMs=12000`, `maxRounds=3`을 명시한다.
+  - 실모델 의미 평가(`docs/smoke.md` §2.2)에서 `haiku`는 저장소에서 찾을 사실을 사용자에게 묻거나 근거 없는 호출 위치를 만들고, 마지막 회차에도 질문을 남겨 기본 모델을 `sonnet`으로 올렸다. `sonnet`은 라운드당 응답이 더 느리고(현재 지침의 평가 중앙값 약 11초, 최대 약 16초) 출력 토큰과 비용이 더 크다. 응답 JSON은 초안 앞에 원문 언어(`lang`)와 원문의 대상·동작별 확인 목록(`checks`)을 먼저 적게 해 정확도를 높이며, 이 두 값은 쓰지 않고 버리지만 출력 토큰에는 포함된다. 속도·비용을 우선하면 `/optimize model haiku`로 바꾼다.
+- **요청 구성**: `<context>` + `<original_prompt>` + (있으면) `<current_draft>` + `<dialogue>` + `<instruction>` + `<refinement_round>` + JSON 출력 지시. 전체 프롬프트+시스템이 18000자(`MAX_REQUEST_CHARS`)를 넘으면 오래된 대화, 문맥 끝, 이전 생성 초안 순으로 줄인다. 원문과 최신 질문·답변은 보존하며, 보존할 사용자 입력 자체가 크면 예산을 초과할 수 있다.
+- **시스템 지침 상한**: 공통 지침 2400자, 모델별 추가 지침 800자, 공통 지침을 제외한 기본 프롬프트 1300자, 고정 계약 700자, 제목·구분자 200자로 추가 파일 없는 시스템은 최대 5400자다. 추가 지침 파일 최대 4000자를 합쳐 전체 시스템 상한은 9400자(`GUIDANCE_SYSTEM_MAX_CHARS`)다. 요구사항 구체화 지침을 담도록 문자 예산을 늘렸으며, effort `low`와 현재 모델 호출·감지 타임아웃은 그대로다.
+- **문맥 상한**: 최근 `contextTurns`(기본 4)개 사용자 턴에서 최신 우선으로 최대 8개 메시지·4000자, 메시지당 1200자(중간 `[중략]`), 프로젝트 규칙 1200자, cwd/repo 400자, 도구 이름 400자, 장기 기억 2000자(`CONTEXT_MEMORY_CHARS`), 전체 6000자(`contextMaxChars` 기본). 전체 예산을 넘으면 오래된 대화부터 줄인다. 저장소 근거가 있으면 공간이 허용하는 범위에서 최근 메시지 최대 2개(각 500자)를 보존하고, 규칙·저장소 근거 뒤의 기억·도구 등을 줄인다. 규칙 파일은 `root/CLAUDE.md`, `root/.claude/CLAUDE.md`, `root/AGENTS.md`, `cwd/CLAUDE.md`, `cwd/AGENTS.md` 후보만 읽고, 256 KiB를 넘으면 건너뛴다.
+- **저장소 근거**: 원문과 관련된 소스·문서, 용어집·ADR·패키지 스크립트 등에서 최대 3000자의 경로 포함 발췌를 문맥에 넣는다. `$.fs.list/stat/read`를 사용하며 전체 `contextMaxChars` 예산 안에 포함된다. 지원하지 않는 호스트나 읽기 실패에서는 가용 문맥으로 계속한다. 스냅샷은 작업당 한 번 수집하므로 후속 답변에 맞춘 재탐색은 하지 않는다.
+  - 최대 24개 디렉터리·18개 파일, 파일당 64 KiB·합계 256 KiB 안에서 읽는다. 숨김·의존성·빌드 디렉터리, 민감한 이름의 파일, 심볼릭 링크와 프로젝트 밖 경로를 제외한다. `contextMaxChars=0`이면 저장소 근거도 수집하지 않는다. 부분 발췌이므로 찾지 못한 기능이 없다고 단정하지 않는다.
+- **도구 결과·이미지 transcript는 보내지 않는다.** 최근 도구는 이름만 포함한다. 선택한 저장소 파일의 내용은 위 근거 예산 안에서 옵티마이저 모델 요청에 포함된다.
 - **문맥을 요약하는 별도 모델 호출은 없다.**
-- **장기 기억 문맥**: `memoryContext`가 켜져 있으면(기본) settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 주입한 장기 기억(`additionalContext`)이 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)으로 옵티마이저 모델(기본 `haiku`) 요청에 포함된다. 이 섹션은 옵티마이저 모델 요청에만 들어가고 별도 모델 호출을 늘리지 않는다. 끄려면 `memoryContext`를 false로 둔다.
+- **장기 기억 문맥**: `memoryContext`가 켜져 있으면(기본) settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 주입한 장기 기억(`additionalContext`)이 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)으로 옵티마이저 모델(기본 `sonnet`) 요청에 포함된다. 이 섹션은 옵티마이저 모델 요청에만 들어가고 별도 모델 호출을 늘리지 않는다. 끄려면 `memoryContext`를 false로 둔다.
 - **디스크 저장 없음(플러그인 상태)**: 프롬프트·문맥·대화·bypass·사용량은 플러그인 메모리에만 있고, 플러그인이 파일이나 `$.store`에 쓰지 않는다.
 - **composer 알림의 transcript 행**: composer(입력창 대화) 모드에서는 개선안·옵티마이저 메시지·오류·알림을 `$.ui.log` 알림으로 내보내므로, 호스트가 이를 세션 transcript 파일에 알림 행으로 기록할 수 있다. 이는 메인 모델 입력으로 전송되는 대화가 아니며, 패인 모드는 `$.ui.log` 대신 `$.ui.invalidate`/`$.ui.toast`만 써서 로컬 상태만 사용한다(`hooks/ui/present.ts`).
 - **금액 표시 없음**: 토큰 사용량만 보여준다(패인 헤더 합계, `/optimize status`의 세션 합계). 가격표는 고정하지 않는다. 취소 응답의 0은 "반환된 사용량"이며 공급자 최종 청구액 0을 보장하지 않는다.

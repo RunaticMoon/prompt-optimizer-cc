@@ -580,6 +580,44 @@ describe('clearRawMode and startExplicit', () => {
 })
 
 describe('refine — the improvement dialogue', () => {
+  test('carries the image baseline question and answer into a standalone requirements draft', async () => {
+    const original = '노드별 현재 property와 기존 image의 diff API, 내부 swagger와 MCP를 추가해줘'
+    const firstDraft = '목표: 노드별 property와 image diff를 API·문서·MCP에 제공. 미결정: 비교 기준.'
+    const question = '기존 image는 1) 변화 이력의 직전 값 2) 배포 기준 중 무엇인가요?'
+    const finalDraft = '목표: 노드별 property와 image diff 제공. 합의: 변화 이력의 직전 값과 비교. 완료 기준: API·문서·MCP 응답 일치. 미결정: 이력 없음 처리.'
+    const h = harness({ complete: async (_request, _signal, call) => call === 1
+      ? answered(firstDraft, '비교 기준을 구체화합니다.', question)
+      : answered(finalDraft, '직전 이력 기준을 반영했습니다.') })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'composer')
+    await h.flush()
+    await h.controller.refine(h.ports, '1번')
+
+    expect(h.completes[1]?.prompt).toContain(question)
+    expect(h.completes[1]?.prompt).toContain('user: 1번')
+    expect(h.completes[1]?.prompt).toContain(firstDraft)
+    expect(h.controller.getState().workflow?.draft).toBe(finalDraft)
+    expect(h.calls.submit).toBe(0)
+    expect(h.calls.fork).toBe(0)
+  })
+
+  test('keeps a last-round question as an open decision without inviting an unusable answer', async () => {
+    const h = harness({
+      config: { maxRounds: 1 },
+      complete: async () => answered('노드 image diff API를 추가해주세요.', '초안 작성', '비교 기준은 무엇인가요?'),
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('image diff API 추가'), 'composer')
+    await h.flush()
+
+    expect(h.completes[0]?.prompt).toContain('remaining: 0')
+    expect(h.controller.getState().workflow?.draft).toContain('미확정 사항 (구현 전 확인):\n비교 기준은 무엇인가요?')
+    expect(h.notices).not.toContain('질문: 비교 기준은 무엇인가요?')
+    await h.controller.refine(h.ports, '직전 이력')
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.submit).toBe(0)
+  })
+
   test('collects context once and completes once per round, keeping the transcript intact', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')

@@ -16,13 +16,9 @@ const PROFILES: readonly GuidanceProfile[] = [
   'sonnet-5',
 ]
 
-/**
- * The first line of each `text` fence in DESIGN-model-guidance §4, copied
- * exactly. Compared verbatim so a transcription that drops or reflows the
- * opening line fails even though the length cap still passes.
- */
-const DESIGN_FIRST_LINE: Record<GuidanceProfile, string> = {
-  common: '[요청 편집 지침]',
+/** Stable headings for the shared refinement policy and original profile add-ons. */
+const GUIDANCE_FIRST_LINE: Record<GuidanceProfile, string> = {
+  common: '[요구사항 구체화 지침]',
   'fable-5-1':
     '- 글쓰기 요청에는 꾸민 비유와 상투어 대신 뜻을 직접 전달하는 문장을 원한다는 조건을 필요할 때 짧게 반영한다. 사용자가 지정한 문체는 유지한다.',
   'fable-5':
@@ -69,6 +65,50 @@ describe('model guidance data', () => {
     expect(COMMON_GUIDANCE.length).toBeLessThanOrEqual(COMMON_GUIDANCE_MAX_CHARS)
   })
 
+  test('common policy refines decisions, evidence, and verifiable behavior', () => {
+    // These are policy contracts: losing them regresses the optimizer to a
+    // polite paraphraser or lets it settle consequential choices without input.
+    for (const rule of [
+      '문장 교정에 그치지 말고',
+      '결정 간 의존성',
+      '제공된 코드·문서·대화에서 답을 먼저 찾고',
+      '사용자에게 코드 위치나 저장소에서 찾을 사실을 대신 조사하게 하지 않는다',
+      '가장 중요한 질문 하나만',
+      '한 질문에 여러 결정을 묶지 않는다',
+      '추천은 확정된 선택이 아니다',
+      '합의된 선택과 이유를 draft에 누적',
+      '관련 요구사항·미결정의 우선순위를 다시 계산',
+      '기존 초안의 가정은 사실이나 사용자 동의가 아니다',
+      '입력·출력·오류·상태 변화·경계 사례',
+      '같은 개념에 같은 이름',
+      '용어집·ADR 파일 생성을 자동 요구하지 않는다',
+      '관찰 가능한 동작·결과',
+      '단순하고 명확한 요청은 짧게 유지한다',
+    ]) {
+      expect(COMMON_GUIDANCE).toContain(rule)
+    }
+  })
+
+  test('common policy asks before settling an interpretation of the original', () => {
+    // A glossary entry or one reading of the request is not a user decision:
+    // recording it as agreed drops part of what the user asked for.
+    for (const rule of [
+      '원문의 해석은 사실이 아니라 사용자 결정이며 용어집·문서 정의는 추천 근거로만 쓴다',
+      '합의된 결정에는 사용자가 답했거나 원문이 명시한 것만 적는다',
+      '둘 이상으로 읽히면 명시된 것이 아니므로 묻는다',
+      '언급된 대상을 빼는 일도 묻는다',
+    ]) {
+      expect(COMMON_GUIDANCE).toContain(rule)
+    }
+  })
+
+  test('common policy keeps project rules out of the draft except decision evidence', () => {
+    expect(COMMON_GUIDANCE).toContain(
+      '실행 에이전트도 Project rules를 받으므로 draft에 규칙 절이나 목록으로 옮기지 않는다',
+    )
+    expect(COMMON_GUIDANCE).toContain('특정 결정을 막거나 바꾸는 규칙만 그 결정의 근거로 한 번 언급한다')
+  })
+
   test('each model-specific block is non-empty and within its cap', () => {
     for (const profile of PROFILES) {
       if (profile === 'common') continue
@@ -105,9 +145,9 @@ describe('model guidance data', () => {
   })
 
   for (const profile of PROFILES) {
-    test(`${profile} matches the design's opening line and a body phrase`, () => {
+    test(`${profile} preserves its opening line and a distinctive body phrase`, () => {
       const text = profile === 'common' ? COMMON_GUIDANCE : MODEL_GUIDANCE[profile]
-      expect(text.split('\n')[0]).toBe(DESIGN_FIRST_LINE[profile])
+      expect(text.split('\n')[0]).toBe(GUIDANCE_FIRST_LINE[profile])
       expect(text).toContain(DESIGN_PHRASE[profile])
     })
   }

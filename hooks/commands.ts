@@ -332,8 +332,9 @@ function portsOf($: EngineInterface): EnginePorts {
     },
     clock: { sleep: (ms, options) => $.clock.sleep(ms, options) },
     fs: {
-      stat: path => $.fs.stat(path),
+      stat: (path, options) => $.fs.stat(path, options),
       read: ((path: string) => $.fs.read(path)) as unknown as EnginePorts['fs']['read'],
+      list: path => $.fs.list(path),
     },
     // The loader wants a literal env name; `HOME` is the only one read.
     env: { get: () => $.env.get('HOME') },
