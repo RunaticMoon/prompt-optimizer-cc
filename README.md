@@ -39,12 +39,12 @@
 
 | 항목 | 값 | 근거 |
 |---|---|---|
-| Claude Code | 2.1.287 이상 (2.1.292 이상 권장) | Mod가 정식이 된 2.1.287 이상이면 플래그 없이 동작한다. 이 저장소에서 검증·타입 생성에 사용한 버전: `2.1.292`. 바로 전송을 사용자 본인의 말로 보내는 `asUser`는 2.1.286에서 확인했다. 그보다 낮은 버전에서 바로 전송에 "plugin sent a message" 틀이 붙으면 CLI를 업데이트한다. |
+| Claude Code | 2.1.287 이상 (2.1.290 이상 권장) | Mod가 정식이 된 2.1.287 이상이면 플래그 없이 동작한다. 이 저장소에서 검증·타입 생성에 사용한 버전: `2.1.292`. 바로 전송을 사용자 본인의 말로 보내는 `asUser`는 2.1.286에서 확인했다. 그보다 낮은 버전에서 바로 전송에 "plugin sent a message" 틀이 붙으면 CLI를 업데이트한다. |
 | Mod(함수 훅) 지원 | 정식 기능 (2.1.287 이상) | 2.1.287에서 정식이 되었고 환경 변수 없이 켜진다 |
 | 레거시 환경 변수 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | 2.1.287 이상에서는 불필요. 2.1.285–2.1.286에서만 훅 모듈을 켜기 위해 필요 |
 | 개발용 | Node.js + npm | `scripts/*.mjs`, `claude plugin test` 실행에 필요 |
 
-2.1.292 이상을 권장한다. 긴 한글(비라틴) 다줄 텍스트를 그리는 패인·밴드의 재그리기 지연과, 다시 그릴 때마다 높이가 바뀌는 트리의 무한 재그리기가 2.1.292에서 수정되었다.
+2.1.290 이상을 권장한다. 긴 한글(비라틴) 다줄 텍스트를 그리는 패인·밴드의 재그리기 지연과, 다시 그릴 때마다 높이가 바뀌는 트리의 무한 재그리기가 2.1.290에서 수정되었다. 이 저장소의 검증·타입 생성 기준은 2.1.292다.
 
 Mod 기능 자체는 2.1.287에서 정식이 되었지만, CLI가 생성하는 선언은 여전히 "EARLY ACCESS: this surface may change between releases without notice"라고 표기하므로 계약이 바뀔 수 있다. 실제로 2.1.277 → 2.1.285 사이에 `model.complete` 반환형이 바뀌었다(`docs/DESIGN.md`). CLI를 올릴 때마다 타입을 다시 생성하고 `npm run typecheck`로 확인한다.
 
@@ -380,7 +380,7 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 - **모델별 지침의 실제 효과는 미검증**: 지침이 실제 모델 응답의 품질을 높이는지는 모델 응답에 달려 있다. 이 저장소에는 자동 품질 평가가 없고, 테스트는 정규화·선택·조립 계약만 보장한다(5.4).
 - **모델 감지 500ms 제한**: 메인 세션 모델 조회는 500ms(`TARGET_MODEL_TIMEOUT_MS`) 안에 끝나야 한다. 넘으면 그 라운드는 공통 지침만 쓰고 최적화는 계속된다. `/optimize status`의 `마지막 최적화 대상`은 마지막으로 실제 보낸 요청 기준이며 조회 시점의 현재 모델이 아니다.
 - **provider별 모델 ID**: Bedrock·Vertex·게이트웨이 등 다른 provider가 돌려주는 ID 형식은 확인되지 않아 공통 지침만 적용한다.
-- **Mod API 계약 변경 가능**: 생성 선언이 여전히 `EARLY ACCESS: this surface may change between releases without notice`로 표기되며 계약이 바뀔 수 있다(2.1.277 → 2.1.285에서 반환형 변경 이력. 2.1.286 → 2.1.292 사이에는 `$.model.complete` 요청의 `prompt`/`system` 타입이 `string | readonly ModelTextBlock[]`로 넓어졌다 — 이 플러그인은 string만 쓰므로 런타임 영향은 없다). CLI 업데이트 후 타입을 다시 생성하고 `npm run typecheck`로 확인한다.
+- **Mod API 계약 변경 가능**: 생성 선언이 여전히 `EARLY ACCESS: this surface may change between releases without notice`로 표기되며 계약이 바뀔 수 있다(2.1.277 → 2.1.285에서 반환형 변경 이력. 2.1.292에서는 프롬프트 캐시를 위해 `$.model.complete` 요청의 `prompt`/`system` 타입이 `string | readonly ModelTextBlock[]`로 넓어졌다 — 이 플러그인은 string만 쓰므로 런타임 영향은 없다). CLI 업데이트 후 타입을 다시 생성하고 `npm run typecheck`로 확인한다.
 - **조직 관리 정책(`allowManagedModsOnly`)**: 이 정책이 켜진 환경에서는 조직이 관리하는 Mod만 로드되어 이 플러그인이 로드되지 않는다(CLI 메시지: "mods are limited to your organization's by policy (allowManagedModsOnly); … was not loaded").
 - **실제 터미널 화면 검증 상태**: 이 저장소 이력에서는 패인 배치·포커스·fill의 실제 터미널 동작을 아직 검증하지 못했다(개발 환경의 네트워크 오류). `docs/smoke.md`의 절차로 검증 예정이며, 그때까지 화면 동작은 **미검증**이다. 자동 테스트는 mock 엔진에서의 계약만 보장한다.
 

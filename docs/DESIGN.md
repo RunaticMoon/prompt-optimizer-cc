@@ -6,7 +6,7 @@
 
 > 설계 에이전트(📐 A) 산출물 원문. 실험 파일은 /tmp/popt-f94f-mod-probe, /tmp/popt-f94f-runtime (저장소 외부).
 
-> 참고(2026-10-07): 2.1.292의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·classic `SessionStart`/`UserPromptSubmit`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니며 실패 시 훅이 빠지고 원문이 그대로 통과(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다.
+> 참고(2026-10-07): 2.1.290의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·classic `SessionStart`/`UserPromptSubmit`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니므로, 실패하면 그 훅만 건너뛰고 나머지 훅과 코어가 그대로 진행(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다. 2.1.292는 `$.model.complete`의 `prompt`/`system`이 텍스트 블록 배열(`ModelTextBlock`, `cache: true`)도 받는 프롬프트 캐시를 추가했으나, 이 플러그인은 아직 string만 쓴다.
 
 📐[POPT-F94F] A 설계 완료. **제출을 먼저 `drop`하고, 플러그인 자체 상태에서 개선 대화를 진행한 뒤 입력창에 복원하는 구조**를 권장합니다. 제품 저장소는 변경하지 않았습니다.
 
