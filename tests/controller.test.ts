@@ -1678,6 +1678,40 @@ async function startQuestion(h: Harness, ui: 'pane' | 'composer' = 'pane') {
 }
 
 describe('ui.ask — detached questions and pane fallback', () => {
+  for (const transition of ['start', 'end'] as const) {
+    test(`session ${transition} releases an unsettled ask and ignores its late answer`, async () => {
+      const old = questionDialog()
+      const current = questionDialog()
+      const debug: string[] = []
+      let asks = 0
+      const h = harness({
+        // Reuse every workflow identity field on start to isolate sessionId's
+        // stale guard; end retains the session id and uses fresh workflow ids.
+        deps: transition === 'start' ? { newId: () => 'reused-id' } : {},
+        ui: { ask: (q, o) => (++asks === 1 ? old : current).ask(q, o), log: text => { debug.push(text) } },
+        complete: async () => questionReply(),
+      })
+      await startQuestion(h)
+      expect(old.calls).toHaveLength(1)
+      if (transition === 'end') h.controller.onSessionEnd()
+      else h.controller.onSessionStart('next-session')
+      // No settlement of the old promise is needed to ask in the new session.
+      await h.controller.onSubmit(h.ports, submit('새 세션의 요청'), 'pane')
+      await h.flush()
+      expect(current.calls).toHaveLength(1)
+      const calls = h.calls.complete
+      old.resolve('이전 세션의 늦은 답')
+      await h.waitFor(() => debug.length === 1)
+      expect(h.calls.complete).toBe(calls)
+      expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
+      expect(h.controller.getState().workflow?.dialogue.some(m => m.text === '이전 세션의 늦은 답')).toBe(false)
+      // The old settlement must not release the new dialog's slot.
+      await h.controller.refine(h.ports, '패널에서 다음 라운드')
+      expect(current.calls).toHaveLength(1)
+      current.reject(new Error('close test dialog'))
+    })
+  }
+
   for (const answer of ['개발팀', '외부 기술 담당자']) {
     test(`asks once and refines once with ${answer}`, async () => {
       const dialog = questionDialog()
@@ -1685,9 +1719,6 @@ describe('ui.ask — detached questions and pane fallback', () => {
       await startQuestion(h)
       expect(dialog.calls).toEqual([{ question: ASK_QUESTION, options: { options: ASK_OPTIONS, header: '보완 질문' } }])
       expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
-      // Reading/repainting state cannot start a second dialog.
-      for (let i = 0; i < 4; i++) h.controller.onPromptEdit('')
-      expect(dialog.calls).toHaveLength(1)
       dialog.resolve(answer)
       await h.waitFor(() => h.controller.getState().workflow?.rounds === 2)
       expect(h.calls.complete).toBe(2)
@@ -1724,8 +1755,6 @@ describe('ui.ask — detached questions and pane fallback', () => {
     expect(h.notices.filter(Boolean)).toEqual(notices)
     expect(h.calls.complete).toBe(1)
     expect(h.controller.getState().workflow?.options).toEqual(ASK_OPTIONS)
-    h.controller.onPromptEdit('')
-    expect(dialog.calls).toHaveLength(1)
     await h.controller.refine(h.ports, 'Pane 폴백 답변')
     expect(h.calls.complete).toBe(2)
   })

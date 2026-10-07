@@ -420,6 +420,7 @@ export function registerUi(
       const rows = [
         textRow(`개선안 · ${draftText}`, draftColor, true),
         ...(workflow.question ? [textRow(`질문: ${workflow.question}`, UI_COLORS.heading, true)] : []),
+        ...(waiting && options.length ? [textRow(questionGuide(workflow), UI_COLORS.heading)] : []),
         ...(options.length ? [textRow(options.map((option, i) => `${i + 1}. ${option}`).join(' · '), UI_COLORS.heading)] : []),
         ...(message ? [textRow(message, UI_COLORS.text)] : []),
         ...(workflow.lastError ? [textRow(errorSummary(workflow.lastError), UI_COLORS.error)] : []),

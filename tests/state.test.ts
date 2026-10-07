@@ -367,6 +367,15 @@ describe('reduce — reply', () => {
 })
 
 describe('reduce — failed', () => {
+  for (const questionAsk of ['pending', 'closed'] as const) {
+    test(`a matching failure clears ${questionAsk} question dialog state`, () => {
+      const current = state({ workflow: workflow({ phase: 'reviewing', questionAsk }) })
+      const next = reduce(current, { type: 'failed', workflowId: 'wf-1', generation: 1, error: 'api-error' }, 11)
+      expect(next.workflow?.phase).toBe('failed')
+      expect('questionAsk' in (next.workflow ?? {})).toBe(false)
+    })
+  }
+
   test('a matching failure keeps the draft and original, records the error and usage', () => {
     const current = state({ workflow: workflow({ phase: 'generating', rounds: 2, draft: '마지막 초안' }) })
     const next = reduce(

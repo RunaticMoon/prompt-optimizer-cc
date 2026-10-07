@@ -169,6 +169,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         rounds: current.rounds + 1,
         usage: event.usage === undefined ? current.usage : addUsage(current.usage, event.usage),
       }
+      delete updated.questionAsk
       return { ...base, usage, workflow: updated }
     }
 

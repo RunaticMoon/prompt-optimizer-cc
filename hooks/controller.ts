@@ -187,8 +187,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * going ahead. It is `null` once shown (or when the version supports caching).
    */
   let pendingCacheNotice: string | null = null
-  // A dialog cannot be closed by the plugin. Keep its slot even across resets
-  // until it settles, so another round/workflow never queues behind it.
+  // A dialog cannot be closed by the plugin. Keep its slot across workflow
+  // resets until it settles, but release it when the session starts or ends.
   let pendingAsk: Workflow | null = null
 
   function sameQuestion(asked: Workflow): boolean {
@@ -221,7 +221,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     mark('pending')
     try {
       void ports.ui.ask(question, { options: asked.options, header: '보완 질문' }).then(answer => {
-        pendingAsk = null
+        if (pendingAsk === asked) pendingAsk = null
         if (!sameQuestion(asked)) {
           ports.ui.log?.('prompt-optimizer: ignored a stale question answer', { to: 'debug' })
           return
@@ -929,12 +929,14 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
   function onSessionStart(sessionId: string): void {
     abortAll()
+    pendingAsk = null
     resetGuidance()
     apply({ type: 'reset', sessionId })
   }
 
   function onSessionEnd(): void {
     abortAll()
+    pendingAsk = null
     resetGuidance()
     apply({ type: 'reset', sessionId: state.sessionId })
   }
