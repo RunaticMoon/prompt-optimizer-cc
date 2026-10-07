@@ -106,7 +106,7 @@ export function createPresenter(): {
       hadStatus = true
       ui.invalidate()
 
-      const message = [...workflow.dialogue].reverse().find((item) => item.role === 'optimizer')?.text ?? ''
+      const message = workflow.message ?? [...workflow.dialogue].reverse().find((item) => item.role === 'optimizer')?.text ?? ''
       if (message && message !== lastMessage) {
         ui.log(`옵티마이저: ${message}`)
         lastMessage = message

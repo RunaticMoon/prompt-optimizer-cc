@@ -425,7 +425,7 @@ export const SYSTEM_PROMPT_MAX_CHARS = 4000
  */
 export type EnginePorts = {
   session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'> &
-    Partial<Pick<EngineInterface['session'], 'model'>>
+    Partial<Pick<EngineInterface['session'], 'model' | 'version'>>
   /** Optional so older hosts and tests without a timer degrade to common guidance. */
   clock?: Pick<EngineInterface['clock'], 'sleep'>
   fs: Pick<EngineInterface['fs'], 'stat' | 'read'> &

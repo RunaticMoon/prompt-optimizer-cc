@@ -8,6 +8,7 @@ import type {
   PromptSubmitInput,
   PromptSubmitResult,
   SessionMessage,
+  SessionVersion,
 } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
@@ -29,8 +30,13 @@ const USAGE: ModelUsage = {
 }
 
 /** An answered completion carrying the fixed JSON contract. */
-function answered(draft: string, message = '', question: string | null = null): ModelCompleteResult {
-  return { isAnswered: true, text: JSON.stringify({ draft, message, question }), usage: USAGE }
+function answered(
+  draft: string,
+  message = '',
+  question: string | null = null,
+  options?: readonly string[],
+): ModelCompleteResult {
+  return { isAnswered: true, text: JSON.stringify({ draft, message, question, options }), usage: USAGE }
 }
 
 /** A failed completion, the API-error arm. */
@@ -58,6 +64,7 @@ interface Calls {
   fill: number
   submit: number
   close: number
+  version: number
 }
 
 interface HarnessOptions {
@@ -74,6 +81,8 @@ interface HarnessOptions {
    * to model a host with no `session.model` port (common/unavailable).
    */
   model?: () => string | Promise<string>
+  /** Overrides `session.version()`. Omit to model a host with no version port. */
+  version?: () => Promise<SessionVersion>
   /** Overrides `fs.read`; lets a test hold one file read open. */
   read?: (path: string) => Promise<string>
   complete?: (
@@ -136,6 +145,7 @@ function harness(options: HarnessOptions = {}): Harness {
   let completions = 0
   const config: OptimizerConfig = { ...DEFAULT_CONFIG, ...options.config }
   const modelGetter = options.model
+  const versionGetter = options.version
 
   const queue: Array<() => unknown> = []
   const notices: Array<string | undefined> = []
@@ -154,6 +164,7 @@ function harness(options: HarnessOptions = {}): Harness {
     fill: 0,
     submit: 0,
     close: 0,
+    version: 0,
   }
   const fills: PromptFillArgs[] = []
   const submits: PromptSubmitArgs[] = []
@@ -211,6 +222,14 @@ function harness(options: HarnessOptions = {}): Harness {
             model: async (): Promise<string> => {
               calls.model += 1
               return modelGetter()
+            },
+          }),
+      ...(versionGetter === undefined
+        ? {}
+        : {
+            version: (): Promise<SessionVersion> => {
+              calls.version += 1
+              return versionGetter()
             },
           }),
     },
@@ -622,6 +641,33 @@ describe('refine — the improvement dialogue', () => {
     await h.controller.refine(h.ports, '직전 이력')
     expect(h.calls.complete).toBe(1)
     expect(h.calls.submit).toBe(0)
+  })
+
+  test('notifies a question with its choice count', async () => {
+    const h = harness({
+      complete: async () => answered('초안 요청', '요약', '어느 쪽인가요?', ['1번', '2번']),
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'composer')
+    await h.flush()
+
+    expect(h.notices).toContain('질문: 어느 쪽인가요? (선택지 2개)')
+    expect(h.controller.getState().workflow?.options).toEqual(['1번', '2번'])
+  })
+
+  test('folds a last-round question together with its choices', async () => {
+    const h = harness({
+      config: { maxRounds: 1 },
+      complete: async () => answered('초안 요청', '초안 작성', '어느 쪽인가요?', ['1번', '2번']),
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'composer')
+    await h.flush()
+
+    const workflow = h.controller.getState().workflow
+    expect(workflow?.draft).toContain('미확정 사항 (구현 전 확인):\n어느 쪽인가요?\n- 선택지: 1번 / 2번')
+    expect(workflow?.question).toBeNull()
+    expect(workflow?.options).toEqual([])
   })
 
   test('collects context once and completes once per round, keeping the transcript intact', async () => {
@@ -1204,6 +1250,62 @@ describe('scheduled work', () => {
     await h.flush()
 
     expect(h.notices).toContain('보완 요청을 처리하지 못했습니다: repaint failed')
+  })
+})
+
+describe('prompt caching by engine version', () => {
+  test('uses the cached block request at 2.1.292', async () => {
+    const h = harness({ version: async () => ({ version: '2.1.292' }) })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const request = h.completes[0]
+    expect(Array.isArray(request?.prompt)).toBe(true)
+    expect((request?.prompt as readonly ModelTextBlock[]).every(block => block.text !== '')).toBe(true)
+    expect(request?.system).toEqual([{ text: expect.any(String), cache: true }])
+    expect(h.calls.version).toBe(1)
+  })
+
+  test('uses the plain string request below 2.1.292', async () => {
+    const h = harness({ version: async () => ({ version: '2.1.291' }) })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(typeof h.completes[0]?.prompt).toBe('string')
+    expect(typeof h.completes[0]?.system).toBe('string')
+  })
+
+  test('falls back to the string request with no version getter or a throwing one', async () => {
+    const none = harness()
+    none.controller.onSessionStart('sess-1')
+    await none.controller.onSubmit(none.ports, submit('원문'), 'pane')
+    await none.flush()
+    expect(typeof none.completes[0]?.prompt).toBe('string')
+    expect(none.notices.some(notice => notice?.includes('개선에 실패'))).toBe(false)
+
+    const broken = harness({
+      version: async () => {
+        throw new Error('no version available')
+      },
+    })
+    broken.controller.onSessionStart('sess-1')
+    await broken.controller.onSubmit(broken.ports, submit('원문'), 'pane')
+    await broken.flush()
+    expect(typeof broken.completes[0]?.prompt).toBe('string')
+    expect(broken.notices.some(notice => notice?.includes('개선에 실패'))).toBe(false)
+  })
+
+  test('reads the version once and reuses it across rounds', async () => {
+    const h = harness({ version: async () => ({ version: '2.1.292' }) })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    await h.controller.refine(h.ports, '더 짧게')
+
+    expect(h.calls.version).toBe(1)
+    expect(Array.isArray(h.completes[1]?.prompt)).toBe(true)
   })
 })
 

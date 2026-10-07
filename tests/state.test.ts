@@ -289,6 +289,32 @@ describe('reduce — reply', () => {
     expect(next.workflow?.dialogue).toEqual([{ role: 'optimizer', text: '요약\n대상 파일은?' }])
   })
 
+  test('records the latest message, question and options on the workflow', () => {
+    const current = state({ workflow: workflow({ phase: 'generating' }) })
+    const next = reduce(
+      current,
+      {
+        type: 'reply', workflowId: 'wf-1', generation: 1,
+        reply: reply({ message: '요약', question: '어느 쪽인가요?', options: ['1번', '2번'] }),
+        usage: usage(),
+      },
+      1,
+    )
+    expect(next.workflow?.message).toBe('요약')
+    expect(next.workflow?.question).toBe('어느 쪽인가요?')
+    expect(next.workflow?.options).toEqual(['1번', '2번'])
+  })
+
+  test('defaults options to an empty array when the reply carries none', () => {
+    const current = state({ workflow: workflow({ phase: 'generating' }) })
+    const next = reduce(
+      current,
+      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply(), usage: usage() },
+      1,
+    )
+    expect(next.workflow?.options).toEqual([])
+  })
+
   test('an empty message with no question adds no dialogue entry', () => {
     const current = state({ workflow: workflow({ phase: 'generating', dialogue: [] }) })
     const next = reduce(
@@ -430,6 +456,16 @@ describe('reduce — instruct', () => {
     const current = state({ workflow: workflow({ phase: 'failed' }) })
     const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '다시' }, 1)
     expect(next.workflow?.dialogue).toEqual([{ role: 'user', text: '다시' }])
+  })
+
+  test('clears the stored question and options while keeping the message', () => {
+    const current = state({
+      workflow: workflow({ phase: 'reviewing', message: '요약', question: '어느 쪽인가요?', options: ['1번'] }),
+    })
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '1번' }, 1)
+    expect(next.workflow?.question).toBeNull()
+    expect(next.workflow?.options).toEqual([])
+    expect(next.workflow?.message).toBe('요약')
   })
 
   test('an in-flight or mismatched workflow is ignored', () => {
