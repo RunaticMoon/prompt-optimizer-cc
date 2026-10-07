@@ -77,10 +77,28 @@ function latestOptimizerMessage(workflow: Workflow): string {
   return [...workflow.dialogue].reverse().find((entry) => entry.role === 'optimizer')?.text ?? ''
 }
 
+// Wide emoji ranges (Emoji_Presentation / East Asian Width W). Keep text
+// symbols such as ✓ U+2713 narrow rather than widening the entire symbol block.
+const WIDE_EMOJI: readonly (readonly [number, number])[] = [
+  [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f],
+  [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be],
+  [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea],
+  [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd],
+  [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c],
+  [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50],
+  [0x2b55, 0x2b55], [0x1f004, 0x1f004], [0x1f0cf, 0x1f0cf], [0x1f18e, 0x1f18e],
+  [0x1f191, 0x1f19a], [0x1f200, 0x1f2ff], [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff],
+  [0x1f7e0, 0x1f7eb], [0x1f90c, 0x1f9ff], [0x1fa70, 0x1faff],
+]
+
 /** Terminal cell width for the wide characters used by the preview. */
 function cellWidth(char: string): number {
   const code = char.codePointAt(0)!
-  if (code >= 0x300 && code <= 0x36f) return 0 // combining marks
+  if (code >= 0x300 && code <= 0x36f || code === 0x200d
+    || code >= 0xfe00 && code <= 0xfe0f) return 0 // combining marks, ZWJ, variation selectors
+  if (WIDE_EMOJI.some(([start, end]) => code >= start && code <= end)) return 2
   return code >= 0x1100 && (
     code <= 0x115f || code >= 0x2329 && code <= 0x232a
     || code >= 0x2e80 && code <= 0xa4cf
@@ -89,9 +107,16 @@ function cellWidth(char: string): number {
     || code >= 0xfe10 && code <= 0xfe6f
     || code >= 0xff01 && code <= 0xff60
     || code >= 0xffe0 && code <= 0xffe6
-    || code >= 0x1f300 && code <= 0x1faff
     || code >= 0x20000 && code <= 0x3fffd
   ) ? 2 : 1
+}
+
+/** Add an overflow mark without introducing another terminal row. */
+function ellipsizeLine(line: string, columns: number): string {
+  const chars = Array.from(line)
+  let cells = chars.reduce((sum, char) => sum + cellWidth(char), 0)
+  while (cells + 1 > columns) cells -= cellWidth(chars.pop()!)
+  return `${chars.join('').trimEnd()}…`
 }
 
 /** Hard-wrap by cells; report overflow, replacement, and whitespace changes. */
@@ -139,9 +164,7 @@ export function hardWrapPreviewWithStatus(value: string, columns: number, maxLin
   }
   if (lines.length > maxLines) {
     const visible = lines.slice(0, maxLines)
-    const last = Array.from(visible[maxLines - 1] ?? '')
-    while (last.reduce((sum, char) => sum + cellWidth(char), 0) + 1 > columns) last.pop()
-    visible[maxLines - 1] = `${last.join('').trimEnd()}…`
+    visible[maxLines - 1] = ellipsizeLine(visible[maxLines - 1] ?? '', columns)
     return { lines: visible, truncated: true, altered }
   }
   return { lines, truncated, altered }
@@ -256,8 +279,16 @@ export function registerUi(
     // Reserve the original label, draft title, optional guide, and overflow row.
     // When space is tight, prioritise the title/error and the recovery hint.
     const contentRows = Math.max(0, bandRows - 2 - guideRows - (overflow ? 1 : 0))
-    const originalRows = overflow ? Math.min(originalLines.length, Math.floor(contentRows / 3)) : originalLines.length
-    const draftRows = overflow ? contentRows - originalRows : draftLines.length
+    // The dock hides its original section after the band draws, so expansion
+    // must give the original first claim on the same fixed row budget.
+    const originalRows = overflow
+      ? Math.min(originalLines.length, showOriginal ? contentRows : Math.floor(contentRows / 3))
+      : originalLines.length
+    const draftRows = overflow ? Math.min(draftLines.length, contentRows - originalRows) : draftLines.length
+    const visibleOriginal = originalLines.slice(0, originalRows)
+    if (originalRows > 0 && originalRows < originalLines.length) {
+      visibleOriginal[originalRows - 1] = ellipsizeLine(visibleOriginal[originalRows - 1]!, columns)
+    }
     const omittedRows = originalLines.length - originalRows + draftLines.length - draftRows
     const title = (
       <Text bold color={UI_COLORS.draft} wrap="truncate-end">
@@ -276,7 +307,7 @@ export function registerUi(
     return (
       <Box flexDirection="column" paddingX={1}>
         {bandRows >= 4 + guideRows && <Text bold color={UI_COLORS.original} wrap="truncate-end">원문</Text>}
-        {originalRows > 0 && <Text color={UI_COLORS.original} wrap="wrap">{originalLines.slice(0, originalRows).join('\n')}</Text>}
+        {originalRows > 0 && <Text color={UI_COLORS.original} wrap="wrap">{visibleOriginal.join('\n')}</Text>}
         {title}
         {draftRows > 0 && <Text color={draftColor} wrap="wrap">{draftLines.slice(0, draftRows).join('\n')}</Text>}
         {workflow.ui === 'composer' && bandRows >= 4 + guideRows && <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}

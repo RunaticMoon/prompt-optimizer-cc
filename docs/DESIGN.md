@@ -138,7 +138,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 - release는 `ctrl+u`(커서 위치 무관)다. 그 편집을 소비해 글자를 지우지 않고 모드만 끈다. 꺼진 뒤의 `ctrl+u`는 원래대로 줄 앞부분을 지운다.
 - Backspace@0·Esc·기록 이동(↑↓)·제출 후 비워짐 등 `prompt.edit`가 오지 않는 경로로 입력창이 바뀌면, 다음 편집에서 `e.text`(편집 전 상자)가 기억한 초안과 다른 것으로 감지해 모드를 푼다. 그 감지 전에 Enter하면 모드가 켜진 채 전송될 수 있다.
 - 제출 규칙 순서: eligibility에서 **empty 다음, bypass 앞**에 `rawMode` 규칙을 둔다. 모드가 켜져 있으면 텍스트 비교 없이 `{ kind: 'raw', text }`로 `next`에 그대로 통과시키고, 제출 뒤 모드는 꺼진다. 기존의 제출 시 `rawPrefix` 제거·빈 마커 드롭 규칙은 삭제한다.
-- 표시: 모드가 켜져 있는 동안 `ui.render`의 `PromptHint` `tail`에 `⏭ 옵티마이저 끔 · ctrl+u 다시 켜기`를 넣고, 상태가 바뀔 때마다 `$.ui.invalidate('ui.render')`를 호출한다.
+- 표시: 모드가 켜져 있는 동안 `ui.render`의 `PromptHint` `tail`에 `최적화 끔 ctrl+u 켜기`를 넣고, 상태가 바뀔 때마다 `$.ui.invalidate('ui.render')`를 호출한다.
 
 첨부파일은 메타데이터만 노출되므로 `drop` 후 원본 바이너리를 재구성할 수 없습니다. **이미지·오디오·문서 첨부 제출은 v1에서 그대로 통과**시킵니다.
 

@@ -325,6 +325,70 @@ describe('optimizer UI', () => {
     expect(await ui.render(empty)).toEqual({ inner: empty })
   })
 
+  test('expanding the band original takes priority within its cap and collapse restores the preview', async ($, on) => {
+    const item = { ...workflow(), original: '원문 확인 문장입니다. '.repeat(20) + '원문끝마커',
+      draft: Array.from({ length: 40 }, (_, i) => `개선안 ${i + 1}`).join('\n') }
+    const current = state(item)
+    const { controller } = fakeController(current)
+    const invalidations: string[] = []
+    const ui = await captureUi($, on, controller, undefined, undefined, undefined, invalidations)
+    const toggle = () => ui.press({ component: 'Pane', requestId: PANE_ID, plugin: 'test', element: 'optimizer:original' })
+    for (const [isFullscreen, bodyColumns, maxRows] of [[true, 68, 15], [false, 115, 40]] as const) {
+      const event = { ...BAND, viewport: { columns: 120, rows: 40, isFullscreen },
+        props: { ...BAND.props, bodyColumns, maxRows } }
+      await ui.render({ ...PANE, props: { ...PANE.props, placement: isFullscreen ? 'dock' : 'inline' } })
+      const collapsed = await ui.render(event) as UiNode
+      const original = collapsed.children!.find(child => child && typeof child === 'object'
+        && (child as UiNode).props.color === 'text' && contentOf(child) !== '원문')
+      expect(contentOf(original).endsWith('…')).toBe(true)
+      expect(contentOf(collapsed)).not.toContain('원문끝마커')
+      await toggle()
+      const expanded = await ui.render(event) as UiNode
+      const rows = expanded.children!.filter(child => child && typeof child === 'object')
+        .flatMap(child => contentOf(child).split('\n'))
+      expect(rows.length).toBeLessThanOrEqual(Math.min(maxRows, 20))
+      expect(contentOf(expanded).replace(/\n/g, '')).toContain(item.original)
+      expect(contentOf(expanded)).toContain('줄 더 · 전문: 1 입력창')
+      expect(textOf(await ui.render(PANE))).not.toContain(item.original)
+      const before = invalidations.length
+      for (let i = 0; i < 300; i++) {
+        expect(textOf(await ui.render({ ...event, props: { ...event.props, scroll: { offset: i, bodyRows: i % 2 } } }))).toBe(textOf(expanded))
+      }
+      expect(invalidations).toHaveLength(before)
+      await toggle()
+      expect(textOf(await ui.render(event))).toBe(textOf(collapsed))
+    }
+    // An original longer than even the expanded budget retains its own ellipsis.
+    current.workflow = { ...item, original: '가'.repeat(2000) + '원문끝마커' }
+    await toggle()
+    const bounded = await ui.render(BAND) as UiNode
+    const rows = bounded.children!.filter(child => child && typeof child === 'object')
+      .flatMap(child => contentOf(child).split('\n'))
+    expect(rows).toHaveLength(BAND.props.maxRows)
+    expect(rows[rows.length - 3]!.endsWith('…')).toBe(true)
+    expect(rows[rows.length - 2]).toContain('↓ 개선안')
+    expect(rows[rows.length - 1]).toContain('줄 더')
+    expect(contentOf(bounded)).not.toContain('원문끝마커')
+  })
+
+  test('wide emoji drafts count terminal cells and retain the band overflow hint', async ($, on) => {
+    const { controller } = fakeController(state({ ...workflow(), draft: '✅'.repeat(1200) }))
+    const ui = await captureUi($, on, controller)
+    await ui.render(PANE) // Establish dock placement for the compact-height case.
+    for (const [isFullscreen, bodyColumns, maxRows, draftRows, omitted] of [
+      [false, 115, 40, 16, 6], [true, 68, 15, 11, 26], [true, 74, 10, 6, 28],
+    ] as const) {
+      const tree = await ui.render({ ...BAND, viewport: { columns: 120, rows: isFullscreen && maxRows === 10 ? 20 : 40, isFullscreen },
+        props: { ...BAND.props, bodyColumns, maxRows } }) as UiNode
+      const rows = tree.children!.filter(child => child && typeof child === 'object').flatMap(child => contentOf(child).split('\n'))
+      expect(rows).toHaveLength(Math.min(maxRows, 20))
+      expect(rows[rows.length - 1]).toBe(`… ${omitted}줄 더 · 전문: 1 입력창`)
+      const draft = nodesOf(tree).find(node => node.type === 'Text' && contentOf(node).startsWith('✅'))!
+      expect(contentOf(draft).split('\n')).toHaveLength(draftRows)
+      expect(contentOf(draft).split('\n').every(line => Array.from(line).length * 2 <= bodyColumns - 2)).toBe(true)
+    }
+  })
+
   test('compact fallback previews use warning, error and inactive without adding rows', async ($, on) => {
     const current = state(workflow())
     const { controller } = fakeController(current)
@@ -576,6 +640,18 @@ describe('optimizer UI', () => {
     expect(hardWrapPreviewWithStatus('abc\ndef', 3, 1)).toEqual({ lines: ['ab…'], truncated: true, altered: false })
     expect(hardWrapPreviewWithStatus('가a', 1, 3)).toEqual({ lines: ['…', 'a'], truncated: true, altered: false })
     expect(hardWrapPreviewWithStatus('a\n\nb', 3, 3)).toEqual({ lines: ['a', 'b'], truncated: false, altered: true })
+  })
+
+  test('emoji presentation is wide, text symbols stay narrow, and selectors and joiners are zero-width', () => {
+    for (const char of ['⌚', '⏩', '⏰', '⏳', '◽', '☔', '♈', '♿', '⚓', '⚡', '⚪', '⚽', '⛄', '⛎', '⛔', '⛪', '⛲', '⛵', '⛺', '⛽',
+      '✅', '✊', '✨', '❌', '❎', '❓', '❗', '➕', '➰', '➿', '⬛', '⭐', '⭕', '🀄', '🃏', '🆎', '🆑', '🈁', '😀', '🚀', '🟠', '🤌', '🩷']) {
+      expect(hardWrapPreview(char.repeat(3), 4, 3)).toEqual([char.repeat(2), char])
+    }
+    expect(hardWrapPreview('✓✓✓', 3, 1)).toEqual(['✓✓✓'])
+    expect(hardWrapPreview('✅\ufe0f✅\ufe0f', 4, 1)).toEqual(['✅\ufe0f✅\ufe0f'])
+    // Counting each wide base separately is conservative for joined emoji;
+    // the joiner itself must not consume another cell or row.
+    expect(hardWrapPreview('👩\u200d💻', 4, 1)).toEqual(['👩\u200d💻'])
   })
 
   test('compact pane orders preview, accept, Input, send and raw before scrollable details', async ($, on) => {
