@@ -1,6 +1,7 @@
 import type {
   ModelCompleteRequest,
   ModelCompleteResult,
+  ModelTextBlock,
   PromptFillArgs,
   PromptFilled,
   PromptSubmitArgs,
@@ -35,6 +36,11 @@ function answered(draft: string, message = '', question: string | null = null): 
 /** A failed completion, the API-error arm. */
 function apiError(): ModelCompleteResult {
   return { isAnswered: false, reason: 'api-error', status: 500, error: 'server_error', usage: USAGE }
+}
+
+/** A recorded request's `prompt`/`system` as one text: a string stands, blocks join in order. */
+function requestText(input: string | readonly ModelTextBlock[] | undefined): string {
+  return typeof input === 'string' ? input : (input ?? []).map(block => block.text).join('')
 }
 
 /** One engine call each, counted so a test can assert what ran and how often. */
@@ -659,7 +665,7 @@ describe('refine — the improvement dialogue', () => {
 
     await h.controller.refine(h.ports, '더 짧게')
 
-    const refined = h.completes.at(-1)?.prompt ?? ''
+    const refined = requestText(h.completes.at(-1)?.prompt)
     // The supplement is rendered once, in the dialogue; the request must not
     // also repeat it in an `<instruction>` section.
     expect(refined.split('더 짧게')).toHaveLength(2)
@@ -667,7 +673,7 @@ describe('refine — the improvement dialogue', () => {
 
     await h.controller.retry(h.ports, '조금 더')
 
-    const retried = h.completes.at(-1)?.prompt ?? ''
+    const retried = requestText(h.completes.at(-1)?.prompt)
     expect(retried.split('조금 더')).toHaveLength(2)
     expect(retried).not.toContain('<instruction>')
   })
@@ -718,7 +724,7 @@ describe('refine — the improvement dialogue', () => {
 
     // The supplement is already in the dialogue; a bare retry must not also
     // re-render it as the `<instruction>` section.
-    const retried = h.completes.at(-1)?.prompt ?? ''
+    const retried = requestText(h.completes.at(-1)?.prompt)
     expect(retried.split('더 짧게')).toHaveLength(2)
     expect(retried).not.toContain('<instruction>')
   })

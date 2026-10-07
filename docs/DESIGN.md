@@ -6,6 +6,8 @@
 
 > 설계 에이전트(📐 A) 산출물 원문. 실험 파일은 /tmp/popt-f94f-mod-probe, /tmp/popt-f94f-runtime (저장소 외부).
 
+> 참고(2026-10-07): 2.1.292의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·classic `SessionStart`/`UserPromptSubmit`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니며 실패 시 훅이 빠지고 원문이 그대로 통과(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다.
+
 📐[POPT-F94F] A 설계 완료. **제출을 먼저 `drop`하고, 플러그인 자체 상태에서 개선 대화를 진행한 뒤 입력창에 복원하는 구조**를 권장합니다. 제품 저장소는 변경하지 않았습니다.
 
 가장 중요한 발견은 **제공된 레퍼런스가 2.1.277이고, 설치된 2.1.285의 API 계약이 달라졌다는 점**입니다. 구현은 설치본이 생성한 타입을 기준으로 해야 합니다.

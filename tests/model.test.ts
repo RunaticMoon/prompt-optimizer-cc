@@ -1,4 +1,9 @@
-import type { EngineInterface, ModelCompleteRequest, ModelCompleteResult } from 'claude-code'
+import type {
+  EngineInterface,
+  ModelCompleteRequest,
+  ModelCompleteResult,
+  ModelTextBlock,
+} from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
 import type {
@@ -110,9 +115,14 @@ function request(over: Partial<Workflow> = {}): ModelCompleteRequest {
   return buildModelRequest(workflow(over), config(), 'SYS')
 }
 
+/** A request's `prompt`/`system` as one text: a string stands, blocks join in order. */
+function requestText(input: string | readonly ModelTextBlock[] | undefined): string {
+  return typeof input === 'string' ? input : (input ?? []).map(block => block.text).join('')
+}
+
 /** `prompt` plus `system`, the length {@link MAX_REQUEST_CHARS} bounds. */
 function requestLength(input: ModelCompleteRequest): number {
-  return input.prompt.length + (input.system?.length ?? 0)
+  return requestText(input.prompt).length + requestText(input.system).length
 }
 
 describe('buildModelRequest — request fields', () => {
@@ -195,7 +205,9 @@ describe('buildModelRequest — prompt sections', () => {
 
   test('ends by asking for every field in the original prompt language', () => {
     const built = buildModelRequest(workflow({ original: 'why is the node list slow?' }), config(), 'SYS')
-    expect(built.prompt.endsWith('draft·message·question은 <original_prompt>와 같은 언어로 쓴다.')).toBe(true)
+    expect(
+      requestText(built.prompt).endsWith('draft·message·question은 <original_prompt>와 같은 언어로 쓴다.'),
+    ).toBe(true)
   })
 
   test('neutralizes section tags only inside the context snapshot', () => {
@@ -211,7 +223,7 @@ describe('buildModelRequest — prompt sections', () => {
     expect(built.prompt).toContain('<context>\nmem ‹/context> tail')
     expect(built.prompt).toContain('‹instruction>')
     // Exactly one real closing context tag: the section's own wrapper.
-    expect(built.prompt.match(/<\/context>/g)).toHaveLength(1)
+    expect(requestText(built.prompt).match(/<\/context>/g)).toHaveLength(1)
   })
 
   test('leaves section-tag look-alikes in the original and draft untouched', () => {
@@ -238,7 +250,8 @@ describe('buildModelRequest — prompt sections', () => {
       config(),
       'SYS',
     )
-    const block = built.prompt.slice(built.prompt.indexOf('<dialogue>'), built.prompt.indexOf('</dialogue>'))
+    const prompt = requestText(built.prompt)
+    const block = prompt.slice(prompt.indexOf('<dialogue>'), prompt.indexOf('</dialogue>'))
     expect(block.indexOf('old')).toBeLessThan(block.indexOf('mid'))
     expect(block.indexOf('mid')).toBeLessThan(block.indexOf('new'))
   })
