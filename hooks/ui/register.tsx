@@ -80,8 +80,10 @@ function latestOptimizerMessage(workflow: Workflow): string {
 // Width is measured per grapheme cluster so an emoji sequence — a VS16
 // presentation request, a ZWJ join or a flag pair — wraps as one glyph.
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const EMOJI = /\p{Emoji}/u
 const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u
 const EXTENDED_PICTOGRAPHIC = /\p{Extended_Pictographic}/u
+const REGIONAL_INDICATORS = /[\u{1f1e6}-\u{1f1ff}]/gu
 
 /** Grapheme clusters of `text`; each one wraps or ellipsizes as a single glyph. */
 function graphemes(text: string): string[] {
@@ -94,13 +96,17 @@ function cellWidth(grapheme: string): number {
   if (code === undefined
     || code >= 0x300 && code <= 0x36f || code === 0x200d
     || code >= 0xfe00 && code <= 0xfe0f) return 0 // combining marks, ZWJ, variation selectors
+  // A regional indicator is wide only as a flag pair; a lone one is narrow,
+  // so this branch runs before the emoji-presentation check it also matches.
+  if (code >= 0x1f1e6 && code <= 0x1f1ff) {
+    return (grapheme.match(REGIONAL_INDICATORS) ?? []).length === 2 ? 2 : 1
+  }
   const first = String.fromCodePoint(code)
-  // Emoji presentation occupies two cells: an explicit VS16 request, an
-  // emoji-presentation code point, a joined pictographic sequence or a flag.
-  if (grapheme.includes('\ufe0f')
+  // Emoji presentation occupies two cells: a VS16 request on an emoji base,
+  // an emoji-presentation code point, or a joined pictographic sequence.
+  if (grapheme.includes('\ufe0f') && EMOJI.test(first)
     || EMOJI_PRESENTATION.test(first)
-    || grapheme.includes('\u200d') && EXTENDED_PICTOGRAPHIC.test(first)
-    || code >= 0x1f1e6 && code <= 0x1f1ff) return 2
+    || grapheme.includes('\u200d') && EXTENDED_PICTOGRAPHIC.test(first)) return 2
   return code >= 0x1100 && (
     code <= 0x115f || code >= 0x2329 && code <= 0x232a
     || code >= 0x2e80 && code <= 0xa4cf

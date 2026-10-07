@@ -670,6 +670,19 @@ describe('optimizer UI', () => {
     expect(hardWrapPreview('a👨‍👩‍👧b', 2, 3)).toEqual(['a', '👨‍👩‍👧', 'b'])
   })
 
+  test('VS16 widens only emoji bases and lone regional indicators stay narrow', () => {
+    // VS16 on a non-emoji base like U+2713 keeps the text-width sign narrow.
+    expect(hardWrapPreviewWithStatus('✓\ufe0fA', 2, 3)).toEqual({ lines: ['✓\ufe0fA'], truncated: false, altered: false })
+    // A lone regional indicator is one cell; only the flag pair is two.
+    expect(hardWrapPreviewWithStatus('🇰', 1, 3)).toEqual({ lines: ['🇰'], truncated: false, altered: false })
+    expect(hardWrapPreview('🇰🇷', 2, 3)).toEqual(['🇰🇷'])
+    // A keycap sequence keeps its emoji base and stays two cells wide.
+    expect(hardWrapPreview('1\ufe0f\u20e3'.repeat(3), 4, 3)).toEqual(['1\ufe0f\u20e3'.repeat(2), '1\ufe0f\u20e3'])
+    // A combining accent and leading lone selectors or joiners add no cells.
+    expect(hardWrapPreview('e\u0301e\u0301e\u0301', 3, 3)).toEqual(['e\u0301e\u0301e\u0301'])
+    expect(hardWrapPreview('\ufe0f\u200d가', 2, 3)).toEqual(['\ufe0f\u200d가'])
+  })
+
   test('VS16 emoji fill the band at two cells and keep the overflow count', async ($, on) => {
     const { controller } = fakeController(state({ ...workflow(), draft: '⚠️'.repeat(1200) }))
     const ui = await captureUi($, on, controller)
