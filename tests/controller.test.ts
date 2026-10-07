@@ -68,6 +68,7 @@ interface Calls {
 }
 
 interface HarnessOptions {
+  ui?: Partial<EnginePorts['ui']>
   config?: Partial<OptimizerConfig>
   /** Overrides for individual dependencies (e.g. a throwing `getConfig`). */
   deps?: Partial<ControllerDeps>
@@ -289,6 +290,7 @@ function harness(options: HarnessOptions = {}): Harness {
       },
     },
     ui: {
+      ...options.ui,
       close: async ({ id }: { id: string }): Promise<void> => {
         calls.close += 1
         closes.push(id)
@@ -1650,4 +1652,140 @@ describe('readMemory — long-term memory folded into the snapshot', () => {
     expect(h.controller.getState().workflow?.context?.memory).toBe('')
     expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
   })
+})
+
+/** An engine dialog held open without holding the scheduled round open. */
+function questionDialog() {
+  let resolve!: (answer: string) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<string>((yes, no) => { resolve = yes; reject = no })
+  const calls: Array<{ question: string; options: unknown }> = []
+  const ask: NonNullable<EnginePorts['ui']['ask']> = (question, options) => {
+    calls.push({ question, options })
+    return promise
+  }
+  return { ask, calls, resolve, reject }
+}
+
+const ASK_QUESTION = '대상 독자는 누구인가요?'
+const ASK_OPTIONS = ['경영진', '개발팀']
+const questionReply = () => answered('개선안', '독자를 확인합니다', ASK_QUESTION, ASK_OPTIONS)
+
+async function startQuestion(h: Harness, ui: 'pane' | 'composer' = 'pane') {
+  h.controller.onSessionStart('sess-ask')
+  await h.controller.onSubmit(h.ports, submit('요청을 개선해 주세요'), ui)
+  await h.flush()
+}
+
+describe('ui.ask — detached questions and pane fallback', () => {
+  for (const answer of ['개발팀', '외부 기술 담당자']) {
+    test(`asks once and refines once with ${answer}`, async () => {
+      const dialog = questionDialog()
+      const h = harness({ ui: { ask: dialog.ask }, complete: async (_r, _s, n) => n === 1 ? questionReply() : answered('최종안') })
+      await startQuestion(h)
+      expect(dialog.calls).toEqual([{ question: ASK_QUESTION, options: { options: ASK_OPTIONS, header: '보완 질문' } }])
+      expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
+      // Reading/repainting state cannot start a second dialog.
+      for (let i = 0; i < 4; i++) h.controller.onPromptEdit('')
+      expect(dialog.calls).toHaveLength(1)
+      dialog.resolve(answer)
+      await h.waitFor(() => h.controller.getState().workflow?.rounds === 2)
+      expect(h.calls.complete).toBe(2)
+      expect(h.controller.getState().workflow?.dialogue.filter(m => m.role === 'user')).toEqual([{ role: 'user', text: answer }])
+    })
+  }
+
+  for (const options of [[], ['개발팀']]) {
+    test(`does not pad ${options.length} options with engine Yes/No`, async () => {
+      const dialog = questionDialog()
+      const h = harness({ ui: { ask: dialog.ask }, complete: async () => answered('개선안', '', ASK_QUESTION, options) })
+      await startQuestion(h)
+      expect(dialog.calls).toHaveLength(0)
+      expect(h.controller.getState().workflow?.questionAsk).toBeUndefined()
+    })
+  }
+
+  test('does not ask without a question or at the round limit', async () => {
+    for (const maxRounds of [1, 5]) {
+      const dialog = questionDialog()
+      const h = harness({ config: { maxRounds }, ui: { ask: dialog.ask }, complete: async () => answered('개선안', '', maxRounds === 1 ? ASK_QUESTION : null, ASK_OPTIONS) })
+      await startQuestion(h)
+      expect(dialog.calls).toHaveLength(0)
+    }
+  })
+
+  test('reject keeps choices and typed refinement, without a notice or another ask', async () => {
+    const dialog = questionDialog()
+    const h = harness({ ui: { ask: dialog.ask }, complete: async () => questionReply() })
+    await startQuestion(h)
+    const notices = h.notices.filter(Boolean)
+    dialog.reject(new Error('Esc / Chat about this / -p'))
+    await h.waitFor(() => h.controller.getState().workflow?.questionAsk === 'closed')
+    expect(h.notices.filter(Boolean)).toEqual(notices)
+    expect(h.calls.complete).toBe(1)
+    expect(h.controller.getState().workflow?.options).toEqual(ASK_OPTIONS)
+    h.controller.onPromptEdit('')
+    expect(dialog.calls).toHaveLength(1)
+    await h.controller.refine(h.ports, 'Pane 폴백 답변')
+    expect(h.calls.complete).toBe(2)
+  })
+
+  test('synchronous ask failure silently keeps the pane fallback', async () => {
+    const h = harness({ ui: { ask: () => { throw new Error('unavailable') } }, complete: async () => questionReply() })
+    await startQuestion(h)
+    expect(h.controller.getState().workflow?.questionAsk).toBe('closed')
+    expect(h.calls.complete).toBe(1)
+    expect(h.notices.filter(Boolean).some(n => n!.includes('unavailable'))).toBe(false)
+  })
+
+  for (const action of ['cancel', 'replacement', 'retry', 'pane', 'session', 'accept', 'question-change'] as const) {
+    test(`ignores a late answer after ${action} and never queues another dialog`, async () => {
+      const dialog = questionDialog()
+      const debug: string[] = []
+      const h = harness({ ui: { ask: dialog.ask, log: text => { debug.push(text) } }, complete: async () => questionReply() })
+      await startQuestion(h)
+      if (action === 'cancel' || action === 'replacement') await h.controller.cancel(h.ports)
+      if (action === 'replacement') {
+        await h.controller.startExplicit(h.ports, '대체 요청', 'pane')
+        await h.flush()
+      }
+      if (action === 'retry') await h.controller.retry(h.ports)
+      if (action === 'pane') await h.controller.refine(h.ports, 'Pane 답변')
+      if (action === 'session') h.controller.onSessionStart('next-session')
+      if (action === 'accept') await h.controller.accept(h.ports)
+      // Fault injection isolates the question-identity guard from the round guard.
+      if (action === 'question-change') h.controller.getState().workflow!.question = '다른 질문인가요?'
+      const calls = h.calls.complete
+      expect(dialog.calls).toHaveLength(1)
+      dialog.resolve('늦은 답변')
+      await h.waitFor(() => debug.length === 1)
+      expect(h.calls.complete).toBe(calls)
+      expect(h.controller.getState().workflow?.dialogue.some(m => m.text === '늦은 답변') ?? false).toBe(false)
+    })
+  }
+
+  test('composer workflows also ask', async () => {
+    const dialog = questionDialog()
+    const h = harness({ ui: { ask: dialog.ask }, complete: async () => questionReply() })
+    await startQuestion(h, 'composer')
+    expect(dialog.calls).toHaveLength(1)
+  })
+
+  for (const mode of ['pane', 'composer', 'draft', 'failure'] as const) {
+    test(`restores pane focus after an answer: ${mode}`, async () => {
+      const dialog = questionDialog()
+      let focused = 0
+      const h = harness({
+        box: mode === 'draft' ? '사용자 작성 내용' : '',
+        ui: { ask: dialog.ask },
+        deps: { refocusPane: async () => { focused++; if (mode === 'failure') throw new Error('focus denied') } },
+        complete: async (_r, _s, n) => n === 1 ? questionReply() : answered('최종안'),
+      })
+      await startQuestion(h, mode === 'composer' ? 'composer' : 'pane')
+      dialog.resolve('개발팀')
+      await h.waitFor(() => h.controller.getState().workflow?.rounds === 2)
+      expect(focused).toBe(mode === 'composer' || mode === 'draft' ? 0 : 1)
+      expect(h.calls.complete).toBe(2)
+    })
+  }
 })

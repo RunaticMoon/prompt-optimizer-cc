@@ -345,7 +345,11 @@ function portsOf($: EngineInterface): EnginePorts {
       fill: args => $.prompt.fill(args),
       submit: args => $.prompt.submit(args),
     },
-    ui: { close: args => $.ui.close(args) },
+    ui: {
+      close: args => $.ui.close(args),
+      ask: (question, options) => $.ui.ask(question, options),
+      log: (text, options) => $.ui.log(text, options),
+    },
   }
 }
 

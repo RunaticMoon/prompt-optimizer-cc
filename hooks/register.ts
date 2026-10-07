@@ -102,7 +102,11 @@ function portsOf($: EngineInterface): EnginePorts {
       fill: args => $.prompt.fill(args),
       submit: args => $.prompt.submit(args),
     },
-    ui: { close: args => $.ui.close(args) },
+    ui: {
+      close: args => $.ui.close(args),
+      ask: (question, options) => $.ui.ask(question, options),
+      log: (text, options) => $.ui.log(text, options),
+    },
   }
 }
 
@@ -133,6 +137,7 @@ export function register(on: On, options: PluginOptions): void {
   const getConfig = (): OptimizerConfig => ({ ...config, ...overrides })
 
   let currentUi: UiPorts | null = null
+  let panePlaced = false
   let currentSchedule: ((fn: () => void) => void) | null = null
   let idCounter = 0
   // Memory diagnostics, split so each kind is reported once independently (a
@@ -170,6 +175,10 @@ export function register(on: On, options: PluginOptions): void {
     },
     getConfig,
     readMemory: () => renderMemory(memory.latest(), CONTEXT_MEMORY_CHARS),
+    refocusPane: async () => {
+      if (!panePlaced || currentUi === null || controller.getState().workflow?.ui !== 'pane') return
+      await currentUi.open(paneOpenArgs())
+    },
     onChange: (state, notice) => {
       if (currentUi !== null) presenter.present(currentUi, state, notice)
     },
@@ -209,8 +218,10 @@ export function register(on: On, options: PluginOptions): void {
     if (getConfig().uiMode === 'composer') return 'composer'
     try {
       const opened = await ui.open(paneOpenArgs())
+      panePlaced = opened.isPlaced
       return opened.isPlaced ? 'pane' : 'composer'
     } catch {
+      panePlaced = false
       return 'composer'
     }
   }
@@ -232,6 +243,7 @@ export function register(on: On, options: PluginOptions): void {
       id = ''
     }
     controller.onSessionStart(id)
+    panePlaced = false
 
     try {
       await $.command.register(OPTIMIZE_COMMAND)
@@ -248,6 +260,7 @@ export function register(on: On, options: PluginOptions): void {
 
   on('session.end', async ($, e, next) => {
     currentUi = null
+    panePlaced = false
     currentSchedule = null
     // The engine names the ending session; fall back to the controller's id
     // when the event carried none. `onSessionEnd` keeps the state's sessionId
@@ -441,6 +454,6 @@ export function register(on: On, options: PluginOptions): void {
     return r
   })
 
-  registerUi(on, controller, () => getConfig().maxRounds, PLUGIN_NAME)
+  registerUi(on, controller, () => getConfig().maxRounds, PLUGIN_NAME, placed => { panePlaced = placed })
   registerCommands(on, { controller, settings, chooseUi })
 }
