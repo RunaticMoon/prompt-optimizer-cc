@@ -24,7 +24,7 @@ if (!existsSync(typesFile)) {
       '  claude --plugin-dir . -p "type generation" \\',
       '    --setting-sources "" --strict-mcp-config --mcp-config \'{"mcpServers":{}}\'',
       '',
-      'Claude Code 2.1.287+ loads mods without a flag; on 2.1.285–2.1.286 prefix the command with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.',
+      'Claude Code 2.1.292+ loads mods without a flag; on older releases prefix the command with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1.',
       '',
       'Any real load works (a normal interactive session with --plugin-dir .',
       'writes them too); the command above is the headless form. It makes one',
