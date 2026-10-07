@@ -180,6 +180,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
   let lastGuidance: Readonly<GuidanceStatus> | null = null
   /** Whether the engine takes cached text blocks; read once per controller, `null` before that. */
   let versionCache: boolean | null = null
+  /**
+   * The one-time unsupported-version notice, held until a round is actually
+   * going ahead. It is `null` once shown (or when the version supports caching).
+   */
+  let pendingCacheNotice: string | null = null
 
   /**
    * Whether the engine's `$.model.complete` takes cached text blocks, read from
@@ -187,11 +192,14 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * throw and an unparseable version all mean "no cache", and the answer is
    * memoized so later rounds never re-read it or warn again.
    *
-   * The first unsupported read also emits one Korean notice: a person on an old
-   * CLI never sees the cache that silently went unused. A supported version
-   * stays silent, and later rounds of an unsupported one skip the notice
-   * because the memoized answer returns early. The notice names the detected
-   * version when there is one, and says so when the version could not be read.
+   * The first unsupported read holds one Korean notice instead of emitting it:
+   * a person on an old CLI never sees the cache that silently went unused, but
+   * `resolveTargetModel`/`version()` can outlive a cancel, so emitting here
+   * would toast a run the person already left. `round` flushes the held notice
+   * after its own stale/abort check, so a live round shows it once per
+   * controller and a cancelled or superseded one shows nothing. A supported
+   * version holds nothing. The notice names the detected version when there is
+   * one, and says so when the version could not be read.
    */
   async function promptCacheEnabled(ports: EnginePorts): Promise<boolean> {
     if (versionCache !== null) return versionCache
@@ -206,11 +214,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
     versionCache = supported
     if (!supported) {
-      notify(
+      pendingCacheNotice =
         version === undefined
           ? 'Claude Code 버전을 확인할 수 없어 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.'
-          : `Claude Code ${version}은(는) ${PROMPT_CACHE_MIN_VERSION} 미만이라 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.`,
-      )
+          : `Claude Code ${version}은(는) ${PROMPT_CACHE_MIN_VERSION} 미만이라 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.`
     }
     return supported
   }
@@ -422,6 +429,18 @@ export function createController(deps: ControllerDeps): OptimizerController {
     if (current === null || current.id !== workflowId) {
       releaseRound(workflowId, controller)
       return
+    }
+
+    // `promptCacheEnabled` held the unsupported-version notice instead of
+    // showing it while the round was still cancellable. This is the first
+    // point past every stale/abort guard, so the run really is going ahead:
+    // show it now, once per controller, and clear it so later rounds stay
+    // silent. A cancelled round never reaches here, so its held notice waits
+    // for the next live round instead of toasting a run already left.
+    if (pendingCacheNotice !== null) {
+      const notice = pendingCacheNotice
+      pendingCacheNotice = null
+      notify(notice)
     }
 
     const system = composeSystemPrompt(extra, target.profile)

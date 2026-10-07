@@ -1335,6 +1335,41 @@ describe('prompt caching by engine version', () => {
     const warnings = h.notices.filter(notice => notice?.includes('버전을 확인할 수 없어'))
     expect(warnings).toHaveLength(1)
   })
+
+  test('a cancel during the version read holds the notice for the next live round', async () => {
+    let releaseVersion: ((info: SessionVersion) => void) | undefined
+    const h = harness({
+      model: () => 'claude-opus-5-5',
+      version: () =>
+        new Promise<SessionVersion>(resolve => {
+          releaseVersion = resolve
+        }),
+    })
+    h.controller.onSessionStart('sess-1')
+
+    // Run A reaches the version read and hangs there.
+    await h.controller.onSubmit(h.ports, submit('첫 요청'), 'pane')
+    const queued = h.queue.shift()
+    const running = (queued as () => Promise<void>)()
+    await h.waitFor(() => h.calls.version === 1)
+
+    // The person cancels while the read is still in flight.
+    await h.controller.cancel(h.ports)
+    releaseVersion?.({ version: '2.1.291' })
+    await running
+
+    // The run they already left shows nothing.
+    expect(h.notices.filter(notice => notice?.includes('프롬프트 캐시 없이 동작'))).toHaveLength(0)
+
+    // The next live round shows the held notice exactly once, and the answer is
+    // memoized so the version is not read again.
+    await h.controller.onSubmit(h.ports, submit('둘째 요청'), 'pane')
+    await h.flush()
+    const warnings = h.notices.filter(notice => notice?.includes('프롬프트 캐시 없이 동작'))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('2.1.291')
+    expect(h.calls.version).toBe(1)
+  })
 })
 
 describe('model-aware guidance', () => {
