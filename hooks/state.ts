@@ -118,7 +118,32 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const current = matchWorkflow(base, event.workflowId, event.generation)
       if (current === null) return base
       if (!PHASE_TRANSITIONS[current.phase].includes(event.phase)) return base
-      return { ...base, workflow: { ...current, phase: event.phase } }
+      const active = event.phase === 'collecting' || event.phase === 'generating'
+      const continuing = current.phase === 'collecting' && event.phase === 'generating'
+      return {
+        ...base,
+        workflow: {
+          ...current,
+          phase: event.phase,
+          progress: active ? {
+            stage: event.phase === 'collecting' ? 'context' : 'instructions',
+            startedAt: continuing ? current.progress?.startedAt ?? now : now,
+            updatedAt: now,
+          } : undefined,
+        },
+      }
+    }
+
+    case 'progress': {
+      const current = matchWorkflow(base, event.workflowId, event.generation)
+      if (!current?.progress || (current.phase !== 'collecting' && current.phase !== 'generating')) return base
+      const stage = event.stage ?? current.progress.stage
+      const updatedAt = Math.max(current.progress.updatedAt, now)
+      if (stage === current.progress.stage && updatedAt === current.progress.updatedAt) return base
+      return {
+        ...base,
+        workflow: { ...current, progress: { ...current.progress, stage, updatedAt } },
+      }
     }
 
     case 'reply': {
@@ -131,6 +156,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const updated: Workflow = {
         ...current,
         phase: 'reviewing',
+        progress: undefined,
         draft: event.reply.draft,
         message: event.reply.message,
         question: event.reply.question,
@@ -165,6 +191,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const updated: Workflow = {
         ...current,
         phase: 'failed',
+        progress: undefined,
         lastError: event.error,
         rounds: current.rounds + 1,
         usage: event.usage === undefined ? current.usage : addUsage(current.usage, event.usage),

@@ -333,6 +333,72 @@ describe('optimizer UI', () => {
     }
   })
 
+  test('progress shows observed stages and elapsed time, animates on ticks and ends at review', async ($, on) => {
+    const item = workflow('collecting')
+    item.progress = { stage: 'context', startedAt: 1_000, updatedAt: 13_000 }
+    const { controller } = fakeController(state(item))
+    const ui = await captureUi($, on, controller)
+    for (const [stage, label] of [
+      ['context', '대화·프로젝트 맥락 확인 중'],
+      ['instructions', '최적화 지침 읽는 중'],
+      ['target-model', '대상 모델 확인 중'],
+      ['generating', '개선안 생성 중'],
+    ] as const) {
+      item.progress.stage = stage
+      item.phase = stage === 'generating' ? 'generating' : 'collecting'
+      for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+        const pane = await ui.render({ ...PANE, surface })
+        expect(textNode(pane, `◐ 12초 · ${label}`)?.props.color).toBe('warning')
+        expect(contentOf(pane)).toContain('완료 누적 10토큰')
+      }
+    }
+    item.progress.updatedAt = 14_000
+    expect(contentOf(await ui.render(PANE))).toContain('◓ 13초 · 개선안 생성 중')
+    item.progress.updatedAt = 63_000
+    const running = contentOf(await ui.render(PANE))
+    expect(running).toContain('◑ 1분 2초 · 개선안 생성 중')
+    expect(running).toContain('토큰은 응답 완료 시 갱신됩니다.')
+    expect(running).not.toContain('%')
+    item.phase = 'reviewing'
+    const reviewed = contentOf(await ui.render(PANE))
+    expect(reviewed).not.toContain('1분 2초')
+    expect(reviewed).not.toContain('개선안 생성 중')
+  })
+
+  for (const omitted of [undefined, 'Button'] as const) test(`busy compact panes keep progress in their first visible row (${omitted ? 'no buttons' : 'buttons'})`, async ($, on) => {
+    const item = {
+      ...workflow('generating'),
+      draft: '기존 개선안 '.repeat(100),
+      progress: { stage: 'generating' as const, startedAt: 1_000, updatedAt: 8_000 },
+    }
+    const { controller } = fakeController(state(item))
+    const ui = await captureUi($, on, controller, omitted)
+    for (const [rows, isFullscreen, budget] of [[24, false, 11], [24, true, 6], [20, true, 4]] as const) {
+      const tree = await ui.render({ ...PANE, viewport: { columns: 80, rows, isFullscreen }, props: { ...PANE.props, placement: 'inline' } }) as UiNode
+      const first = tree.children!.slice(0, -1)
+      expect(first.length).toBeLessThanOrEqual(budget)
+      expect(contentOf(first[0])).toBe('◒ 7초 · 개선안 생성 중')
+      expect(contentOf(tree)).toContain(item.draft)
+      expect(contentOf(tree)).toContain('완료 누적 10토큰')
+      expect(nodesOf(tree).filter(node => ['Button', 'Input'].includes(node.type))).toHaveLength(0)
+    }
+  })
+
+  test('a one-row composer band still prioritizes live activity over draft and command guidance', async ($, on) => {
+    const item = {
+      ...workflow('generating'), ui: 'composer' as const,
+      progress: { stage: 'generating' as const, startedAt: 1_000, updatedAt: 10_000 },
+    }
+    const { controller } = fakeController(state(item))
+    const ui = await captureUi($, on, controller)
+    const event = { ...BAND, props: { ...BAND.props, maxRows: 1 } }
+    const tree = await ui.render(event) as UiNode
+    expect(tree.children!).toHaveLength(1)
+    expect(contentOf(tree).startsWith('◓ 9초 · 개선안 생성 중')).toBe(true)
+    item.progress.updatedAt = 11_000
+    expect(contentOf(await ui.render(event))).toContain('◑ 10초 · 개선안 생성 중')
+  })
+
   test('band caps rows at host maxRows and half the screen without scroll feedback', async ($, on) => {
     const current = state({ ...workflow(), message: '✅'.repeat(1200), question: '질문 '.repeat(100), options: ['보고서', '요약'], lastError: '오류\n내용' })
     const { controller } = fakeController(current)
@@ -876,7 +942,7 @@ describe('optimizer UI', () => {
     current.workflow = workflow('generating')
     const busy = textOf(await ui.render(PANE))
     expect(busy).toContain('1: 입력창에 넣기 · 사용 불가')
-    expect(busy).toContain('잠시 기다려 주세요.')
+    expect(busy).toContain('개선안 생성 중')
     await press('optimizer:accept')
     expect(calls).toHaveLength(actions.length)
 
@@ -960,6 +1026,36 @@ describe('optimizer UI', () => {
     expect(statuses.at(-1)).toBeUndefined()
     expect(toasts).toHaveLength(0)
     expect(DEFAULT_CONFIG.maxRounds).toBe(5)
+  })
+
+  test('composer progress ticks refresh status without appending transcript output', () => {
+    const statuses: Array<string | undefined> = []
+    const logs: string[] = []
+    const ui: UiPorts = {
+      open: async () => ({ isPlaced: true }), close: async () => undefined,
+      invalidate: () => undefined, status: text => { statuses.push(text) },
+      log: text => { logs.push(text) }, toast: () => undefined,
+    }
+    const item = {
+      ...workflow('generating'), ui: 'composer' as const,
+      progress: { stage: 'generating' as const, startedAt: 1_000, updatedAt: 1_000 },
+    }
+    const presenter = createPresenter()
+    const current = state(item)
+    presenter.present(ui, current)
+    const initialLogs = [...logs]
+    item.progress.updatedAt = 2_000
+    presenter.present(ui, current)
+    expect(statuses.at(-1)).toContain('◓ 1초 · 개선안 생성 중')
+    expect(statuses.at(-1)).toContain('완료 누적 10토큰')
+    expect(logs).toEqual(initialLogs)
+    item.phase = 'failed'
+    presenter.present(ui, current)
+    expect(statuses.at(-1)).toContain('옵티마이저 실패')
+    expect(statuses.at(-1)).not.toContain('개선안 생성 중')
+    current.workflow = null
+    presenter.present(ui, current)
+    expect(statuses.at(-1)).toBeUndefined()
   })
 
   test('presenter closes a finished pane once and invalidates it, but never closes composer', async () => {

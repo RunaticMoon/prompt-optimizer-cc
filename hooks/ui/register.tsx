@@ -6,6 +6,7 @@ import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
 import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, UI_COLORS, phaseColor, phaseLabel, questionGuide } from './present'
+import { progressText, tokenUsageText } from './progress'
 import { PANE_ROWS } from './ui-ports'
 
 const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
@@ -52,7 +53,10 @@ function portsOf($: EngineInterface): EnginePorts {
       model: () => $.session.model(),
       version: () => $.session.version(),
     },
-    clock: { sleep: (ms, options) => $.clock.sleep(ms, options) },
+    clock: {
+      sleep: (ms, options) => $.clock.sleep(ms, options),
+      every: (ms, fn) => $.clock.every(ms, fn),
+    },
     fs: {
       stat: (path, options) => $.fs.stat(path, options),
       read: ((path: string) => $.fs.read(path)) as unknown as EnginePorts['fs']['read'],
@@ -304,7 +308,7 @@ export function registerUi(
 
     const { Box, Text } = await $.ui.resolve(e)
     const columns = Math.max(1, e.props.bodyColumns - 2)
-    const tokens = Object.values(workflow.usage).reduce((sum, count) => sum + count, 0)
+    const progress = progressText(workflow)
     const composer = workflow.ui === 'composer' || paneClosed
     const options = replyOptions(workflow)
     // Give each section a visible row before expanding any body. Reserve the
@@ -350,8 +354,9 @@ export function registerUi(
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text bold color={UI_COLORS.heading} wrap="truncate-end">
+          {progress && <Text color={UI_COLORS.progress}>{`${progress} · `}</Text>}
           옵티마이저 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
-          <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${getMaxRounds()}회  ${tokens}토큰`}</Text>
+          <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${getMaxRounds()}회  ${tokenUsageText(workflow)}`}</Text>
         </Text>
         {sections.flatMap((section, index) => section.lines.slice(0, counts[index]).map((line, row) =>
           <Text key={`band:${index}:${row}`} color={section.color} bold={section.bold} wrap="truncate-end">
@@ -393,10 +398,11 @@ export function registerUi(
     const draftText = workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')
     const draftColor = workflow.draft ? UI_COLORS.draft : busy ? UI_COLORS.progress : UI_COLORS.unavailable
     const originalToggleLabel = showOriginal ? '원문 접기' : '원문 전체 보기'
-    const tokens = Object.values(workflow.usage).reduce((sum, count) => sum + count, 0)
+    const progress = progressText(workflow)
+    const progressRow = progress && <Text color={UI_COLORS.progress} wrap="truncate-end">{progress}</Text>
     const header = <Text bold color={UI_COLORS.heading} wrap="truncate-end">
       프롬프트 옵티마이저 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
-      <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+      <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${maxRounds}회  ${tokenUsageText(workflow)}`}</Text>
     </Text>
     const messageSection = message && <Box flexDirection="column">
       <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
@@ -418,6 +424,7 @@ export function registerUi(
       const textRow = (value: string, color: typeof UI_COLORS[keyof typeof UI_COLORS], bold?: true) =>
         <Text color={color} bold={bold} wrap="truncate-end">{hardWrapPreview(value, columns, 1)[0]}</Text>
       const rows = [
+        ...(progress ? [textRow(progress, UI_COLORS.progress)] : []),
         textRow(`개선안 · ${draftText}`, draftColor, true),
         ...(workflow.question ? [textRow(`질문: ${workflow.question}`, UI_COLORS.heading, true)] : []),
         ...(waiting && options.length ? [textRow(questionGuide(workflow), UI_COLORS.heading)] : []),
@@ -440,12 +447,12 @@ export function registerUi(
     }
 
     if (typeof Button !== 'function') return <Box flexDirection="column" paddingX={1}>
-      {header}{question}{optionsText}{draft}
+      {header}{progressRow}{question}{optionsText}{draft}
       {messageSection}
       <Text bold color={UI_COLORS.original}>원문</Text>
       <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
       {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
-      {busy && <Text color={UI_COLORS.progress}>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
+      {busy && <Text color={UI_COLORS.section}>토큰은 응답 완료 시 갱신됩니다.</Text>}
       <Text color={UI_COLORS.section} wrap="wrap">직접 입력: /optimize retry &lt;선택지 답변 또는 보완 내용&gt;</Text>
       <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
     </Box>
@@ -489,17 +496,19 @@ export function registerUi(
       const budget = estimatedCompactRows(e.viewport!)
       const columns = Math.max(1, e.props.bodyColumns - 2)
       const hasOptions = retryReady && options.length > 0
+      const progressRows = progress ? 1 : 0
       const questionRows = workflow.question ? 1 : 0
       const optionRows = hasOptions ? 1 : 0
       const errorRows = workflow.lastError ? 1 : 0
       const messageRows = message ? 1 : 0
       // Essential context and input precede actions. If the host offers only
       // four rows, actions continue immediately in the scrollable portion.
-      const essential = 1 + questionRows + optionRows + errorRows + messageRows + 1
+      const essential = progressRows + 1 + questionRows + optionRows + errorRows + messageRows + 1
       const actionsFit = essential + 1 <= budget
-      const previewRows = Math.max(1, budget - questionRows - optionRows - errorRows - messageRows - 1 - (actionsFit ? 1 : 0))
+      const previewRows = Math.max(1, budget - progressRows - questionRows - optionRows - errorRows - messageRows - 1 - (actionsFit ? 1 : 0))
       const preview = hardWrapPreviewWithStatus(`개선안 · ${draftText}`, columns, previewRows)
       const first = [
+        ...(progress ? [<Text color={UI_COLORS.progress} wrap="truncate-end">{hardWrapPreview(progress, columns, 1)[0]}</Text>] : []),
         ...preview.lines.map((line, index) => <Text key={`preview:${index}`} bold color={draftColor} wrap="truncate-end">{line}</Text>),
         ...(workflow.question ? [<Text bold color={UI_COLORS.heading} wrap="truncate-end">{hardWrapPreview(`질문: ${workflow.question}`, columns, 1)[0]}</Text>] : []),
         ...(hasOptions ? [<Box flexDirection="row">{optionButtons(true)}</Box>] : []),
@@ -533,6 +542,7 @@ export function registerUi(
       : `ctrl+x tab 포커스 · Tab 이동 · ${draftReady ? '1/2/3' : '3'} 선택 · Esc 닫기`
     return <Box flexDirection="column" paddingX={1}>
       {header}
+      {progressRow}
       {!(waiting && workflow.questionAsk === 'pending') && <Text color={busy ? UI_COLORS.progress : UI_COLORS.section} wrap="wrap">{keyHintText}</Text>}
       {question}
       {retryReady && options.length > 0 && <Box flexDirection="column">{optionButtons(false)}</Box>}
@@ -541,7 +551,7 @@ export function registerUi(
       {!bandDrawn && messageSection}
       {originalSection}
       {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
-      {busy && <Text color={UI_COLORS.progress}>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
+      {busy && <Text color={UI_COLORS.section}>토큰은 응답 완료 시 갱신됩니다.</Text>}
     </Box>
   })
 

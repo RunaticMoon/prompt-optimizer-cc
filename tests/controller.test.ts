@@ -342,6 +342,273 @@ function edit(over: Partial<RawEditFacts> = {}): RawEditFacts {
   return { text: '', cursor: 0, start, end: over.end ?? start, inputText: '', ...over }
 }
 
+/** Retains callbacks after cancellation so tests can simulate a queued stale tick. */
+function progressClock(h: Harness): Array<{ ms: number; tick: () => void; cancelled: boolean }> {
+  const timers: Array<{ ms: number; tick: () => void; cancelled: boolean }> = []
+  h.ports.clock = {
+    ...fakeClock(),
+    every: (ms, tick) => {
+      const timer = { ms, tick, cancelled: false }
+      timers.push(timer)
+      return { cancel: () => { timer.cancelled = true } }
+    },
+  }
+  return timers
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(yes => { resolve = yes })
+  return { promise, resolve }
+}
+
+describe('live progress', () => {
+  test('reports actual work stages and elapsed time without inventing usage or more completions', async () => {
+    let now = 1_000
+    const messages = deferred<SessionMessage[]>()
+    const instructions = deferred<string>()
+    const target = deferred<string>()
+    const completion = deferred<ModelCompleteResult>()
+    const h = harness({
+      deps: { now: () => now },
+      config: { systemPromptFile: '/extra.md' },
+      files: { '/extra.md': 'extra instructions' },
+      read: () => instructions.promise,
+      model: () => target.promise,
+      complete: () => completion.promise,
+    })
+    h.ports.session.messages = (async () => {
+      h.calls.messages += 1
+      return messages.promise
+    }) as EnginePorts['session']['messages']
+    const timers = progressClock(h)
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => h.calls.messages === 1)
+
+    expect(h.controller.getState().workflow?.progress).toEqual({
+      stage: 'context', startedAt: 1_000, updatedAt: 1_000,
+    })
+    expect(timers.length).toBe(1)
+    expect(timers[0]?.ms).toBe(1_000)
+    const unused = h.controller.getState().usage
+    now = 2_000
+    timers[0]?.tick()
+    expect(h.controller.getState().workflow?.progress?.updatedAt).toBe(2_000)
+    expect(h.controller.getState().usage).toEqual(unused)
+    expect(h.calls.complete).toBe(0)
+
+    now = 3_000
+    messages.resolve([])
+    await h.waitFor(() => h.calls.fileRead === 1)
+    expect(h.controller.getState().workflow?.progress).toEqual({
+      stage: 'instructions', startedAt: 1_000, updatedAt: 3_000,
+    })
+
+    now = 4_000
+    instructions.resolve('extra instructions')
+    await h.waitFor(() => h.calls.model === 1)
+    expect(h.controller.getState().workflow?.progress).toEqual({
+      stage: 'target-model', startedAt: 1_000, updatedAt: 4_000,
+    })
+
+    now = 5_000
+    target.resolve('claude-opus-5-5')
+    await h.waitFor(() => h.calls.complete === 1)
+    expect(h.controller.getState().workflow?.progress).toEqual({
+      stage: 'generating', startedAt: 1_000, updatedAt: 5_000,
+    })
+    now = 6_000
+    timers[0]?.tick()
+    expect(h.controller.getState().workflow?.progress?.updatedAt).toBe(6_000)
+    expect(h.controller.getState().usage).toEqual(unused)
+    expect(h.calls.complete).toBe(1)
+
+    completion.resolve(answered('개선안'))
+    await running
+    expect(timers[0]?.cancelled).toBe(true)
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+    expect(h.controller.getState().usage.calls).toBe(1)
+    expect(h.controller.getState().usage.output).toBe(USAGE.output_tokens)
+    const settled = h.controller.getState()
+    const repaints = h.changes.length
+    now = 7_000
+    timers[0]?.tick()
+    expect(h.controller.getState()).toBe(settled)
+    expect(h.changes.length).toBe(repaints)
+    expect(h.calls.complete).toBe(1)
+  })
+
+  for (const action of ['refine', 'retry'] as const) {
+    test(`${action} starts a fresh elapsed clock and ignores the previous round's tick`, async () => {
+      let now = 1_000
+      const completion = deferred<ModelCompleteResult>()
+      const h = harness({
+        deps: { now: () => now },
+        complete: async (_request, _signal, call) => call === 1 ? answered('첫 초안') : completion.promise,
+      })
+      const timers = progressClock(h)
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+      await h.flush()
+      expect(timers[0]?.cancelled).toBe(true)
+
+      now = 10_000
+      const running = action === 'refine'
+        ? h.controller.refine(h.ports, '더 짧게')
+        : h.controller.retry(h.ports)
+      await h.waitFor(() => h.calls.complete === 2)
+      expect(timers.length).toBe(2)
+      expect(h.controller.getState().workflow?.progress).toEqual({
+        stage: 'generating', startedAt: 10_000, updatedAt: 10_000,
+      })
+      const current = h.controller.getState()
+      now = 11_000
+      timers[0]?.tick()
+      expect(h.controller.getState()).toBe(current)
+      timers[1]?.tick()
+      expect(h.controller.getState().workflow?.progress?.updatedAt).toBe(11_000)
+      expect(h.controller.getState().usage).toEqual(current.usage)
+      expect(h.calls.messages).toBe(1)
+      expect(h.calls.complete).toBe(2)
+
+      completion.resolve(answered('보완한 초안'))
+      await running
+      expect(timers[1]?.cancelled).toBe(true)
+      expect(h.controller.getState().usage.calls).toBe(2)
+    })
+  }
+
+  for (const stage of ['context', 'generating'] as const) {
+    test(`cancel during ${stage} stops progress and cannot repaint a replacement run`, async () => {
+      let now = 1_000
+      const messages = deferred<SessionMessage[]>()
+      const completion = deferred<ModelCompleteResult>()
+      const h = harness({ deps: { now: () => now }, complete: () => completion.promise })
+      if (stage === 'context') {
+        h.ports.session.messages = (async () => {
+          h.calls.messages += 1
+          return h.calls.messages === 1 ? messages.promise : []
+        }) as EnginePorts['session']['messages']
+      }
+      const timers = progressClock(h)
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('이전 요청'), 'pane')
+      const running = h.flush()
+      await h.waitFor(() => stage === 'context' ? h.calls.messages === 1 : h.calls.complete === 1)
+
+      await h.controller.cancel(h.ports)
+      expect(timers[0]?.cancelled).toBe(true)
+      const cancelled = h.controller.getState()
+      now = 2_000
+      timers[0]?.tick()
+      expect(h.controller.getState()).toBe(cancelled)
+
+      now = 3_000
+      await h.controller.onSubmit(h.ports, submit('새 요청'), 'pane')
+      const replacement = h.flush()
+      await h.waitFor(() => timers.length === 2 && h.controller.getState().workflow?.progress?.stage === 'generating')
+      const current = h.controller.getState()
+      now = 4_000
+      timers[0]?.tick()
+      expect(h.controller.getState()).toBe(current)
+      timers[1]?.tick()
+      expect(h.controller.getState().workflow?.progress?.updatedAt).toBe(4_000)
+
+      messages.resolve([])
+      completion.resolve(answered('응답'))
+      await Promise.all([running, replacement])
+      expect(h.controller.getState().workflow?.original).toBe('새 요청')
+      expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+      expect(timers[1]?.cancelled).toBe(true)
+    })
+  }
+
+  for (const transition of ['start', 'end'] as const) {
+    test(`session ${transition} stops progress and ignores late ticks`, async () => {
+      let now = 1_000
+      const completion = deferred<ModelCompleteResult>()
+      const h = harness({ deps: { now: () => now }, complete: () => completion.promise })
+      const timers = progressClock(h)
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+      const running = h.flush()
+      await h.waitFor(() => h.calls.complete === 1)
+
+      if (transition === 'start') h.controller.onSessionStart('sess-2')
+      else h.controller.onSessionEnd()
+      expect(timers[0]?.cancelled).toBe(true)
+      expect(h.signals[0]?.aborted).toBe(true)
+      const reset = h.controller.getState()
+      now = 2_000
+      timers[0]?.tick()
+      expect(h.controller.getState()).toBe(reset)
+      completion.resolve(answered('늦은 응답'))
+      await running
+      expect(h.controller.getState().workflow).toBeNull()
+    })
+  }
+
+  test('a failed completion stops the timer before restoring the original', async () => {
+    const h = harness({ complete: async () => apiError() })
+    const timers = progressClock(h)
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(timers[0]?.cancelled).toBe(true)
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.fills[0]?.text).toBe('원문')
+    const settled = h.controller.getState()
+    timers[0]?.tick()
+    expect(h.controller.getState()).toBe(settled)
+  })
+
+  test('an unexpected repaint failure releases the progress timer', async () => {
+    const messages = deferred<SessionMessage[]>()
+    const h = harness()
+    h.ports.session.messages = (async () => {
+      h.calls.messages += 1
+      return messages.promise
+    }) as EnginePorts['session']['messages']
+    const timers = progressClock(h)
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => h.calls.messages === 1)
+    h.flags.throwOnRepaint = true
+    messages.resolve([])
+    await running
+
+    expect(timers[0]?.cancelled).toBe(true)
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.calls.complete).toBe(0)
+    expect(h.notices).toContain('개선 중 예기치 않은 오류가 발생했습니다: repaint failed')
+  })
+
+  for (const failure of ['start', 'cancel'] as const) {
+    test(`a timer ${failure} failure does not prevent a completed optimization`, async () => {
+      const h = harness()
+      h.ports.clock = {
+        ...fakeClock(),
+        every: () => {
+          if (failure === 'start') throw new Error('timer unavailable')
+          return { cancel: () => { throw new Error('timer cancellation failed') } }
+        },
+      }
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+      await h.flush()
+
+      expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+      expect(h.controller.getState().workflow?.draft).toBe('개선된 요청')
+      expect(h.calls.complete).toBe(1)
+      expect(h.controller.getState().usage.calls).toBe(1)
+    })
+  }
+})
+
 describe('onSubmit — intercepts one submission', () => {
   test('drops it, then runs exactly one collect and one completion from the queue', async () => {
     const h = harness()

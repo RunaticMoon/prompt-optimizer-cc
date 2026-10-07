@@ -60,6 +60,16 @@ export type Phase =
   | 'transferring'
   | 'sending'
 
+/** Actual work within a round; the model API does not expose streaming tokens. */
+export type ProgressStage = 'context' | 'instructions' | 'target-model' | 'generating'
+
+/** Per-round clock for progress rendering, independent of completed token usage. */
+export interface WorkflowProgress {
+  stage: ProgressStage
+  startedAt: number
+  updatedAt: number
+}
+
 /** One optimization run over one original prompt. */
 export interface Workflow {
   /** Stable id for this run, unique per session. */
@@ -86,6 +96,8 @@ export interface Workflow {
   ui: 'pane' | 'composer'
   /** Tokens spent on this workflow's completions. */
   usage: ModelUsage
+  /** Live activity and elapsed time while collecting/generating; absent at rest. */
+  progress?: WorkflowProgress
   /** Last failure message, when the phase is `failed`. */
   lastError?: string
   /** The latest reply's change note (always Korean); absent before the first reply. */
@@ -285,6 +297,7 @@ export interface RuntimeState {
 export type OptimizerEvent =
   | { type: 'start'; workflow: Workflow }
   | { type: 'phase'; workflowId: string; generation: number; phase: Phase }
+  | { type: 'progress'; workflowId: string; generation: number; stage?: ProgressStage }
   | { type: 'question-ask'; workflowId: string; round: number; question: string; status: 'pending' | 'closed' }
   | {
       type: 'reply'
@@ -429,8 +442,8 @@ export const SYSTEM_PROMPT_MAX_CHARS = 4000
 export type EnginePorts = {
   session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'> &
     Partial<Pick<EngineInterface['session'], 'model' | 'version'>>
-  /** Optional so older hosts and tests without a timer degrade to common guidance. */
-  clock?: Pick<EngineInterface['clock'], 'sleep'>
+  /** Without every, stages still render but elapsed time does not tick between changes. */
+  clock?: Pick<EngineInterface['clock'], 'sleep'> & Partial<Pick<EngineInterface['clock'], 'every'>>
   fs: Pick<EngineInterface['fs'], 'stat' | 'read'> &
     Partial<Pick<EngineInterface['fs'], 'list'>>
   env: Pick<EngineInterface['env'], 'get'>
