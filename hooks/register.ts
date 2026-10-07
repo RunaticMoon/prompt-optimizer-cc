@@ -88,7 +88,10 @@ function portsOf($: EngineInterface): EnginePorts {
       model: () => $.session.model(),
       version: () => $.session.version(),
     },
-    clock: { sleep: (ms, options) => $.clock.sleep(ms, options) },
+    clock: {
+      sleep: (ms, options) => $.clock.sleep(ms, options),
+      every: (ms, fn) => $.clock.every(ms, fn),
+    },
     fs: {
       stat: (path, options) => $.fs.stat(path, options),
       read: ((path: string) => $.fs.read(path)) as unknown as EnginePorts['fs']['read'],

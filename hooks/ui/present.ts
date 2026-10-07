@@ -4,6 +4,7 @@ import type { RuntimeState, Workflow } from '../contracts'
 import { PANE_ID } from '../controller'
 import { RAW_MODE_HINT } from '../raw-mode'
 import type { UiPorts } from './ui-ports'
+import { progressText, tokenUsageText } from './progress'
 
 export const COMPOSER_GUIDE =
   '보완 내용을 입력해 Enter · /optimize accept(입력창으로) · /optimize send · /optimize raw · /optimize cancel'
@@ -108,7 +109,8 @@ export function createPresenter(): {
         return
       }
 
-      ui.status(`옵티마이저 ${phaseLabel(workflow.phase)} (${workflow.rounds}회) · ${COMPOSER_GUIDE}`)
+      const progress = progressText(workflow)
+      ui.status(`옵티마이저 ${progress ?? phaseLabel(workflow.phase)} (${workflow.rounds}회) · ${tokenUsageText(workflow)} · ${COMPOSER_GUIDE}`)
       hadStatus = true
       ui.invalidate()
 

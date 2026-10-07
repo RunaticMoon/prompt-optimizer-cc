@@ -20,7 +20,7 @@
  * tests, using a manual queue, await it directly to stay deterministic.
  */
 
-import type { PromptSubmitInput } from 'claude-code'
+import type { PromptSubmitInput, Timer } from 'claude-code'
 
 import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
@@ -71,6 +71,8 @@ const ZERO_USAGE: ModelUsage = {
 interface Round {
   /** Aborts the completion on cancel, a new session, or an unexpected error. */
   controller: AbortController
+  /** UI-only heartbeat, stopped even if a cancelled engine call never settles. */
+  timer?: Timer
 }
 
 /**
@@ -312,13 +314,41 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
   /** Aborts every in-flight completion; used on cancel and session changes. */
   function abortAll(): void {
-    for (const round of rounds.values()) round.controller.abort()
-    rounds.clear()
+    for (const [id, round] of rounds) {
+      round.controller.abort()
+      releaseRound(id, round.controller)
+    }
   }
 
   /** Removes a round entry only when it is still this round's own. */
   function releaseRound(workflowId: string, controller: AbortController): void {
-    if (rounds.get(workflowId)?.controller === controller) rounds.delete(workflowId)
+    const entry = rounds.get(workflowId)
+    if (entry?.controller !== controller) return
+    rounds.delete(workflowId)
+    try {
+      entry.timer?.cancel()
+    } catch {
+      // A refused timer cleanup must not strand a result or cancellation.
+      // Its callback is inert once this round has lost ownership.
+    }
+  }
+
+  /** A heartbeat redraws only live work; it never estimates tokens or completion. */
+  function startProgressTimer(ports: EnginePorts, workflow: Workflow, controller: AbortController): void {
+    const entry = rounds.get(workflow.id)
+    if (!entry || entry.controller !== controller) return
+    try {
+      entry.timer = ports.clock?.every?.(1000, () => {
+        if (rounds.get(workflow.id) !== entry || controller.signal.aborted) return
+        try {
+          apply({ type: 'progress', workflowId: workflow.id, generation: workflow.generation })
+        } catch {
+          // A repaint failure cannot fail an otherwise healthy model request.
+        }
+      })
+    } catch {
+      // Older/refusing hosts still show stage changes without a live clock.
+    }
   }
 
   /** Drops the run's cached extra prompt; the next run reads the file afresh. */
@@ -404,169 +434,178 @@ export function createController(deps: ControllerDeps): OptimizerController {
     if (workflow === null) return
     const { id: workflowId, generation } = workflow
 
-    // The snapshot is read once, on the first round.
-    if (workflow.phase === 'idle') {
-      apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
-      // The memory read is kept out of the snapshot's own try: a throwing
-      // reader is treated as no memory, so collection still happens. A snapshot
-      // failure is not a round failure either: continue without it.
-      let memory = ''
-      try {
-        memory = deps.readMemory?.() ?? ''
-      } catch {
-        memory = ''
-      }
-      let context: ContextSnapshot | null = null
-      try {
-        context = await collectContext(ports, config, memory, workflow.original)
-      } catch {
-        context = null
-      }
-      if (context !== null) apply({ type: 'context', workflowId, generation, context })
-    }
-
-    // A cancel during collection has already stranded this run.
-    if (isStale(state, workflowId, generation)) return
-
-    apply({ type: 'phase', workflowId, generation, phase: 'generating' })
-
     const controller = new AbortController()
     rounds.set(workflowId, { controller })
-
-    // The extra file is read once per run. Only a live owner may cache it: a
-    // cancel or a new run during the read must not be overwritten by this one.
-    if (extra === null) {
-      let loadedText = ''
-      let warning: string | undefined
-      try {
-        const loaded = await loadSystemPromptExtra(ports, config)
-        loadedText = loaded.text
-        warning = loaded.warning
-      } catch {
-        // A missing extra file falls back to the built-in prompt, already the
-        // empty `loadedText`; `loadSystemPromptExtra` reports its own warning
-        // when it can, but an unexpected throw here leaves none to relay.
-        loadedText = ''
+    startProgressTimer(ports, workflow, controller)
+    try {
+      // The snapshot is read once, on the first round.
+      if (workflow.phase === 'idle') {
+        apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
+        // The memory read is kept out of the snapshot's own try: a throwing
+        // reader is treated as no memory, so collection still happens. A snapshot
+        // failure is not a round failure either: continue without it.
+        let memory = ''
+        try {
+          memory = deps.readMemory?.() ?? ''
+        } catch {
+          memory = ''
+        }
+        let context: ContextSnapshot | null = null
+        try {
+          context = await collectContext(ports, config, memory, workflow.original)
+        } catch {
+          context = null
+        }
+        if (context !== null) apply({ type: 'context', workflowId, generation, context })
       }
-      // After the await, a stale or aborted round must not write the cache or
-      // notify: its result belongs to a run the person already left.
+
+      // A cancel during collection has already stranded this run.
+      if (isStale(state, workflowId, generation)) return
+
+      apply({ type: 'phase', workflowId, generation, phase: 'generating' })
+
+      // The extra file is read once per run. Only a live owner may cache it: a
+      // cancel or a new run during the read must not be overwritten by this one.
+      if (extra === null) {
+        let loadedText = ''
+        let warning: string | undefined
+        try {
+          const loaded = await loadSystemPromptExtra(ports, config)
+          loadedText = loaded.text
+          warning = loaded.warning
+        } catch {
+          // A missing extra file falls back to the built-in prompt, already the
+          // empty `loadedText`; `loadSystemPromptExtra` reports its own warning
+          // when it can, but an unexpected throw here leaves none to relay.
+          loadedText = ''
+        }
+        // After the await, a stale or aborted round must not write the cache or
+        // notify: its result belongs to a run the person already left.
+        if (isStale(state, workflowId, generation) || controller.signal.aborted) {
+          releaseRound(workflowId, controller)
+          return
+        }
+        extra = loadedText
+        // The prompt is loaded once per run, so this is the run's one warning
+        // notice; the warning text itself names the file and the reason. Only a
+        // missing/unreadable file leaves `extra` empty and falls back to the
+        // built-in prompt; a truncation warning keeps the loaded text.
+        if (warning !== undefined && warning !== '') {
+          notify(
+            loadedText === ''
+              ? `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${warning}`
+              : `시스템 프롬프트 파일 안내: ${warning}`,
+          )
+        }
+      }
+
+      // The main session's model is read afresh on every round (the first call,
+      // retry and refine alike), just before the request is assembled.
+      apply({ type: 'progress', workflowId, generation, stage: 'target-model' })
+      const target = await resolveTargetModel(ports, config.modelGuidance, controller.signal)
+      // The engine version caps prompt caching; it is read once per controller.
+      const cache = await promptCacheEnabled(ports)
+
+      // A cancel during detection must not send or record anything: a `cancelled`
+      // snapshot is not permission to complete.
       if (isStale(state, workflowId, generation) || controller.signal.aborted) {
         releaseRound(workflowId, controller)
         return
       }
-      extra = loadedText
-      // The prompt is loaded once per run, so this is the run's one warning
-      // notice; the warning text itself names the file and the reason. Only a
-      // missing/unreadable file leaves `extra` empty and falls back to the
-      // built-in prompt; a truncation warning keeps the loaded text.
-      if (warning !== undefined && warning !== '') {
-        notify(
-          loadedText === ''
-            ? `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${warning}`
-            : `시스템 프롬프트 파일 안내: ${warning}`,
-        )
+
+      const current = state.workflow
+      if (current === null || current.id !== workflowId) {
+        releaseRound(workflowId, controller)
+        return
       }
-    }
 
-    // The main session's model is read afresh on every round (the first call,
-    // retry and refine alike), just before the request is assembled.
-    const target = await resolveTargetModel(ports, config.modelGuidance, controller.signal)
-    // The engine version caps prompt caching; it is read once per controller.
-    const cache = await promptCacheEnabled(ports)
+      // `promptCacheEnabled` held the unsupported-version notice instead of
+      // showing it while the round was still cancellable. This is the first
+      // point past every stale/abort guard, so the run really is going ahead:
+      // show it now, once per controller, and clear it so later rounds stay
+      // silent. A cancelled round never reaches here, so its held notice waits
+      // for the next live round instead of toasting a run already left.
+      if (pendingCacheNotice !== null) {
+        const notice = pendingCacheNotice
+        pendingCacheNotice = null
+        notify(notice)
+      }
 
-    // A cancel during detection must not send or record anything: a `cancelled`
-    // snapshot is not permission to complete.
-    if (isStale(state, workflowId, generation) || controller.signal.aborted) {
+      const system = composeSystemPrompt(extra, target.profile)
+      const request = buildModelRequest(current, config, system, instruction, { cache })
+
+      // Record the model this request actually targets, just before sending.
+      lastGuidance = { workflowId, round: current.rounds + 1, target }
+
+      apply({ type: 'progress', workflowId, generation, stage: 'generating' })
+      let result: RewriteResult
+      try {
+        result = await completeRewrite(ports, request, controller.signal)
+      } catch (cause) {
+        result = { kind: 'failed', reason: 'rejected', message: describeError(cause), usage: ZERO_USAGE }
+      }
+      // Only drop the entry this round put there (a cancel already removed it).
       releaseRound(workflowId, controller)
-      return
-    }
 
-    const current = state.workflow
-    if (current === null || current.id !== workflowId) {
-      releaseRound(workflowId, controller)
-      return
-    }
+      // The reducer folds a stale result's usage without touching the run; the
+      // UI must not react either. `reply`/`failed` carry the usage, so no second
+      // `usage` event is emitted (`DESIGN.md`, 3. 상태 규칙).
+      const stale = isStale(state, workflowId, generation)
 
-    // `promptCacheEnabled` held the unsupported-version notice instead of
-    // showing it while the round was still cancellable. This is the first
-    // point past every stale/abort guard, so the run really is going ahead:
-    // show it now, once per controller, and clear it so later rounds stay
-    // silent. A cancelled round never reaches here, so its held notice waits
-    // for the next live round instead of toasting a run already left.
-    if (pendingCacheNotice !== null) {
-      const notice = pendingCacheNotice
-      pendingCacheNotice = null
-      notify(notice)
-    }
-
-    const system = composeSystemPrompt(extra, target.profile)
-    const request = buildModelRequest(current, config, system, instruction, { cache })
-
-    // Record the model this request actually targets, just before sending.
-    lastGuidance = { workflowId, round: current.rounds + 1, target }
-
-    let result: RewriteResult
-    try {
-      result = await completeRewrite(ports, request, controller.signal)
-    } catch (cause) {
-      result = { kind: 'failed', reason: 'rejected', message: describeError(cause), usage: ZERO_USAGE }
-    }
-    // Only drop the entry this round put there (a cancel already removed it).
-    releaseRound(workflowId, controller)
-
-    // The reducer folds a stale result's usage without touching the run; the
-    // UI must not react either. `reply`/`failed` carry the usage, so no second
-    // `usage` event is emitted (`DESIGN.md`, 3. 상태 규칙).
-    const stale = isStale(state, workflowId, generation)
-
-    if (result.kind === 'ok') {
-      // There is no follow-up completion at the limit. Keep a model's stray
-      // question in the handoff instead of inviting an answer we cannot use,
-      // and keep its choices alongside it so the person still sees them.
-      if (current.rounds + 1 >= config.maxRounds && result.reply.question !== null) {
-        const heading = /[가-힣]/.test(result.reply.draft)
-          ? '미확정 사항 (구현 전 확인)'
-          : 'Open decision (resolve before implementation)'
-        const options = result.reply.options ?? []
-        const choiceLine = options.length > 0 ? `\n- 선택지: ${options.join(' / ')}` : ''
-        result = {
-          ...result,
-          reply: {
-            ...result.reply,
-            draft: `${result.reply.draft}\n\n${heading}:\n${result.reply.question}${choiceLine}`,
-            question: null,
-            options: [],
-          },
+      if (result.kind === 'ok') {
+        // There is no follow-up completion at the limit. Keep a model's stray
+        // question in the handoff instead of inviting an answer we cannot use,
+        // and keep its choices alongside it so the person still sees them.
+        if (current.rounds + 1 >= config.maxRounds && result.reply.question !== null) {
+          const heading = /[가-힣]/.test(result.reply.draft)
+            ? '미확정 사항 (구현 전 확인)'
+            : 'Open decision (resolve before implementation)'
+          const options = result.reply.options ?? []
+          const choiceLine = options.length > 0 ? `\n- 선택지: ${options.join(' / ')}` : ''
+          result = {
+            ...result,
+            reply: {
+              ...result.reply,
+              draft: `${result.reply.draft}\n\n${heading}:\n${result.reply.question}${choiceLine}`,
+              question: null,
+              options: [],
+            },
+          }
         }
+        apply({ type: 'reply', workflowId, generation, reply: result.reply, usage: result.usage })
+        if (stale) return
+        const question = result.reply.question
+        const options = result.reply.options ?? []
+        const notice = question !== null && question !== ''
+          ? `질문: ${question}${options.length > 0 ? ` (선택지 ${options.length}개)` : ''}`
+          : result.reply.message
+        if (notice !== '') notify(notice)
+        askQuestion(ports)
+        return
       }
-      apply({ type: 'reply', workflowId, generation, reply: result.reply, usage: result.usage })
+
+      apply({ type: 'failed', workflowId, generation, error: result.message, usage: result.usage })
       if (stale) return
-      const question = result.reply.question
-      const options = result.reply.options ?? []
-      const notice = question !== null && question !== ''
-        ? `질문: ${question}${options.length > 0 ? ` (선택지 ${options.length}개)` : ''}`
-        : result.reply.message
-      if (notice !== '') notify(notice)
-      askQuestion(ports)
-      return
-    }
 
-    apply({ type: 'failed', workflowId, generation, error: result.message, usage: result.usage })
-    if (stale) return
+      const failed = state.workflow
+      if (failed === null) return
 
-    const failed = state.workflow
-    if (failed === null) return
-
-    // A first round that produced nothing falls back to the original prompt; a
-    // later failure keeps the last good draft for the person to act on.
-    if (failed.draft === '') {
-      await restoreOriginal(
-        ports,
-        failed,
-        `개선에 실패해 원문을 입력창에 복원했습니다: ${result.message}`,
-      )
-    } else {
-      notify(`개선에 실패했습니다: ${result.message}`)
+      // A first round that produced nothing falls back to the original prompt; a
+      // later failure keeps the last good draft for the person to act on.
+      if (failed.draft === '') {
+        await restoreOriginal(
+          ports,
+          failed,
+          `개선에 실패해 원문을 입력창에 복원했습니다: ${result.message}`,
+        )
+      } else {
+        notify(`개선에 실패했습니다: ${result.message}`)
+      }
+    } catch (cause) {
+      controller.abort()
+      throw cause
+    } finally {
+      releaseRound(workflowId, controller)
     }
   }
 
@@ -575,15 +614,17 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * unexpected fault releases the run so later submissions are not trapped.
    */
   async function runRound(ports: EnginePorts, instruction?: string): Promise<void> {
+    const owner = state.workflow
     try {
       await round(ports, instruction)
     } catch (cause) {
+      if (!owner || isStale(state, owner.id, owner.generation)) return
       const workflow = state.workflow
       if (workflow !== null && workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
         const entry = rounds.get(workflow.id)
         if (entry !== undefined) {
           entry.controller.abort()
-          rounds.delete(workflow.id)
+          releaseRound(workflow.id, entry.controller)
         }
         apply({ type: 'cancel', workflowId: workflow.id })
       }
@@ -858,7 +899,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     const entry = rounds.get(workflow.id)
     if (entry !== undefined) {
       entry.controller.abort()
-      rounds.delete(workflow.id)
+      releaseRound(workflow.id, entry.controller)
     }
     resetExtra()
     // Drop the run before restoring: a late completion then finds it stale and
