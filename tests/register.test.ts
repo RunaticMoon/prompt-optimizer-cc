@@ -616,3 +616,43 @@ describe('register — the wired module', () => {
     },
   )
 })
+
+describe('wired ui.ask questions', () => {
+  test('ui.ask uses tool.call AskUserQuestion and forwards its answer into one refinement', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const clock = mock.clock(on)
+    const requests: ModelCompleteRequest[] = []
+    const questions: unknown[] = []
+    let resolve!: (result: { result: { questions: unknown[]; answers: Record<string, string> } }) => void
+    on('session.start', (_$, e) => ({ cwd: e.cwd }))
+    on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+    on('model.complete', (_$, e) => {
+      requests.push(e)
+      return { value: requests.length === 1
+        ? { isAnswered: true, text: JSON.stringify({ draft: DRAFT, message: '독자를 확인합니다', question: '대상 독자는 누구인가요?', options: ['경영진', '개발팀'] }), usage: USAGE }
+        : answered('개발팀을 위한 개선안') }
+    })
+    on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+      questions.push(e.questions)
+      return new Promise(done => { resolve = done })
+    })
+    await $.session.start(SESSION_START)
+    await $.prompt.submit({ text: '요청을 다듬어 주세요', origin: { kind: 'composer' }, wait: false })
+    await clock.advance(1)
+    for (let i = 0; i < 100 && questions.length === 0; i++) await Promise.resolve()
+    expect(questions).toHaveLength(1)
+    expect(JSON.stringify(questions[0])).toContain('보완 질문')
+    for (let i = 0; i < 3; i++) {
+      await $.ui.mount({
+        plugin: 'prompt-optimizer', surface: 'terminal', component: 'AbovePrompt',
+        requestId: `ask-redraw-${i}`, viewport: { columns: 120, rows: 40 },
+        props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 120,
+          scroll: { offset: 0, bodyRows: 11 }, view: {} },
+      })
+    }
+    expect(questions).toHaveLength(1)
+    resolve({ result: { questions: [], answers: { '대상 독자는 누구인가요?': '개발팀' } } })
+    for (let i = 0; i < 500 && requests.length < 2; i++) await Promise.resolve()
+    expect(requests).toHaveLength(2)
+    expect(JSON.stringify(requests[1]?.prompt)).toContain('개발팀')
+  })
+})

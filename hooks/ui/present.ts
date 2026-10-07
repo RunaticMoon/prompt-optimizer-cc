@@ -8,6 +8,12 @@ import type { UiPorts } from './ui-ports'
 export const COMPOSER_GUIDE =
   '보완 내용을 입력해 Enter · /optimize accept(입력창으로) · /optimize send · /optimize raw · /optimize cancel'
 
+export function questionGuide(workflow: Workflow): string {
+  return workflow.phase === 'reviewing' && workflow.questionAsk === 'pending'
+    ? '→ 선택 창에서 답을 고르세요 (Esc: 패널에서 답하기)'
+    : '→ 패널에서 답을 고르세요'
+}
+
 // Paint meaning with the host's theme; never add layout rows for decoration.
 export const UI_COLORS = {
   heading: 'claude',

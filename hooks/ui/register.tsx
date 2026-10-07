@@ -5,7 +5,7 @@ import type { EngineInterface, On, RenderViewport } from 'claude-code'
 import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
-import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, UI_COLORS, phaseColor, phaseLabel } from './present'
+import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, UI_COLORS, phaseColor, phaseLabel, questionGuide } from './present'
 import { PANE_ROWS } from './ui-ports'
 
 const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
@@ -66,7 +66,11 @@ function portsOf($: EngineInterface): EnginePorts {
       fill: args => $.prompt.fill(args),
       submit: args => $.prompt.submit(args),
     },
-    ui: { close: args => $.ui.close(args) },
+    ui: {
+      close: args => $.ui.close(args),
+      ask: (question, options) => $.ui.ask(question, options),
+      log: (text, options) => $.ui.log(text, options),
+    },
   }
 }
 
@@ -253,6 +257,7 @@ export function registerUi(
   controller: OptimizerController,
   getMaxRounds: () => number = () => DEFAULT_CONFIG.maxRounds,
   pluginName = 'prompt-optimizer',
+  onPanePlacement: (placed: boolean) => void = () => undefined,
 ): void {
   let showOriginal = false
   let renderedWorkflowId: string | undefined
@@ -311,8 +316,10 @@ export function registerUi(
     add(latestOptimizerMessage(workflow), UI_COLORS.text, 4)
     add(workflow.question ? `질문: ${workflow.question}` : '', UI_COLORS.heading, 1, true)
     if (options.length) {
-      if (composer) options.forEach((option, index) => add(`${index + 1}. ${option}`, UI_COLORS.heading, 2))
-      else add(isBusy(workflow.phase) ? '선택지 답변을 처리 중입니다…' : '→ 패널에서 답을 고르세요', UI_COLORS.heading, 2)
+      if (composer) {
+        if (workflow.questionAsk === 'pending' && !isBusy(workflow.phase)) add(questionGuide(workflow), UI_COLORS.heading, 2)
+        options.forEach((option, index) => add(`${index + 1}. ${option}`, UI_COLORS.heading, 2))
+      } else add(isBusy(workflow.phase) ? '선택지 답변을 처리 중입니다…' : questionGuide(workflow), UI_COLORS.heading, 2)
     }
     add(workflow.lastError ? errorSummary(workflow.lastError) : '', UI_COLORS.error, 0)
     // Composer (or a surviving workflow after pane close) has no draft panel.
@@ -368,7 +375,10 @@ export function registerUi(
       panePlacements.set(e.surface, e.props.placement)
       $.ui.invalidate('ui.render')
     }
-    if (workflow?.ui === 'pane') paneClosed = false
+    if (workflow?.ui === 'pane') {
+      paneClosed = false
+      onPanePlacement(true)
+    }
     if (!workflow) return <Text color={UI_COLORS.unavailable}>진행 중인 개선 작업이 없습니다</Text>
     if (workflow.ui === 'composer') return <Text color={UI_COLORS.section}>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
 
@@ -392,7 +402,10 @@ export function registerUi(
       <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
       <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
     </Box>
-    const question = workflow.question && <Text bold color={UI_COLORS.heading} wrap="wrap">{`질문: ${workflow.question}`}</Text>
+    const question = workflow.question && <Box flexDirection="column">
+      <Text bold color={UI_COLORS.heading} wrap="wrap">{`질문: ${workflow.question}`}</Text>
+      {waiting && options.length > 0 && <Text color={UI_COLORS.heading} wrap="wrap">{questionGuide(workflow)}</Text>}
+    </Box>
     const optionsText = options.map((option, index) => <Text key={`option-text:${index}`} color={UI_COLORS.heading} wrap="wrap">{`${index + 1}. ${option}`}</Text>)
     const draft = <Box flexDirection="column">
       <Text bold color={UI_COLORS.draft}>개선안</Text>
@@ -407,6 +420,7 @@ export function registerUi(
       const rows = [
         textRow(`개선안 · ${draftText}`, draftColor, true),
         ...(workflow.question ? [textRow(`질문: ${workflow.question}`, UI_COLORS.heading, true)] : []),
+        ...(waiting && options.length ? [textRow(questionGuide(workflow), UI_COLORS.heading)] : []),
         ...(options.length ? [textRow(options.map((option, i) => `${i + 1}. ${option}`).join(' · '), UI_COLORS.heading)] : []),
         ...(message ? [textRow(message, UI_COLORS.text)] : []),
         ...(workflow.lastError ? [textRow(errorSummary(workflow.lastError), UI_COLORS.error)] : []),
@@ -519,7 +533,7 @@ export function registerUi(
       : `ctrl+x tab 포커스 · Tab 이동 · ${draftReady ? '1/2/3' : '3'} 선택 · Esc 닫기`
     return <Box flexDirection="column" paddingX={1}>
       {header}
-      <Text color={busy ? UI_COLORS.progress : UI_COLORS.section} wrap="wrap">{keyHintText}</Text>
+      {!(waiting && workflow.questionAsk === 'pending') && <Text color={busy ? UI_COLORS.progress : UI_COLORS.section} wrap="wrap">{keyHintText}</Text>}
       {question}
       {retryReady && options.length > 0 && <Box flexDirection="column">{optionButtons(false)}</Box>}
       {draft}
@@ -579,6 +593,7 @@ export function registerUi(
     // survives the close can show its band until a pane renders again.
     panePlacements.clear()
     paneClosed = true
+    onPanePlacement(false)
     $.ui.invalidate('ui.render')
     return next(e)
   })

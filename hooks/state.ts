@@ -142,7 +142,16 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       if (entry !== null) updated.dialogue = [...current.dialogue, entry]
       // A recovery reply clears the failure that preceded it.
       delete updated.lastError
+      delete updated.questionAsk
       return { ...base, usage, workflow: updated }
+    }
+
+    case 'question-ask': {
+      const current = base.workflow
+      if (!current || current.id !== event.workflowId || current.rounds !== event.round
+        || current.phase !== 'reviewing' || current.question !== event.question) return base
+      if (current.questionAsk === event.status) return base
+      return { ...base, workflow: { ...current, questionAsk: event.status } }
     }
 
     case 'failed': {
@@ -160,6 +169,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         rounds: current.rounds + 1,
         usage: event.usage === undefined ? current.usage : addUsage(current.usage, event.usage),
       }
+      delete updated.questionAsk
       return { ...base, usage, workflow: updated }
     }
 
@@ -194,6 +204,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
           dialogue: [...current.dialogue, { role: 'user', text: event.text }],
           question: null,
           options: [],
+          questionAsk: undefined,
         },
       }
     }

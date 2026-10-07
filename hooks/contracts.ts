@@ -94,6 +94,8 @@ export interface Workflow {
   question?: string | null
   /** Answer choices for {@link Workflow.question}, offered as pane buttons; empty/absent when none. Cleared by `instruct`. */
   options?: readonly string[]
+  /** Engine question dialog for this reply; absent when only the pane is used. */
+  questionAsk?: 'pending' | 'closed'
 }
 
 /** A one-shot permit that lets one restored draft bypass interception. */
@@ -283,6 +285,7 @@ export interface RuntimeState {
 export type OptimizerEvent =
   | { type: 'start'; workflow: Workflow }
   | { type: 'phase'; workflowId: string; generation: number; phase: Phase }
+  | { type: 'question-ask'; workflowId: string; round: number; question: string; status: 'pending' | 'closed' }
   | {
       type: 'reply'
       workflowId: string
@@ -433,7 +436,7 @@ export type EnginePorts = {
   env: Pick<EngineInterface['env'], 'get'>
   model: Pick<EngineInterface['model'], 'complete'>
   prompt: Pick<EngineInterface['prompt'], 'read' | 'fill' | 'submit'>
-  ui: Pick<EngineInterface['ui'], 'close'>
+  ui: Pick<EngineInterface['ui'], 'close'> & Partial<Pick<EngineInterface['ui'], 'ask' | 'log'>>
 }
 
 /**

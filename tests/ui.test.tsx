@@ -992,3 +992,48 @@ describe('optimizer UI', () => {
     expect(invalidations).toBe(4)
   })
 })
+
+describe('question dialog guidance', () => {
+  test('band and pane switch dialog guidance back to the pane fallback on close', async ($, on) => {
+    const item = { ...workflow(), question: '대상 독자는 누구인가요?', options: ['경영진', '개발팀'], questionAsk: 'pending' as 'pending' | 'closed' }
+    const current = state(item)
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const guide = '→ 선택 창에서 답을 고르세요 (Esc: 패널에서 답하기)'
+    const readable = (tree: unknown) => contentOf(tree).replace(/\n/g, '')
+    for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+      if (surface === 'terminal' || surface === 'desktop') {
+        expect(readable(await ui.render({ ...BAND, surface, props: { ...BAND.props, bodyColumns: 120 } }))).toContain(guide)
+      }
+      const pane = await ui.render({ ...PANE, surface })
+      expect(contentOf(pane)).toContain(guide)
+      expect(textOf(pane)).toContain('optimizer:option:0')
+      if (surface !== 'mobile') expect(textOf(pane)).toContain('optimizer:instruction')
+    }
+    item.questionAsk = 'closed'
+    expect(contentOf(await ui.render(BAND))).toContain('→ 패널에서 답을 고르세요')
+    expect(contentOf(await ui.render(PANE))).toContain('→ 패널에서 답을 고르세요')
+    expect(contentOf(await ui.render(PANE))).not.toContain('선택 창에서')
+  })
+
+  test('compact and buttonless panes retain dialog guidance and fallback answers', async ($, on) => {
+    const item: Workflow = { ...workflow(), question: '대상 독자는 누구인가요?', options: ['경영진', '개발팀'], questionAsk: 'pending' }
+    const { controller } = fakeController(state(item))
+    const ui = await captureUi($, on, controller, 'Button')
+    for (const questionAsk of ['pending', 'closed'] as const) {
+      item.questionAsk = questionAsk
+      for (const [rows, isFullscreen] of [[24, false], [24, true], [20, true]] as const) {
+        const viewport = { columns: 80, rows, isFullscreen }
+        const pane = await ui.render({ ...PANE, viewport, props: { ...PANE.props, placement: 'inline' } }) as UiNode
+        const first = pane.children!.slice(0, -1)
+        expect(first.length).toBeLessThanOrEqual(estimatedCompactRows(viewport))
+        const guide = questionAsk === 'pending'
+          ? '→ 선택 창에서 답을 고르세요 (Esc: 패널에서 답하기)'
+          : '→ 패널에서 답을 고르세요'
+        expect(first.map(contentOf).join('')).toContain(guide)
+        expect(contentOf(pane)).toContain('1. 경영진')
+        expect(contentOf(pane)).toContain('/optimize retry')
+      }
+    }
+  })
+})

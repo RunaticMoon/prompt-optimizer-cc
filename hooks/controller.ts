@@ -93,6 +93,8 @@ export interface ControllerDeps {
   onChange(state: Readonly<RuntimeState>, notice?: string): void
   /** Rendered long-term memory for the snapshot; absent reads none. */
   readMemory?(): string
+  /** Reopens an already placed pane with focus; the host tracks placement. */
+  refocusPane?(): Promise<void>
 }
 
 /** What a submit hook should do with one submission. */
@@ -185,6 +187,60 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * going ahead. It is `null` once shown (or when the version supports caching).
    */
   let pendingCacheNotice: string | null = null
+  // A dialog cannot be closed by the plugin. Keep its slot across workflow
+  // resets until it settles, but release it when the session starts or ends.
+  let pendingAsk: Workflow | null = null
+
+  function sameQuestion(asked: Workflow): boolean {
+    const current = state.workflow
+    return state.sessionId === asked.sessionId && current?.id === asked.id
+      && current.generation === asked.generation && current.rounds === asked.rounds
+      && current.phase === 'reviewing' && current.question === asked.question
+  }
+
+  async function refocusAnsweredPane(ports: EnginePorts, asked: Workflow): Promise<void> {
+    if (asked.ui !== 'pane' || !deps.refocusPane) return
+    try {
+      const box = await ports.prompt.read()
+      if (box.text !== '' || state.workflow?.id !== asked.id || state.sessionId !== asked.sessionId) return
+      await deps.refocusPane()
+    } catch {
+      // Placement/keyboard ownership can change while the dialog is open.
+    }
+  }
+
+  /** Detached from the round and submit hook: one dialog per eligible reply. */
+  function askQuestion(ports: EnginePorts): void {
+    const asked = state.workflow
+    if (!asked || asked.phase !== 'reviewing' || !asked.question
+      || (asked.options?.length ?? 0) < 2 || asked.questionAsk || pendingAsk || !ports.ui.ask) return
+    const question = asked.question
+    const mark = (status: 'pending' | 'closed'): void =>
+      apply({ type: 'question-ask', workflowId: asked.id, round: asked.rounds, question, status })
+    pendingAsk = asked
+    mark('pending')
+    try {
+      void ports.ui.ask(question, { options: asked.options, header: '보완 질문' }).then(answer => {
+        if (pendingAsk === asked) pendingAsk = null
+        if (!sameQuestion(asked)) {
+          ports.ui.log?.('prompt-optimizer: ignored a stale question answer', { to: 'debug' })
+          return
+        }
+        mark('closed')
+        // refine enters generating synchronously; focus restoration runs beside
+        // it, never delaying the answer or waiting for the next completion.
+        const refined = refine(ports, answer)
+        void refocusAnsweredPane(ports, asked)
+        return refined
+      }).catch(() => {
+        if (pendingAsk === asked) pendingAsk = null
+        mark('closed')
+      })
+    } catch {
+      pendingAsk = null
+      mark('closed')
+    }
+  }
 
   /**
    * Whether the engine's `$.model.complete` takes cached text blocks, read from
@@ -491,6 +547,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
         ? `질문: ${question}${options.length > 0 ? ` (선택지 ${options.length}개)` : ''}`
         : result.reply.message
       if (notice !== '') notify(notice)
+      askQuestion(ports)
       return
     }
 
@@ -872,12 +929,14 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
   function onSessionStart(sessionId: string): void {
     abortAll()
+    pendingAsk = null
     resetGuidance()
     apply({ type: 'reset', sessionId })
   }
 
   function onSessionEnd(): void {
     abortAll()
+    pendingAsk = null
     resetGuidance()
     apply({ type: 'reset', sessionId: state.sessionId })
   }
