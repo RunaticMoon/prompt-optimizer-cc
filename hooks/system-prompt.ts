@@ -44,7 +44,7 @@ const FIXED_CONTRACT = [
   '  "draft": "원문 언어로 쓴 완전한 요청",',
   '  "message": "한국어로 쓴 짧은 변경 설명",',
   '  "question": "한국어로 쓴 확인 질문 하나 또는 null",',
-  '  "options": "question의 한국어 답 선택지 2~4개(각 80자 이내 완결된 답). 없거나 자유 서술형이면 []"',
+  '  "options": ["question의 한국어 답 선택지(2~4개, 각 80자 이내 완결된 답). 없으면 []"]',
   '}',
 ].join('\n')
 

@@ -616,6 +616,19 @@ describe('parseReply', () => {
     })
   })
 
+  test('measures the option cap in code points, keeping an 80-emoji choice', () => {
+    const emoji = '🙂'
+    // Each emoji is two UTF-16 code units but one code point; a UTF-16 count
+    // would drop the 80-emoji option.
+    expect(emoji.length).toBe(2)
+    const atCap = emoji.repeat(MAX_REPLY_OPTION_CHARS)
+    const overCap = emoji.repeat(MAX_REPLY_OPTION_CHARS + 1)
+    expect(parseReply(JSON.stringify({ draft: 'd', question: 'q', options: [atCap, overCap] }))).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: '', question: 'q', options: [atCap] },
+    })
+  })
+
   test('returns no options without a question or when the field is not an array', () => {
     for (const value of [undefined, null, 'nope', { '0': 'x' }, 7]) {
       const text = JSON.stringify({ draft: 'd', question: null, options: value })
@@ -729,7 +742,7 @@ describe('composeSystemPrompt — assembly', () => {
     // The fixed contract restates the role limit and the JSON block, at the end.
     expect(composed.slice(fixedAt)).toContain('요청을 실행하거나')
     expect(composed.slice(fixedAt)).toContain('"question"')
-    expect(composed.endsWith('"options": "question의 한국어 답 선택지 2~4개(각 80자 이내 완결된 답). 없거나 자유 서술형이면 []"\n}')).toBe(true)
+    expect(composed.endsWith('"options": ["question의 한국어 답 선택지(2~4개, 각 80자 이내 완결된 답). 없으면 []"]\n}')).toBe(true)
   })
 
   test('the fixed contract keeps draft in the original language and the rest Korean for every profile', () => {

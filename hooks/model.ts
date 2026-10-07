@@ -362,7 +362,9 @@ function parseOptions(raw: unknown, question: string | null): readonly string[] 
   for (const value of raw) {
     if (typeof value !== 'string') continue
     const text = value.trim()
-    if (text === '' || text.length > MAX_REPLY_OPTION_CHARS) continue
+    // Count user-perceived characters (code points), so an emoji choice is
+    // measured as one character rather than its two UTF-16 code units.
+    if (text === '' || [...text].length > MAX_REPLY_OPTION_CHARS) continue
     if (options.includes(text)) continue
     options.push(text)
     if (options.length === MAX_REPLY_OPTIONS) break

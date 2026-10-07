@@ -26,7 +26,7 @@ import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
 import { sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
-import { supportsPromptCache } from './engine-version'
+import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
 import { buildModelRequest, completeRewrite } from './model'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
@@ -185,18 +185,33 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * Whether the engine's `$.model.complete` takes cached text blocks, read from
    * `$.session.version()` at most once per controller. A missing getter, a
    * throw and an unparseable version all mean "no cache", and the answer is
-   * memoized so later rounds never re-read it.
+   * memoized so later rounds never re-read it or warn again.
+   *
+   * The first unsupported read also emits one Korean notice: a person on an old
+   * CLI never sees the cache that silently went unused. A supported version
+   * stays silent, and later rounds of an unsupported one skip the notice
+   * because the memoized answer returns early. The notice names the detected
+   * version when there is one, and says so when the version could not be read.
    */
   async function promptCacheEnabled(ports: EnginePorts): Promise<boolean> {
     if (versionCache !== null) return versionCache
     let supported = false
+    let version: string | undefined
     try {
       const info = await ports.session.version?.()
-      supported = supportsPromptCache(info?.version)
+      version = info?.version
+      supported = supportsPromptCache(version)
     } catch {
       supported = false
     }
     versionCache = supported
+    if (!supported) {
+      notify(
+        version === undefined
+          ? 'Claude Code 버전을 확인할 수 없어 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.'
+          : `Claude Code ${version}은(는) ${PROMPT_CACHE_MIN_VERSION} 미만이라 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.`,
+      )
+    }
     return supported
   }
 

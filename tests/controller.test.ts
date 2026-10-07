@@ -1307,6 +1307,34 @@ describe('prompt caching by engine version', () => {
     expect(h.calls.version).toBe(1)
     expect(Array.isArray(h.completes[1]?.prompt)).toBe(true)
   })
+
+  test('notices once below 2.1.292 and stays silent on a supported version', async () => {
+    const old = harness({ version: async () => ({ version: '2.1.291' }) })
+    old.controller.onSessionStart('sess-1')
+    await old.controller.onSubmit(old.ports, submit('원문'), 'pane')
+    await old.flush()
+    await old.controller.refine(old.ports, '더 짧게')
+
+    const warnings = old.notices.filter(notice => notice?.includes('프롬프트 캐시 없이 동작'))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('2.1.291')
+
+    const current = harness({ version: async () => ({ version: '2.1.292' }) })
+    current.controller.onSessionStart('sess-1')
+    await current.controller.onSubmit(current.ports, submit('원문'), 'pane')
+    await current.flush()
+    expect(current.notices.filter(notice => notice?.includes('프롬프트 캐시 없이 동작'))).toHaveLength(0)
+  })
+
+  test('notices that the version could not be read with no getter', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const warnings = h.notices.filter(notice => notice?.includes('버전을 확인할 수 없어'))
+    expect(warnings).toHaveLength(1)
+  })
 })
 
 describe('model-aware guidance', () => {

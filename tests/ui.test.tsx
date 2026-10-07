@@ -521,6 +521,22 @@ describe('optimizer UI', () => {
     expect(logs.filter(text => text.startsWith('옵티마이저:'))).toEqual(['옵티마이저: 한국어 메시지'])
   })
 
+  test('presenter falls back to the dialogue on an empty message so a lone question still logs', () => {
+    const logs: string[] = []
+    const ui: UiPorts = { open: async () => ({ isPlaced: true }), close: async () => undefined, invalidate: () => undefined, status: () => undefined, log: text => { logs.push(text) }, toast: () => undefined }
+    const current = state({
+      ...workflow(),
+      ui: 'composer',
+      message: '',
+      question: '어느 쪽인가요?',
+      options: ['보고서', '목록'],
+      dialogue: [{ role: 'optimizer', text: '어느 쪽인가요?' }],
+    })
+    const presenter = createPresenter()
+    presenter.present(ui, current)
+    expect(logs.filter(text => text.startsWith('옵티마이저:'))).toEqual(['옵티마이저: 어느 쪽인가요?'])
+  })
+
   test('PromptHint adds the optimizer-off tail only while the mode is armed', async ($, on) => {
     const current = state(workflow())
     const { controller } = fakeController(current)

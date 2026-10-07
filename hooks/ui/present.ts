@@ -106,7 +106,9 @@ export function createPresenter(): {
       hadStatus = true
       ui.invalidate()
 
-      const message = workflow.message ?? [...workflow.dialogue].reverse().find((item) => item.role === 'optimizer')?.text ?? ''
+      // An empty `message` must still fall back to the optimizer's dialogue:
+      // a reply with only a `question` would otherwise vanish from the log.
+      const message = workflow.message || [...workflow.dialogue].reverse().find((item) => item.role === 'optimizer')?.text || ''
       if (message && message !== lastMessage) {
         ui.log(`옵티마이저: ${message}`)
         lastMessage = message
