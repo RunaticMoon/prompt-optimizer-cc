@@ -88,6 +88,12 @@ export interface Workflow {
   usage: ModelUsage
   /** Last failure message, when the phase is `failed`. */
   lastError?: string
+  /** The latest reply's change note (always Korean); absent before the first reply. */
+  message?: string
+  /** The latest reply's clarifying question awaiting an answer; `null`/absent when none. Cleared by `instruct`. */
+  question?: string | null
+  /** Answer choices for {@link Workflow.question}, offered as pane buttons; empty/absent when none. Cleared by `instruct`. */
+  options?: readonly string[]
 }
 
 /** A one-shot permit that lets one restored draft bypass interception. */
@@ -130,7 +136,19 @@ export interface OptimizerReply {
   message: string
   /** At most one clarifying question, or `null`. */
   question: string | null
+  /**
+   * Short answer choices for `question` (at most {@link MAX_REPLY_OPTIONS}),
+   * each a complete answer the person can pick as-is. Empty or absent when
+   * there is no question or it is open-ended.
+   */
+  options?: readonly string[]
 }
+
+/** Most answer choices one reply may offer for its question. */
+export const MAX_REPLY_OPTIONS = 4
+
+/** Longest answer choice kept, in UTF-16 code units; longer ones are dropped. */
+export const MAX_REPLY_OPTION_CHARS = 80
 
 /** One message in the plugin-held improvement dialogue. */
 export interface OptimizerMessage {
@@ -407,7 +425,7 @@ export const SYSTEM_PROMPT_MAX_CHARS = 4000
  */
 export type EnginePorts = {
   session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'> &
-    Partial<Pick<EngineInterface['session'], 'model'>>
+    Partial<Pick<EngineInterface['session'], 'model' | 'version'>>
   /** Optional so older hosts and tests without a timer degrade to common guidance. */
   clock?: Pick<EngineInterface['clock'], 'sleep'>
   fs: Pick<EngineInterface['fs'], 'stat' | 'read'> &

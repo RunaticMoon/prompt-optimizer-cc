@@ -132,6 +132,9 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         ...current,
         phase: 'reviewing',
         draft: event.reply.draft,
+        message: event.reply.message,
+        question: event.reply.question,
+        options: event.reply.options ?? [],
         rounds: current.rounds + 1,
         usage: addUsage(current.usage, event.usage),
       }
@@ -189,6 +192,8 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         workflow: {
           ...current,
           dialogue: [...current.dialogue, { role: 'user', text: event.text }],
+          question: null,
+          options: [],
         },
       }
     }

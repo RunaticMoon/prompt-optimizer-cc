@@ -21,11 +21,12 @@ import {
   FIXED_CONTRACT_MAX_CHARS,
   GUIDANCE_SYSTEM_MAX_CHARS,
   MAX_ORIGINAL_CHARS,
+  MAX_REPLY_OPTION_CHARS,
   MAX_REQUEST_CHARS,
   SYSTEM_PROMPT_MAX_CHARS,
 } from '../hooks/contracts'
 import { COMMON_GUIDANCE, MODEL_GUIDANCE } from '../hooks/model-guidance'
-import { buildModelRequest, completeRewrite, neutralizeTags, parseReply } from '../hooks/model'
+import { buildModelRequest, completeRewrite, neutralizeTags, parseReply, requestText } from '../hooks/model'
 import { BASE_SYSTEM_PROMPT, composeSystemPrompt } from '../hooks/system-prompt'
 
 const FULL_USAGE: ModelUsage = {
@@ -115,11 +116,6 @@ function request(over: Partial<Workflow> = {}): ModelCompleteRequest {
   return buildModelRequest(workflow(over), config(), 'SYS')
 }
 
-/** A request's `prompt`/`system` as one text: a string stands, blocks join in order. */
-function requestText(input: string | readonly ModelTextBlock[] | undefined): string {
-  return typeof input === 'string' ? input : (input ?? []).map(block => block.text).join('')
-}
-
 /** `prompt` plus `system`, the length {@link MAX_REQUEST_CHARS} bounds. */
 function requestLength(input: ModelCompleteRequest): number {
   return requestText(input.prompt).length + requestText(input.system).length
@@ -203,10 +199,12 @@ describe('buildModelRequest — prompt sections', () => {
     expect(built.prompt).toContain('JSON')
   })
 
-  test('ends by asking for every field in the original prompt language', () => {
+  test('ends by asking for the original language only for draft and Korean for the rest', () => {
     const built = buildModelRequest(workflow({ original: 'why is the node list slow?' }), config(), 'SYS')
     expect(
-      requestText(built.prompt).endsWith('draft·message·question은 <original_prompt>와 같은 언어로 쓴다.'),
+      requestText(built.prompt).endsWith(
+        'draft는 <original_prompt>와 같은 언어로, message·question·options는 항상 한국어로 쓴다.',
+      ),
     ).toBe(true)
   })
 
@@ -388,11 +386,93 @@ describe('buildModelRequest — request budget', () => {
   })
 })
 
+describe('buildModelRequest — prompt caching', () => {
+  test('with cache true the prompt splits at </original_prompt> into a cached prefix and remainder', () => {
+    const built = buildModelRequest(
+      workflow({
+        original: 'ORIG',
+        draft: 'DRAFT',
+        context: snapshot('CTX'),
+        dialogue: [{ role: 'user', text: 'U1' }],
+      }),
+      config(),
+      'SYS',
+      undefined,
+      { cache: true },
+    )
+    expect(typeof built.prompt).not.toBe('string')
+    const blocks = built.prompt as readonly ModelTextBlock[]
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0]?.cache).toBe(true)
+    expect(blocks[1]?.cache).toBeUndefined()
+    expect(blocks[0]?.text.startsWith('<context>\nCTX\n</context>\n\n<original_prompt>\nORIG\n</original_prompt>')).toBe(true)
+    expect(blocks[0]?.text.endsWith('</original_prompt>')).toBe(true)
+    expect(blocks[1]?.text.startsWith('\n\n<current_draft>')).toBe(true)
+    expect(built.system).toEqual([{ text: 'SYS', cache: true }])
+  })
+
+  test('joining the cached blocks reproduces the plain string request exactly', () => {
+    const wf = workflow({ original: 'ORIG', draft: 'DRAFT', context: snapshot('CTX') })
+    const plain = buildModelRequest(wf, config(), 'SYS')
+    const cached = buildModelRequest(wf, config(), 'SYS', undefined, { cache: true })
+    expect(requestText(cached.prompt)).toBe(plain.prompt)
+    expect(requestText(cached.system)).toBe(plain.system)
+    expect((cached.prompt as readonly ModelTextBlock[]).every(block => block.text !== '')).toBe(true)
+  })
+
+  test('omits an empty system and keeps the prefix whole with no context', () => {
+    const cached = buildModelRequest(
+      workflow({ original: 'ORIG', draft: '', context: null }),
+      config(),
+      '',
+      undefined,
+      { cache: true },
+    )
+    expect(cached.system).toBeUndefined()
+    const blocks = cached.prompt as readonly ModelTextBlock[]
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0]?.text).toBe('<original_prompt>\nORIG\n</original_prompt>')
+    expect(blocks[1]?.text.startsWith('\n\n<refinement_round>')).toBe(true)
+    expect(blocks.every(block => block.text !== '')).toBe(true)
+  })
+
+  test('an over-budget prompt still joins back to the same plain string within the budget', () => {
+    const wf = workflow({
+      original: 'O'.repeat(200),
+      draft: 'D'.repeat(20000),
+      context: snapshot('C'.repeat(20000)),
+      dialogue: Array.from({ length: 20 }, (_, i) => ({
+        role: 'user' as const,
+        text: `m${i}:${'D'.repeat(1500)}`,
+      })),
+    })
+    const plain = buildModelRequest(wf, config(), 'SYS')
+    const cached = buildModelRequest(wf, config(), 'SYS', undefined, { cache: true })
+    expect(requestText(cached.prompt)).toBe(plain.prompt)
+    expect(requestLength(cached)).toBeLessThanOrEqual(MAX_REQUEST_CHARS)
+    const blocks = cached.prompt as readonly ModelTextBlock[]
+    expect(blocks).toHaveLength(2)
+    expect(blocks.every(block => block.text !== '')).toBe(true)
+  })
+
+  test('defaults to the plain string request when cache is off', () => {
+    const built = request()
+    expect(typeof built.prompt).toBe('string')
+    expect(built.system).toBe('SYS')
+  })
+
+  test('requestText joins both shapes and treats undefined as empty', () => {
+    expect(requestText('abc')).toBe('abc')
+    expect(requestText(undefined)).toBe('')
+    expect(requestText([{ text: 'a', cache: true }, { text: 'b' }])).toBe('ab')
+  })
+})
+
 describe('parseReply', () => {
   test('reads the contract fields', () => {
     expect(parseReply('{"draft":"d","message":"m","question":"q"}')).toEqual({
       ok: true,
-      reply: { draft: 'd', message: 'm', question: 'q' },
+      reply: { draft: 'd', message: 'm', question: 'q', options: [] },
     })
   })
 
@@ -400,7 +480,7 @@ describe('parseReply', () => {
     const text = '{"lang":"en","checks":["target: open"],"draft":"d","message":"m","question":null}'
     expect(parseReply(text)).toEqual({
       ok: true,
-      reply: { draft: 'd', message: 'm', question: null },
+      reply: { draft: 'd', message: 'm', question: null, options: [] },
     })
   })
 
@@ -408,7 +488,7 @@ describe('parseReply', () => {
     const text = '```json\n{"draft":"d","message":"m","question":null}\n```'
     expect(parseReply(text)).toEqual({
       ok: true,
-      reply: { draft: 'd', message: 'm', question: null },
+      reply: { draft: 'd', message: 'm', question: null, options: [] },
     })
   })
 
@@ -416,14 +496,14 @@ describe('parseReply', () => {
     const text = 'Sure, here it is:\n{"draft":"d","message":"m","question":null}\nDone.'
     expect(parseReply(text)).toEqual({
       ok: true,
-      reply: { draft: 'd', message: 'm', question: null },
+      reply: { draft: 'd', message: 'm', question: null, options: [] },
     })
   })
 
   test('trims the draft', () => {
     expect(parseReply('{"draft":"  spaced  "}')).toEqual({
       ok: true,
-      reply: { draft: 'spaced', message: '', question: null },
+      reply: { draft: 'spaced', message: '', question: null, options: [] },
     })
   })
 
@@ -431,7 +511,7 @@ describe('parseReply', () => {
     for (const question of ['', '   ']) {
       expect(parseReply(`{"draft":"d","question":"${question}"}`)).toEqual({
         ok: true,
-        reply: { draft: 'd', message: '', question: null },
+        reply: { draft: 'd', message: '', question: null, options: [] },
       })
     }
   })
@@ -439,7 +519,7 @@ describe('parseReply', () => {
   test('ignores extra fields and non-string message/question', () => {
     expect(parseReply('{"draft":"d","message":42,"question":7,"extra":true}')).toEqual({
       ok: true,
-      reply: { draft: 'd', message: '', question: null },
+      reply: { draft: 'd', message: '', question: null, options: [] },
     })
   })
 
@@ -455,14 +535,14 @@ describe('parseReply', () => {
   test('mends a missing closing quote on the last value', () => {
     expect(parseReply('{"lang":"ko","draft":"d","message":"m","question":"어느 쪽인가요?}')).toEqual({
       ok: true,
-      reply: { draft: 'd', message: 'm', question: '어느 쪽인가요?' },
+      reply: { draft: 'd', message: 'm', question: '어느 쪽인가요?', options: [] },
     })
   })
 
   test('mends a stray `,"` before the closing brace', () => {
     expect(parseReply('{"draft":"d","message":"m","question":"q",\n"}')).toEqual({
       ok: true,
-      reply: { draft: 'd', message: 'm', question: 'q' },
+      reply: { draft: 'd', message: 'm', question: 'q', options: [] },
     })
   })
 
@@ -498,14 +578,14 @@ describe('parseReply', () => {
     const text = '```json\n{"draft":"d","message":"m","question":"Use \\"image\\"?}\n```'
     expect(parseReply(text)).toEqual({
       ok: true,
-      reply: { draft: 'd', message: 'm', question: 'Use "image"?' },
+      reply: { draft: 'd', message: 'm', question: 'Use "image"?', options: [] },
     })
   })
 
   test('keeps literal braces in a complete question unchanged', () => {
     expect(parseReply('{"draft":"d","question":"Use {a} or {b}?"}')).toEqual({
       ok: true,
-      reply: { draft: 'd', message: '', question: 'Use {a} or {b}?' },
+      reply: { draft: 'd', message: '', question: 'Use {a} or {b}?', options: [] },
     })
   })
 
@@ -513,6 +593,54 @@ describe('parseReply', () => {
     for (const text of ['{"message":"m"}', '{"draft":"   "}', '{"draft":42}']) {
       expect(parseReply(text)).toEqual({ ok: false, reason: 'empty-draft' })
     }
+  })
+
+  test('reads string options, dropping non-strings, blanks, duplicates and over-long entries', () => {
+    const long = 'x'.repeat(MAX_REPLY_OPTION_CHARS + 1)
+    const text = JSON.stringify({
+      draft: 'd',
+      question: '어느 쪽인가요?',
+      options: [' 1번 ', '', 42, '2번', '1번', long, '3번', '4번', '5번'],
+    })
+    expect(parseReply(text)).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: '', question: '어느 쪽인가요?', options: ['1번', '2번', '3번', '4번'] },
+    })
+  })
+
+  test('keeps an option exactly at the character cap', () => {
+    const atCap = 'y'.repeat(MAX_REPLY_OPTION_CHARS)
+    expect(parseReply(JSON.stringify({ draft: 'd', question: 'q', options: [atCap] }))).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: '', question: 'q', options: [atCap] },
+    })
+  })
+
+  test('measures the option cap in code points, keeping an 80-emoji choice', () => {
+    const emoji = '🙂'
+    // Each emoji is two UTF-16 code units but one code point; a UTF-16 count
+    // would drop the 80-emoji option.
+    expect(emoji.length).toBe(2)
+    const atCap = emoji.repeat(MAX_REPLY_OPTION_CHARS)
+    const overCap = emoji.repeat(MAX_REPLY_OPTION_CHARS + 1)
+    expect(parseReply(JSON.stringify({ draft: 'd', question: 'q', options: [atCap, overCap] }))).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: '', question: 'q', options: [atCap] },
+    })
+  })
+
+  test('returns no options without a question or when the field is not an array', () => {
+    for (const value of [undefined, null, 'nope', { '0': 'x' }, 7]) {
+      const text = JSON.stringify({ draft: 'd', question: null, options: value })
+      expect(parseReply(text)).toEqual({
+        ok: true,
+        reply: { draft: 'd', message: '', question: null, options: [] },
+      })
+    }
+    expect(parseReply('{"draft":"d","question":"q","options":"nope"}')).toEqual({
+      ok: true,
+      reply: { draft: 'd', message: '', question: 'q', options: [] },
+    })
   })
 })
 
@@ -563,6 +691,7 @@ describe('composeSystemPrompt — assembly', () => {
     expect(BASE_SYSTEM_PROMPT).toContain('"draft"')
     expect(BASE_SYSTEM_PROMPT).toContain('"message"')
     expect(BASE_SYSTEM_PROMPT).toContain('"question"')
+    expect(BASE_SYSTEM_PROMPT).toContain('"options"')
   })
 
   test('asks for user decisions while rounds remain instead of deferring them', () => {
@@ -613,14 +742,14 @@ describe('composeSystemPrompt — assembly', () => {
     // The fixed contract restates the role limit and the JSON block, at the end.
     expect(composed.slice(fixedAt)).toContain('요청을 실행하거나')
     expect(composed.slice(fixedAt)).toContain('"question"')
-    expect(composed.endsWith('"question": "lang의 언어로 쓴 확인 질문 하나 또는 null"\n}')).toBe(true)
+    expect(composed.endsWith('"options": ["question의 한국어 답 선택지(2~4개, 각 80자 이내 완결된 답). 없으면 []"]\n}')).toBe(true)
   })
 
-  test('the fixed contract keeps the reply in the original language for every profile', () => {
+  test('the fixed contract keeps draft in the original language and the rest Korean for every profile', () => {
     for (const profile of PROFILES) {
       const composed = composeSystemPrompt('', profile)
       expect(composed.slice(composed.indexOf('[고정 계약'))).toContain(
-        'JSON 값은 원문 언어로 쓴다. 영어 요청이면 지침·문맥이 한국어여도 절 제목까지 영어로 쓴다.',
+        'draft는 원문 언어로 쓴다(영어 요청이면 절 제목까지 영어). message·question·options는 항상 한국어로 쓴다.',
       )
     }
   })
@@ -713,7 +842,7 @@ describe('completeRewrite — success', () => {
 
     expect(result).toEqual({
       kind: 'ok',
-      reply: { draft: '개선된 요청', message: '변경 요약', question: null },
+      reply: { draft: '개선된 요청', message: '변경 요약', question: null, options: [] },
       usage: FULL_USAGE,
     })
     expect(fake.requests).toHaveLength(1)
@@ -729,7 +858,7 @@ describe('completeRewrite — success', () => {
     const result = await completeRewrite(fake.$, request(), new AbortController().signal)
     expect(result).toEqual({
       kind: 'ok',
-      reply: { draft: 'd', message: 'm', question: 'q' },
+      reply: { draft: 'd', message: 'm', question: 'q', options: [] },
       usage: FULL_USAGE,
     })
     expect(fake.forkCalls()).toBe(0)
@@ -742,7 +871,7 @@ describe('completeRewrite — success', () => {
     const result = await completeRewrite(fake.$, request(), new AbortController().signal)
     expect(result).toEqual({
       kind: 'ok',
-      reply: { draft: 'd', message: '', question: null },
+      reply: { draft: 'd', message: '', question: null, options: [] },
       usage: ZERO_USAGE,
     })
   })
@@ -846,5 +975,31 @@ describe('completeRewrite — failures', () => {
     }
     expect(fake.requests).toHaveLength(1)
     expect(fake.forkCalls()).toBe(0)
+  })
+
+  test('reports every user-visible failure in Korean', async () => {
+    const arms: Array<[ModelCompleteResult, string]> = [
+      [
+        { isAnswered: false, reason: 'aborted', usage: ZERO_USAGE },
+        '옵티마이저 요청이 중단되었습니다',
+      ],
+      [
+        { isAnswered: false, reason: 'empty-reply', usage: ZERO_USAGE },
+        '모델이 텍스트를 반환하지 않았습니다',
+      ],
+      [
+        { isAnswered: false, reason: 'api-error', status: 500, error: 'server_error', usage: ZERO_USAGE },
+        '옵티마이저 API 호출에 실패했습니다',
+      ],
+      [answered('   '), '모델이 텍스트를 반환하지 않았습니다'],
+      [answered('not json'), '모델 응답이 올바른 JSON이 아닙니다'],
+      [answered('{"message":"m"}'), '모델 응답에 개선안이 없습니다'],
+    ]
+    for (const [answer, expected] of arms) {
+      const fake = fakeEngine(async () => answer)
+      const result = await completeRewrite(fake.$, request(), new AbortController().signal)
+      expect(result.kind).toBe('failed')
+      if (result.kind === 'failed') expect(result.message).toContain(expected)
+    }
   })
 })

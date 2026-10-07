@@ -86,6 +86,7 @@ function portsOf($: EngineInterface): EnginePorts {
       root: () => $.session.root(),
       repo: () => $.session.repo(),
       model: () => $.session.model(),
+      version: () => $.session.version(),
     },
     clock: { sleep: (ms, options) => $.clock.sleep(ms, options) },
     fs: {

@@ -3,7 +3,7 @@
 이 문서는 `claude plugin test`(mock 엔진)가 보장하지 않는 **실제 터미널 동작**을 수동/검증자가 확인하기 위한 절차다.
 `docs/DESIGN.md`의 "5. 통합 후 검증 기준" 표를 기준으로 하며, 옵티마이저 표식 P가 이 절차를 실행한다.
 
-> **검증 상태: 미검증.** 이 저장소 이력에서는 패인 배치·포커스·복원·좁은 폭 폴백을 실제 터미널에서 아직 확인하지 못했다(`docs/DESIGN.md`의 남은 리스크 1). 아래를 통과하기 전까지 화면 동작을 "검증 완료"로 보고하지 않는다.
+> **검증 상태(2026-10-07).** Claude Code 2.1.292 실제 터미널(120×40 dock, 80×24 inline)에서 패널 배치·포커스·선택지 버튼(`a`~`d`)·원문 토글·compact inline 폴백을 확인했다. `desktop`·`vscode`·모바일, 다른 터미널/테마, 스크린 리더, composer의 실제 화면은 아직 미검증이다(`docs/DESIGN.md`의 남은 리스크 1). 아래를 통과하지 않은 화면 동작을 "검증 완료"로 보고하지 않는다.
 
 ## 0. 검증 원칙
 
@@ -19,7 +19,7 @@
 claude --plugin-dir /path/to/prompt-optimizer
 ```
 
-- Claude Code 2.1.287 이상(Mods 정식, 플래그 불필요). 2.1.285–2.1.286은 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`이 필요하다.
+- Claude Code 2.1.292 이상(최소 지원). 매니페스트에 최소 버전 필드가 없어 강제할 수는 없고, 2.1.292 미만에서는 프롬프트 캐시 없이 기존 string 요청으로 동작한다. 최소 지원 미만의 레거시 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`은 지원 대상이 아니다.
 - 세션에 한해 로드된다(세션 한정 `--plugin-dir` 로더). 마켓플레이스로 설치하는 경로는 `README.md` 3장을 참고한다.
 
 ### 1.2 과금 없는 방법 A — `model.complete` mock 훅 (권장, 설계 실험에서 검증)
@@ -31,13 +31,13 @@ claude --plugin-dir /path/to/prompt-optimizer \
        --plugin-dir /tmp/popt-smoke-mock
 ```
 
-mock Mod의 `register.ts`는 `model.complete` 훅 하나로 고정 JSON을 돌려주면 된다. 반환형은 2.1.285의 `ModelCompleteResult`를 따른다(설계 실험 기록 기준):
+mock Mod의 `register.ts`는 `model.complete` 훅 하나로 고정 JSON을 돌려주면 된다. 반환형은 설치한 CLI의 `ModelCompleteResult`를 따른다(2.1.292 타입 기준):
 
 ```ts
 on('model.complete', () => ({
   value: {
     isAnswered: true,
-    text: JSON.stringify({ draft: '개선된 요청', message: '다듬었습니다', question: null }),
+    text: JSON.stringify({ draft: '개선된 요청', message: '다듬었습니다', question: null, options: [] }),
     usage: {
       input_tokens: 5,
       output_tokens: 2,
@@ -48,6 +48,9 @@ on('model.complete', () => ({
 }))
 ```
 
+- 위 JSON에 `message`·`question`·`options`는 한국어로 넣고 `draft`는 원문 언어로 넣는다. 옵티마이저는 이 규칙을 따른다.
+- 선택지 버튼 흐름을 보려면 `question`에 한국어 질문을, `options`에 한국어 완결 답 2~4개(각 80자 이내)를 넣는다.
+- 프롬프트 캐시 경로를 보려면 같은 작업에서 보완 라운드를 5분 안에 이어서 실행하고 `usage.cache_read_input_tokens`/`cache_creation_input_tokens`와 `/optimize status`의 `캐시 읽기`·`캐시 쓰기`를 확인한다(2.1.292 이상).
 - 지연을 흉내내려면 mock 안에서 `await $.process.run(['sleep', '12'])`처럼 실제 지연을 준다(설계 실험에서 12초 대기 후 재작성 텍스트가 `next`로 전달됨을 확인).
 - 타임아웃 경로를 보려면 mock에서 `$.model.complete({...timeoutMs:1000})`를 직접 호출해 `reason: 'aborted'`를 관찰한다.
 
@@ -113,9 +116,11 @@ tmux new-session -s popt -x 80 -y 40
 | 19 | 메인 격리 | 승인 전후로 transcript와 모델 턴을 관찰 | 승인 전 transcript 메시지·메인 모델 턴이 늘지 않고, `model.fork` 호출이 0회다. |
 | 20 | 패키징 | `npm run check:package` | 공식 타입·레퍼런스·임시 파일·대화 내용이 추적 목록에 없다. |
 | 21 | `/optimize on|off|model` 영구 저장 | `/optimize off`(또는 `model sonnet`) 실행 후 CLI 재시작 | 결과 줄에 `설정에 저장했습니다.`가 붙고, 재시작 후에도 값이 유지된다. 엔진이 거부/예외면 `이번 세션에만 적용됨(<사유>)`가 붙는다. |
-| 22 | `uiMode` 폴백 | `auto`/`pane`에서 좁은 폭으로 제출, `composer`에서 제출 | `auto`·`pane`은 패인 배치를 시도하고 실패하면 입력창 대화로 폴백, `composer`는 항상 입력창에서 진행된다. |
-| 23 | 표면별 패인 | `desktop`·`vscode` 표면과 버튼·입력이 없는 표면(예: 모바일)에서 개선 시작 | 표시 가능한 표면에서는 패인이 그려지고, 버튼·입력이 없으면 텍스트 요약 + `명령: /optimize accept · send · raw · cancel · retry <보완>` 안내가 보인다. |
+| 22 | `uiMode` 폴백 | `auto`/`pane`에서 좁은 폭으로 제출, `composer`에서 제출 | `auto`·`pane`은 패널 배치를 시도하고 실패하면 입력창 대화로 폴백, `composer`는 항상 입력창에서 진행된다. |
+| 23 | 표면별 패널 | `desktop`·`vscode` 표면과 버튼·입력이 없는 표면(예: 모바일)에서 개선 시작 | 표시 가능한 표면에서는 패널이 그려지고, 버튼·입력이 없으면 텍스트 요약 + 번호 선택지 목록 + `명령: /optimize accept · send · raw · cancel · retry <보완>` 안내가 보인다. |
 | 24 | 시스템 프롬프트 파일 폴백 | `systemPromptFile`에 없는/읽을 수 없는 경로를 설정하고 개선 시작 | 그 작업에서 한 번 `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: <사유>` 알림이 보이고 내장 프롬프트로 진행된다. |
+| 25 | 선택지 버튼 | mock 응답에 `question`과 한국어 `options` 2~4개를 넣고 패널에서 `a`~`d` 버튼을 누른다 | 패널에 질문과 선택지 버튼이 나오고 첫 선택지에 초점이 간다. 높이 40행 이상(dock/full)에서는 밴드에 메시지·질문·선택지 안내(`→ 패널에서 답을 고르세요`)가, 원문·개선안은 패널에 표시된다. 40행 미만 compact inline은 밴드를 생략하고 메시지·질문이 패널에 표시된다. 버튼을 누르면 그 선택지 텍스트로 다음 라운드가 실행되고, 새 질문이 오면 다음 요청에 그 답이 반영된다. |
+| 26 | 프롬프트 캐시 | 2.1.292에서 같은 작업의 보완 라운드를 5분 안에 이어서 실행 | `usage`의 `cache_read_input_tokens`가 0보다 크고 `/optimize status`의 `캐시 읽기`가 증가한다(브레이크포인트 2개: system 전체, `<context>`~`</original_prompt>` 앞부분). 2.1.292 미만에서는 캐시 표시 없이 기존 string 요청으로 동작한다. |
 
 ### 2.1 추가로 볼 만한 동작(코드에서 확인된 것)
 

@@ -26,6 +26,7 @@ import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
 import { sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
+import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
 import { buildModelRequest, completeRewrite } from './model'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
@@ -177,6 +178,49 @@ export function createController(deps: ControllerDeps): OptimizerController {
   let extra: string | null = null
   /** The target model applied to the last request actually sent, or `null`. */
   let lastGuidance: Readonly<GuidanceStatus> | null = null
+  /** Whether the engine takes cached text blocks; read once per controller, `null` before that. */
+  let versionCache: boolean | null = null
+  /**
+   * The one-time unsupported-version notice, held until a round is actually
+   * going ahead. It is `null` once shown (or when the version supports caching).
+   */
+  let pendingCacheNotice: string | null = null
+
+  /**
+   * Whether the engine's `$.model.complete` takes cached text blocks, read from
+   * `$.session.version()` at most once per controller. A missing getter, a
+   * throw and an unparseable version all mean "no cache", and the answer is
+   * memoized so later rounds never re-read it or warn again.
+   *
+   * The first unsupported read holds one Korean notice instead of emitting it:
+   * a person on an old CLI never sees the cache that silently went unused, but
+   * `resolveTargetModel`/`version()` can outlive a cancel, so emitting here
+   * would toast a run the person already left. `round` flushes the held notice
+   * after its own stale/abort check, so a live round shows it once per
+   * controller and a cancelled or superseded one shows nothing. A supported
+   * version holds nothing. The notice names the detected version when there is
+   * one, and says so when the version could not be read.
+   */
+  async function promptCacheEnabled(ports: EnginePorts): Promise<boolean> {
+    if (versionCache !== null) return versionCache
+    let supported = false
+    let version: string | undefined
+    try {
+      const info = await ports.session.version?.()
+      version = info?.version
+      supported = supportsPromptCache(version)
+    } catch {
+      supported = false
+    }
+    versionCache = supported
+    if (!supported) {
+      pendingCacheNotice =
+        version === undefined
+          ? 'Claude Code 버전을 확인할 수 없어 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.'
+          : `Claude Code ${version}은(는) ${PROMPT_CACHE_MIN_VERSION} 미만이라 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.`
+    }
+    return supported
+  }
 
   /** Folds one event in and repaints when the state actually moved. */
   function apply(event: OptimizerEvent): void {
@@ -371,6 +415,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
     // The main session's model is read afresh on every round (the first call,
     // retry and refine alike), just before the request is assembled.
     const target = await resolveTargetModel(ports, config.modelGuidance, controller.signal)
+    // The engine version caps prompt caching; it is read once per controller.
+    const cache = await promptCacheEnabled(ports)
 
     // A cancel during detection must not send or record anything: a `cancelled`
     // snapshot is not permission to complete.
@@ -385,8 +431,20 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return
     }
 
+    // `promptCacheEnabled` held the unsupported-version notice instead of
+    // showing it while the round was still cancellable. This is the first
+    // point past every stale/abort guard, so the run really is going ahead:
+    // show it now, once per controller, and clear it so later rounds stay
+    // silent. A cancelled round never reaches here, so its held notice waits
+    // for the next live round instead of toasting a run already left.
+    if (pendingCacheNotice !== null) {
+      const notice = pendingCacheNotice
+      pendingCacheNotice = null
+      notify(notice)
+    }
+
     const system = composeSystemPrompt(extra, target.profile)
-    const request = buildModelRequest(current, config, system, instruction)
+    const request = buildModelRequest(current, config, system, instruction, { cache })
 
     // Record the model this request actually targets, just before sending.
     lastGuidance = { workflowId, round: current.rounds + 1, target }
@@ -407,24 +465,31 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
     if (result.kind === 'ok') {
       // There is no follow-up completion at the limit. Keep a model's stray
-      // question in the handoff instead of inviting an answer we cannot use.
+      // question in the handoff instead of inviting an answer we cannot use,
+      // and keep its choices alongside it so the person still sees them.
       if (current.rounds + 1 >= config.maxRounds && result.reply.question !== null) {
         const heading = /[가-힣]/.test(result.reply.draft)
           ? '미확정 사항 (구현 전 확인)'
           : 'Open decision (resolve before implementation)'
+        const options = result.reply.options ?? []
+        const choiceLine = options.length > 0 ? `\n- 선택지: ${options.join(' / ')}` : ''
         result = {
           ...result,
           reply: {
             ...result.reply,
-            draft: `${result.reply.draft}\n\n${heading}:\n${result.reply.question}`,
+            draft: `${result.reply.draft}\n\n${heading}:\n${result.reply.question}${choiceLine}`,
             question: null,
+            options: [],
           },
         }
       }
       apply({ type: 'reply', workflowId, generation, reply: result.reply, usage: result.usage })
       if (stale) return
       const question = result.reply.question
-      const notice = question !== null && question !== '' ? `질문: ${question}` : result.reply.message
+      const options = result.reply.options ?? []
+      const notice = question !== null && question !== ''
+        ? `질문: ${question}${options.length > 0 ? ` (선택지 ${options.length}개)` : ''}`
+        : result.reply.message
       if (notice !== '') notify(notice)
       return
     }

@@ -1,12 +1,12 @@
 # 설계: 프롬프트 옵티마이저 Mod (POPT-F94F A)
 
-> 참고(2026-10-05): Claude Code 2.1.287에서 Mods가 정식 기능이 되어 이 문서의 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` 플래그는 2.1.287 이상에서 필요 없다. 생성 선언은 여전히 EARLY ACCESS로 표기되어 API 계약은 버전 간 바뀔 수 있다.
+> 참고(2026-10-05): Claude Code 2.1.287에서 Mods가 정식 기능이 되어 이 문서의 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` 플래그는 2.1.287 이상(최소 지원 2.1.292 포함)에서 필요 없다. 생성 선언은 여전히 EARLY ACCESS로 표기되어 API 계약은 버전 간 바뀔 수 있다.
 
 > 요구사항 구체화 갱신: 현재 구현은 저장소 근거를 제한적으로 읽고, 결정 간 의존성에 따라 한 라운드에 한 질문을 한다. 복합 초안에는 목표·근거·합의된 결정·범위/계약·완료 기준·미결정을 담는다. 마지막 허용 라운드에는 질문을 끝내되 미결정을 확정하지 않는다. `README.md`의 소개·비용/개인정보와 `docs/smoke.md`의 의미 평가 절차를 함께 본다. 아래 실험·위임 기록은 당시 기록이며 실제 품질 검증을 뜻하지 않는다.
 
 > 설계 에이전트(📐 A) 산출물 원문. 실험 파일은 /tmp/popt-f94f-mod-probe, /tmp/popt-f94f-runtime (저장소 외부).
 
-> 참고(2026-10-07): 2.1.290의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·classic `SessionStart`/`UserPromptSubmit`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니므로, 실패하면 그 훅만 건너뛰고 나머지 훅과 코어가 그대로 진행(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다. 2.1.292는 `$.model.complete`의 `prompt`/`system`이 텍스트 블록 배열(`ModelTextBlock`, `cache: true`)도 받는 프롬프트 캐시를 추가했으나, 이 플러그인은 아직 string만 쓴다.
+> 참고(2026-10-07): 2.1.290의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·classic `SessionStart`/`UserPromptSubmit`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니므로, 실패하면 그 훅만 건너뛰고 나머지 훅과 코어가 그대로 진행(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다. 2.1.292는 `$.model.complete`의 `prompt`/`system`이 텍스트 블록 배열(`ModelTextBlock`, `cache: true`)도 받는 프롬프트 캐시를 추가했고, 이 플러그인은 최소 지원 버전을 2.1.292로 두고 2.1.292 이상에서 이 블록 형태로 요청한다(버전을 확인할 수 없거나 2.1.292 미만이면 기존 string 요청, `hooks/engine-version.ts`). 매니페스트에 최소 버전 필드가 없어 강제할 수는 없다.
 
 📐[POPT-F94F] A 설계 완료. **제출을 먼저 `drop`하고, 플러그인 자체 상태에서 개선 대화를 진행한 뒤 입력창에 복원하는 구조**를 권장합니다. 제품 저장소는 변경하지 않았습니다.
 

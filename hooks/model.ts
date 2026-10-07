@@ -16,15 +16,17 @@
  * that always carries `usage`.
  *
  * {@link parseReply} reads the fixed JSON contract: an optional code fence is
- * ignored, the first `{` to the last `}` is parsed, and only `draft`, `message`
- * and `question` are read.
+ * ignored, the first `{` to the last `}` is parsed, and only `draft`, `message`,
+ * `question` and `options` are read.
  */
 
-import type { ModelCompleteRequest, ModelCompleteResult } from 'claude-code'
+import type { ModelCompleteRequest, ModelCompleteResult, ModelTextBlock } from 'claude-code'
 
 import {
   DEFAULT_EFFORT,
   type EnginePorts,
+  MAX_REPLY_OPTION_CHARS,
+  MAX_REPLY_OPTIONS,
   MAX_REQUEST_CHARS,
   type ModelUsage,
   type OptimizerConfig,
@@ -100,14 +102,30 @@ export function neutralizeTags(text: string): string {
   )
 }
 
+/** The rendered tagged prompt and the index just past `</original_prompt>`. */
+interface RenderedPrompt {
+  /** The whole prompt, exactly as `blocks.join('\n\n')`. */
+  text: string
+  /**
+   * Index in {@link text} just after the `</original_prompt>` block, so
+   * `text.slice(0, prefixEnd)` is the cacheable prefix (context + original)
+   * and the remainder still opens the request's variable part.
+   */
+  prefixEnd: number
+}
+
 /** Renders the tagged prompt; the selected dialogue stays in time order. */
-function renderPrompt(parts: PromptParts): string {
+function renderPrompt(parts: PromptParts): RenderedPrompt {
   const blocks: string[] = []
   // Only the context is neutralized: it can carry other sources' memory text.
   // The original/draft/dialogue/instruction are the user's own text, and changing
   // their tags could leak the replacement character into an improved draft.
   if (parts.context !== '') blocks.push(`<context>\n${neutralizeTags(parts.context)}\n</context>`)
   blocks.push(`<original_prompt>\n${parts.original}\n</original_prompt>`)
+  // The prefix is exactly the joined context + original blocks; computing it
+  // here (rather than searching for `</original_prompt>`) keeps the split exact
+  // even when the user's own text contains that look-alike tag.
+  const prefixEnd = blocks.join('\n\n').length
   if (parts.draft !== null) blocks.push(`<current_draft>\n${parts.draft}\n</current_draft>`)
   if (parts.dialogue.length > 0) {
     // Selection is newest-first (see buildModelRequest); the kept turns read
@@ -120,9 +138,9 @@ function renderPrompt(parts: PromptParts): string {
     `<refinement_round>\ncurrent: ${parts.round}\nmax: ${parts.maxRounds}\nremaining: ${Math.max(0, parts.maxRounds - parts.round)}\n</refinement_round>`,
   )
   blocks.push(
-    'JSON 객체만 출력한다. 코드 펜스 없이 위 계약의 JSON 객체 하나만 보낸다. draft·message·question은 <original_prompt>와 같은 언어로 쓴다.',
+    'JSON 객체만 출력한다. 코드 펜스 없이 위 계약의 JSON 객체 하나만 보낸다. draft는 <original_prompt>와 같은 언어로, message·question·options는 항상 한국어로 쓴다.',
   )
-  return blocks.join('\n\n')
+  return { text: blocks.join('\n\n'), prefixEnd }
 }
 
 /**
@@ -138,12 +156,21 @@ function renderPrompt(parts: PromptParts): string {
  * generated draft are trimmed. The latest question/answer stays together and
  * the original prompt is never truncated. Oversized user input alone can
  * exceed the budget; it is never silently rewritten or discarded here.
+ *
+ * `options.cache` defaults to `false`, which keeps `prompt`/`system` as plain
+ * strings (the older shape every engine takes). When `true`, both become
+ * {@link ModelTextBlock} lists marked for the prompt cache: `system` is one
+ * cached block (omitted when blank) and `prompt` is the context-plus-original
+ * prefix (cached) followed by the still-variable remainder. Concatenating the
+ * blocks reproduces the string request exactly, and the budget above is still
+ * measured on that string.
  */
 export function buildModelRequest(
   workflow: Readonly<Workflow>,
   config: OptimizerConfig,
   system: string,
   instruction?: string,
+  options: { cache?: boolean } = {},
 ): ModelCompleteRequest {
   const original = workflow.original
   let draft = workflow.draft !== '' && workflow.draft !== original ? workflow.draft : null
@@ -157,7 +184,7 @@ export function buildModelRequest(
     : lastOptimizer < 0 ? 1 : dialogue.length - lastOptimizer
   let context = workflow.context?.text ?? ''
 
-  const build = (): string =>
+  const build = (): RenderedPrompt =>
     renderPrompt({
       context, original, draft, dialogue, instruction: instructionText,
       round: workflow.rounds + 1, maxRounds: config.maxRounds,
@@ -166,42 +193,70 @@ export function buildModelRequest(
   let prompt = build()
 
   // 1) Drop the oldest dialogue turns until the request fits.
-  while (prompt.length + system.length > MAX_REQUEST_CHARS && dialogue.length > protectedTurns) {
+  while (prompt.text.length + system.length > MAX_REQUEST_CHARS && dialogue.length > protectedTurns) {
     dialogue.shift()
     prompt = build()
   }
 
   // 2) Trim the context from its tail, keeping its head.
-  if (prompt.length + system.length > MAX_REQUEST_CHARS && context !== '') {
-    const overflow = prompt.length + system.length - MAX_REQUEST_CHARS
+  if (prompt.text.length + system.length > MAX_REQUEST_CHARS && context !== '') {
+    const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
     context = context.slice(0, Math.max(0, context.length - overflow))
     prompt = build()
   }
 
   // Large prior drafts are replaceable summaries. Preserve the user's original
   // and latest decision before preserving generated prose, and flag truncation.
-  if (prompt.length + system.length > MAX_REQUEST_CHARS && draft !== null) {
-    const overflow = prompt.length + system.length - MAX_REQUEST_CHARS
+  if (prompt.text.length + system.length > MAX_REQUEST_CHARS && draft !== null) {
+    const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
     const marker = '\n[Earlier draft truncated; retain the original request and user decisions.]'
     const keep = Math.max(0, draft.length - overflow - marker.length)
     draft = keep > 0 ? draft.slice(0, keep) + marker : null
     prompt = build()
   }
 
-  return {
+  const text = prompt.text
+  if (options.cache !== true) {
+    return {
+      model: config.model,
+      prompt: text,
+      system,
+      maxTokens: config.maxTokens,
+      effort: DEFAULT_EFFORT,
+      timeoutMs: config.timeoutMs,
+    }
+  }
+
+  // The text before `</original_prompt>` is the context the round repeats; only
+  // the remainder changes between rounds, so the prefix is the cache breakpoint.
+  const prefix = text.slice(0, prompt.prefixEnd)
+  const rest = text.slice(prompt.prefixEnd)
+  const request: ModelCompleteRequest = {
     model: config.model,
-    prompt,
-    system,
+    prompt: [{ text: prefix, cache: true }, { text: rest }],
     maxTokens: config.maxTokens,
     effort: DEFAULT_EFFORT,
     timeoutMs: config.timeoutMs,
   }
+  if (system !== '') request.system = [{ text: system, cache: true }]
+  return request
 }
 
-/** Describes an API-error arm, naming its status and error kind. */
+/**
+ * Joins a request's `prompt`/`system` value back into one string: a plain
+ * string stands, and a block list joins its texts in order. The helper keeps
+ * tests and logs reading a request the same way whatever shape it carries.
+ */
+export function requestText(value: string | readonly ModelTextBlock[] | undefined): string {
+  if (typeof value === 'string') return value
+  if (value === undefined) return ''
+  return value.map(block => block.text).join('')
+}
+
+/** Describes an API-error arm, naming its status and error kind, in Korean. */
 function describeApiError(result: { status: number | null; error: string }): string {
-  const status = result.status === null ? 'no response' : `status ${result.status}`
-  return `the optimizer API call failed (${status}: ${result.error})`
+  const status = result.status === null ? '응답 없음' : `status ${result.status}`
+  return `옵티마이저 API 호출에 실패했습니다 (${status}: ${result.error})`
 }
 
 /**
@@ -230,16 +285,16 @@ export async function completeRewrite(
 
   if (!result.isAnswered) {
     if (result.reason === 'aborted') {
-      return { kind: 'failed', reason: 'aborted', message: 'the optimizer completion was aborted', usage }
+      return { kind: 'failed', reason: 'aborted', message: '옵티마이저 요청이 중단되었습니다', usage }
     }
     if (result.reason === 'empty-reply') {
-      return { kind: 'failed', reason: 'empty-reply', message: 'the model returned no text', usage }
+      return { kind: 'failed', reason: 'empty-reply', message: '모델이 텍스트를 반환하지 않았습니다', usage }
     }
     return { kind: 'failed', reason: 'api-error', message: describeApiError(result), usage }
   }
 
   if (result.text.trim() === '') {
-    return { kind: 'failed', reason: 'empty-reply', message: 'the model returned no text', usage }
+    return { kind: 'failed', reason: 'empty-reply', message: '모델이 텍스트를 반환하지 않았습니다', usage }
   }
 
   const parsed = parseReply(result.text)
@@ -249,8 +304,8 @@ export async function completeRewrite(
       reason: parsed.reason,
       message:
         parsed.reason === 'empty-draft'
-          ? 'the model reply carried no draft'
-          : 'the model reply was not valid JSON',
+          ? '모델 응답에 개선안이 없습니다'
+          : '모델 응답이 올바른 JSON이 아닙니다',
       usage,
     }
   }
@@ -265,9 +320,12 @@ export async function completeRewrite(
  * last `}` is extracted and parsed. Two narrowly recognized question-tail
  * mistakes can be repaired ({@link parseObject}); truncated draft/message
  * values are never repaired. `draft` must be a non-empty string (trimmed);
- * `message` defaults to `''`; `question` is a non-empty string or `null`. Any
- * other field is ignored. A missing object or unparseable JSON is `invalid-json`;
- * a missing or blank draft is `empty-draft`.
+ * `message` defaults to `''`; `question` is a non-empty string or `null`;
+ * `options` is always an array — string choices only, trimmed, with blanks,
+ * duplicates and over-long entries dropped and at most
+ * {@link MAX_REPLY_OPTIONS} kept, and `[]` when the question is `null`. Any
+ * other field is ignored. A missing object or unparseable JSON is
+ * `invalid-json`; a missing or blank draft is `empty-draft`.
  */
 export function parseReply(
   text: string,
@@ -287,8 +345,31 @@ export function parseReply(
   const message = typeof record.message === 'string' ? record.message : ''
   const question =
     typeof record.question === 'string' && record.question.trim() !== '' ? record.question : null
+  const options = parseOptions(record.options, question)
 
-  return { ok: true, reply: { draft, message, question } }
+  return { ok: true, reply: { draft, message, question, options } }
+}
+
+/**
+ * Reads the `options` array for one reply. Without a question there is nothing
+ * to answer, so the list is empty; otherwise only complete, in-budget string
+ * choices survive, duplicates and blanks drop, and the first
+ * {@link MAX_REPLY_OPTIONS} are kept.
+ */
+function parseOptions(raw: unknown, question: string | null): readonly string[] {
+  if (question === null || !Array.isArray(raw)) return []
+  const options: string[] = []
+  for (const value of raw) {
+    if (typeof value !== 'string') continue
+    const text = value.trim()
+    // Count user-perceived characters (code points), so an emoji choice is
+    // measured as one character rather than its two UTF-16 code units.
+    if (text === '' || [...text].length > MAX_REPLY_OPTION_CHARS) continue
+    if (options.includes(text)) continue
+    options.push(text)
+    if (options.length === MAX_REPLY_OPTIONS) break
+  }
+  return options
 }
 
 /**
