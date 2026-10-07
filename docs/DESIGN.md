@@ -172,6 +172,8 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 
 `ui.ask` 반복은 구현량이 적고 장시간 await도 테스트에서 확인했지만, 선택지 2~4개 제한과 긴 개선안 편집의 불편이 있습니다. 또한 실제 AskUserQuestion 실행의 메인 transcript 영향은 이번에 검증하지 못했습니다. **v1 필수 폴백은 composer 방식**, `ui.ask`는 후속 선택 사항으로 둡니다.
 
+> ASKU-D630 메모(2026-10-07): 2.1.292에서 질문 선택지에 `ui.ask` 채택(ASKU-D630), 대화 기록·모델 문맥에 남지 않음을 실화면으로 확인. 위 "후속 선택 사항" 서술은 당시 판단이고, 이제는 선택지 2개 이상일 때 선택 창을 먼저 쓴다.
+
 구체적인 화면 구성과 키보드 동작은 전용 디자이너 작업 K가 확정합니다.
 
 **③ 제출·대기 방식**
