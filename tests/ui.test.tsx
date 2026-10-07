@@ -939,7 +939,7 @@ describe('optimizer UI', () => {
     expect(invalidations).toBe(4)
     expect(statuses.at(-1)).toBeUndefined()
     expect(toasts).toHaveLength(0)
-    expect(DEFAULT_CONFIG.maxRounds).toBe(3)
+    expect(DEFAULT_CONFIG.maxRounds).toBe(5)
   })
 
   test('presenter closes a finished pane once and invalidates it, but never closes composer', async () => {

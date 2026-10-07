@@ -355,6 +355,20 @@ describe('buildSnapshot', () => {
     expect(snapshot.text).toContain('M'.repeat(100))
     expect(snapshot.text).not.toContain('[[0]]')
   })
+
+  test('preserves repository evidence before memory and conversation within the total budget', () => {
+    const snapshot = buildSnapshot(baseInput({
+      project: 'src/images.ts:12 baseline = previousImage',
+      memory: 'M'.repeat(2000),
+      messages: [message('user', 'old conversation')],
+      contextMaxChars: 500,
+    }))
+    expect(snapshot.project).toBe('src/images.ts:12 baseline = previousImage')
+    expect(snapshot.text).toContain('## Repository evidence (partial, read-only)')
+    expect(snapshot.text).toContain('baseline = previousImage')
+    expect(snapshot.text.length).toBeLessThanOrEqual(500)
+    expect(snapshot.text).toContain('old conversation')
+  })
 })
 
 describe('collectContext', () => {
@@ -401,6 +415,31 @@ describe('collectContext', () => {
     expect(snapshot.rules).toContain('root')
     expect(snapshot.rules).toContain('nested')
     expect(snapshot.rules).toContain('sub')
+  })
+
+  test('includes root and current-directory AGENTS.md project instructions', async () => {
+    const { engine } = fakeEngine({
+      cwd: '/repo/sub',
+      files: { '/repo/AGENTS.md': 'root instructions', '/repo/sub/AGENTS.md': 'nested instructions' },
+    })
+    const snapshot = await collectContext(engine, DEFAULT_CONFIG)
+    expect(snapshot.rules).toContain('root instructions')
+    expect(snapshot.rules).toContain('nested instructions')
+  })
+
+  test('surfaces unavailable repository evidence for the original request', async () => {
+    const { engine } = fakeEngine()
+    const snapshot = await collectContext(engine, DEFAULT_CONFIG, '', 'node image API')
+    expect(snapshot.project).toContain('repository inspection unavailable')
+    expect(snapshot.text).toContain('Repository evidence (partial, read-only)')
+  })
+
+  test('does not collect repository evidence with a zero context budget', async () => {
+    const { engine, calls } = fakeEngine()
+    const snapshot = await collectContext(engine, { ...DEFAULT_CONFIG, contextMaxChars: 0 }, '', 'node image API')
+    expect(snapshot.project).toBe('')
+    expect(snapshot.text).toBe('')
+    expect(calls.stat).toBe(3)
   })
 
   test('skips an oversized rule file without reading it', async () => {

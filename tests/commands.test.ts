@@ -159,7 +159,7 @@ describe('formatStatus', () => {
     expect(text).toContain('장기 기억 문맥: 켬')
     expect(text).toContain('진행 중인 개선 작업: wf-1')
     expect(text).toContain('단계 reviewing')
-    expect(text).toContain('1/3회')
+    expect(text).toContain('1/5회')
     expect(text).toContain('이 세션 사용량: 2회')
     expect(text).toContain('입력 300')
     expect(text).toContain('출력 150')

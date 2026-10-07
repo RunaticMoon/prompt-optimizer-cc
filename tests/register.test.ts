@@ -150,10 +150,10 @@ describe('register — the wired module', () => {
       expect(submits).toHaveLength(0)
       expect(modelCalls).toHaveLength(0)
 
-      // 2. The scheduled round makes exactly one completion, on `haiku`.
+      // 2. The scheduled round makes exactly one completion, on `sonnet`.
       await clock.advance(1)
       expect(modelCalls).toHaveLength(1)
-      expect(modelCalls[0]?.model).toBe('haiku')
+      expect(modelCalls[0]?.model).toBe('sonnet')
       expect(submits).toHaveLength(0)
 
       // 3. `/optimize accept` fills the draft; resubmitting it bypasses once.
@@ -417,12 +417,12 @@ describe('register — the wired module', () => {
     on('config.set', () => ({ deny: 'locked by policy' }))
 
     await $.session.start(SESSION_START)
-    const set = await $.config.set(configChange('prompt-optimizer.model', 'sonnet'))
+    const set = await $.config.set(configChange('prompt-optimizer.model', 'haiku'))
     expect(set).toEqual({ deny: 'locked by policy' })
 
     const status = await $.command.run({ ...COMMAND_RUN, args: 'status' })
-    expect(status.text).toContain('모델: haiku')
-    expect(status.text).not.toContain('sonnet')
+    expect(status.text).toContain('모델: sonnet')
+    expect(status.text).not.toContain('haiku')
   })
 
   test('config.set: an invalid row value keeps the old value and toasts', { options: {} }, async ($, on) => {
@@ -440,12 +440,12 @@ describe('register — the wired module', () => {
     const set = await $.config.set(configChange('prompt-optimizer.maxTokens', '99999'))
     expect(set).toEqual({ value: '99999' })
     expect(toasts).toEqual([
-      'prompt-optimizer: maxTokens 값이 올바르지 않아 이전 값을 유지합니다: "maxTokens" must be between 128 and 2048; using default 1024',
+      'prompt-optimizer: maxTokens 값이 올바르지 않아 이전 값을 유지합니다: "maxTokens" must be between 128 and 2048; using default 2048',
     ])
 
     // The stored value was refused, so the effective setting is unchanged.
     const status = await $.command.run({ ...COMMAND_RUN, args: 'status' })
-    expect(status.text).toContain('최대 토큰: 1024')
+    expect(status.text).toContain('최대 토큰: 2048')
   })
 
   test(
@@ -601,7 +601,7 @@ describe('register — the wired module', () => {
       await clock.advance(1)
       expect(modelCalls).toHaveLength(1)
       expect(modelCalls[0]?.system ?? '').toContain('[대상 모델 편집 지침: opus-5-5]')
-      expect(modelCalls[0]?.model).toBe('haiku')
+      expect(modelCalls[0]?.model).toBe('sonnet')
       expect(modelCalls[0]?.effort).toBe('low')
 
       // The next round re-reads the getter; haiku stays on common guidance.
@@ -610,7 +610,7 @@ describe('register — the wired module', () => {
       await clock.advance(1)
       expect(modelCalls).toHaveLength(2)
       expect(modelCalls[1]?.system ?? '').not.toContain('[대상 모델 편집 지침:')
-      expect(modelCalls[1]?.model).toBe('haiku')
+      expect(modelCalls[1]?.model).toBe('sonnet')
       expect(modelCalls[1]?.effort).toBe('low')
       expect(modelReads).toBe(2)
     },

@@ -162,6 +162,8 @@ export interface ContextSnapshot {
   location: string
   /** Recent tool metadata, capped by {@link CONTEXT_TOOLS_CHARS}. */
   tools: string
+  /** Bounded, path-labelled repository evidence relevant to the original request. */
+  project?: string
   /** Injected long-term memory text, capped by {@link CONTEXT_MEMORY_CHARS}. */
   memory: string
   /** The assembled snapshot text under the configured character budget. */
@@ -337,10 +339,10 @@ export const DEFAULT_CONFIG: OptimizerConfig = {
   triggerPrefix: '?? ',
   rawPrefix: '>> ',
   uiMode: 'auto',
-  model: 'haiku',
-  maxTokens: 1024,
-  timeoutMs: 12000,
-  maxRounds: 3,
+  model: 'sonnet',
+  maxTokens: 2048,
+  timeoutMs: 30000,
+  maxRounds: 5,
   contextTurns: 4,
   contextMaxChars: 6000,
   systemPromptFile: '',
@@ -377,6 +379,9 @@ export const CONTEXT_LOCATION_CHARS = 400
 /** Cap for tool metadata inside the snapshot. */
 export const CONTEXT_TOOLS_CHARS = 400
 
+/** Cap for task-relevant source and domain-document excerpts in the snapshot. */
+export const CONTEXT_PROJECT_CHARS = 3000
+
 /** Cap for injected long-term memory text inside the snapshot. */
 export const CONTEXT_MEMORY_CHARS = 2000
 
@@ -387,7 +392,7 @@ export const CONTEXT_MESSAGES_MAX = 8
 export const CONTEXT_CONVERSATION_CHARS = 4000
 
 /** Prompts longer than this are passed through untouched. */
-export const MAX_REQUEST_CHARS = 16000
+export const MAX_REQUEST_CHARS = 18000
 
 /** An original prompt longer than this is not optimized; it passes through unchanged (DESIGN ④). */
 export const MAX_ORIGINAL_CHARS = 6000
@@ -405,7 +410,8 @@ export type EnginePorts = {
     Partial<Pick<EngineInterface['session'], 'model'>>
   /** Optional so older hosts and tests without a timer degrade to common guidance. */
   clock?: Pick<EngineInterface['clock'], 'sleep'>
-  fs: Pick<EngineInterface['fs'], 'stat' | 'read'>
+  fs: Pick<EngineInterface['fs'], 'stat' | 'read'> &
+    Partial<Pick<EngineInterface['fs'], 'list'>>
   env: Pick<EngineInterface['env'], 'get'>
   model: Pick<EngineInterface['model'], 'complete'>
   prompt: Pick<EngineInterface['prompt'], 'read' | 'fill' | 'submit'>
@@ -461,10 +467,20 @@ export interface GuidanceStatus {
 export const TARGET_MODEL_TIMEOUT_MS = 500
 
 /** Cap for the shared rewrite guidance text. */
-export const COMMON_GUIDANCE_MAX_CHARS = 1500
+export const COMMON_GUIDANCE_MAX_CHARS = 2400
 
 /** Cap for one model-specific guidance block. */
 export const MODEL_GUIDANCE_MAX_CHARS = 800
 
-/** Cap for the assembled optimizer system prompt with the largest extra file. */
-export const GUIDANCE_SYSTEM_MAX_CHARS = 7600
+/** Cap for the built-in base prompt outside the shared guidance it embeds. */
+export const BASE_PROMPT_MAX_CHARS = 1300
+
+/** Cap for the fixed role-limit and JSON output contract. */
+export const FIXED_CONTRACT_MAX_CHARS = 700
+
+/**
+ * Cap for the assembled optimizer system prompt with the largest extra file:
+ * the four caps above, 200 characters of headings and separators, and
+ * {@link SYSTEM_PROMPT_MAX_CHARS}.
+ */
+export const GUIDANCE_SYSTEM_MAX_CHARS = 9400

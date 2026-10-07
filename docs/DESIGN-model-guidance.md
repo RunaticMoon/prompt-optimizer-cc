@@ -5,9 +5,15 @@
 대상: `/home/ubuntu/.paseo/worktrees/176hu8fw/omfc-9a09`, 브랜치 `omfc-9a09/model-aware-guidance`, 기준 `793a137`.
 이 문서는 계획과 지침 초안이다. B의 산출물은 이 파일 하나이며 제품 코드 변경, 워커 생성, 커밋, push는 하지 않는다.
 
+> 현재 구현 갱신: 모델 감지·프로필 선택 구조는 유지하고 공통 편집 정책을 요구사항 구체화로 확장했다. `hooks/model-guidance.ts`의 `COMMON_GUIDANCE`와 `hooks/system-prompt.ts`가 현재 전문이다. 아래 §4.1과 위임 계획은 당시 기록으로 보존하며, 현재 런타임에 그대로 복사하는 명세가 아니다. §4.9의 문자 예산과 §7·§8의 상수·길이 검증은 현재 상한으로 갱신했다.
+>
+> [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)의 결정 의존성·사실/선택 구분과 [domain-modeling](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md)의 용어·경계 사례·결정 이유를 적용한다. 모든 모델 프로필은 이 공통 정책을 따른다. 기존 `draft/message/question` 계약에 맞춰 라운드당 중요한 질문 하나와 추천·이유를 제시하고, 합의된 결정은 초안에 누적한다. 복합 초안은 목표·근거·합의·범위/계약·완료 기준·미결정을 필요에 따라 담는다. 미결정은 사용자 답변이나 근거로 해결될 때까지 유지하며 마지막 허용 회차에는 질문 없이 남긴다. 진단·조사는 증상·환경 인터뷰로 확장하지 않고, 사용자만 아는 사실이 조사 대상 자체를 바꿀 때만 묻는다. 프로젝트 규칙은 목록으로 반복하지 않으며 특정 결정을 막거나 바꾸는 근거로만 한 번 언급한다.
+>
+> 프로젝트 자료는 작업당 한 번 읽는 제한된 스냅샷에 포함한다. 서브에이전트 탐색, 원래 작업의 실행, 용어집·ADR 자동 쓰기는 하지 않는다. 질문과 구체화의 실제 품질은 `docs/smoke.md`의 의미 평가로 별도 확인하며, 문자열·mock 테스트 통과로 입증하지 않는다. 여섯 참고 자료와 적용 차이는 `README.md`의 출처에 정리했다.
+
 ## 1. 요구와 완료 기준
 
-옵티마이저가 만드는 것은 **현재 Claude Code 메인 모델에게 보낼 사용자 메시지**다. `config.model`(기본 `haiku`)은 그 메시지를 편집하는 별도 모델이며 가이드 선택의 기준이 아니다. 변경/진단/조사/글쓰기와 긴 산출물 여부를 구분하고, 요청의 의도·언어·확신 수준을 유지하며 필요한 정보만 구조화한다. 진단 질문을 수정 지시로 바꾸지 않는다.
+옵티마이저가 만드는 것은 **현재 Claude Code 메인 모델에게 보낼 사용자 메시지**다. `config.model`(기본 `sonnet`)은 그 메시지를 편집하는 별도 모델이며 가이드 선택의 기준이 아니다. 변경/진단/조사/글쓰기와 긴 산출물 여부를 구분하고, 요청의 의도·언어·확신 수준을 유지하며 필요한 정보만 구조화한다. 진단 질문을 수정 지시로 바꾸지 않는다.
 
 완료 기준은 다음과 같다.
 
@@ -22,7 +28,7 @@
 
 ## 2. 근거와 현재 구조
 
-### 2.1 코드에서 확인한 사실
+### 2.1 기준 커밋 당시 코드에서 확인한 사실
 
 | 위치(기준 커밋) | 사실과 설계 영향 |
 | --- | --- |
@@ -207,22 +213,23 @@ Haiku 4.5에는 개별 문자열을 만들지 않는다. `common` 프로필의 �
 
 | 구성 | 상한 |
 | --- | ---: |
-| 기존 BASE 부분(공통 지침 제외) | 600자(현재 484자) |
-| COMMON_GUIDANCE | 1500자 |
-| 모델 추가 지침 하나 | 800자 |
-| FIXED_CONTRACT | 500자(현재 367자) |
+| BASE 부분(공통 지침 제외, `BASE_PROMPT_MAX_CHARS`) | 1300자 |
+| COMMON_GUIDANCE (`COMMON_GUIDANCE_MAX_CHARS`) | 2400자 |
+| 모델 추가 지침 하나 (`MODEL_GUIDANCE_MAX_CHARS`) | 800자 |
+| FIXED_CONTRACT (`FIXED_CONTRACT_MAX_CHARS`) | 700자 |
 | 조립 제목·구분자 전체 | 200자 |
 | 사용자 systemPromptFile extra | 기존 4000자 |
-| 추가 파일 없는 system 총량 | 3600자 |
-| 추가 파일 최대인 system 총량 | 7600자 |
+| 추가 파일 없는 system 총량 | 5400자 |
+| 추가 파일 최대인 system 총량 (`GUIDANCE_SYSTEM_MAX_CHARS`) | 9400자 |
+| prompt + system 총량 (`MAX_REQUEST_CHARS`) | 18000자(보존할 입력만으로 초과하는 예외는 아래 참고) |
 
-이 문서의 전문을 실제 UTF-16 길이로 계산한 값: 공통 **1158**, Fable 5.1 **506**, Fable 5 **402**, Opus 5.5 **363**, Opus 5 **294**, Opus 4.8 **339**, Sonnet 5.5 **374**, Sonnet 5 **312**자. 모두 상한 안이며, 워커는 옮긴 코드 문자열도 다시 측정한다.
+시스템 상한은 `1300 + 2400 + 800 + 700 + 200 = 5400`, 추가 파일 포함 시 `5400 + 4000 = 9400`이다. 이 문서의 과거 지침 초안 길이가 아니라 현재 코드의 각 문자열과 모든 프로필의 조립 결과를 측정해 검증한다. 요구사항 구체화 지침을 담도록 문자 예산을 늘렸으며, effort `low`, 현재 completion 타임아웃 30000ms와 모델 감지 타임아웃 500ms는 유지한다.
 
-초기 라운드에서 원문 6000 + context 6000 + 사용자 프롬프트 래퍼/마지막 JSON 요청문 200 + system 3600 = **15800자**다. extra 4000을 모두 쓰면 최대 19800자로 기존 context 절삭이 작동한다. dialogue/draft/instruction이 없는 이 조건에서는 context를 최대 약 2200자까지 줄이면 16000자 안에 들어간다. 실제 테스트는 느슨한 200자 가정뿐 아니라 `buildModelRequest` 결과의 실제 길이를 확인한다.
+초기 라운드에서 dialogue/draft/instruction이 없고, 태그·`refinement_round`·마지막 JSON 요청문의 실제 길이를 `W`라 하면 최대 원문 6000 + context 6000 + system 5400 + W = **17400 + W자**다. extra 4000을 모두 쓰면 **21400 + W자**여서 context 절삭이 필요할 수 있다. 시스템이 상한까지 찬 경우 context를 `2600 - W`자 이하로 줄이면 18000자 안에 들어간다. 래퍼를 고정 200자로 가정하지 않고 `buildModelRequest` 결과의 실제 길이를 확인한다.
 
-기존 16000 제한은 **절대 보장 아님**: 원문+현재 draft+instruction+system만으로 초과하면 제거할 dialogue/context가 없어 초과값을 반환한다(`tests/model.test.ts` 기존 원문 보존 계약). 이번 작업에서 원문이나 사용자의 추가 지침을 새로 자르거나 오류 경로를 추가하지 않는다. 테스트는 (a) 보존 대상만으로 예산 안이면 전체가 16000 이하, (b) 이미 초과하면 원문 보존과 기존 동작 유지로 나눠 검증한다. PMEM 병합 후에도 context.text의 기존 총량 제한을 사용하며 memory를 6000에 별도 가산하지 않는다.
+18000 제한은 **절대 보장 아님**: 오래된 dialogue, context 꼬리, 이전 생성 draft 순으로 줄이지만 원문·최신 질문과 답변·instruction은 보존한다. 이 보존 대상과 system·래퍼만으로 초과하면 초과값을 반환한다(`tests/model.test.ts`의 원문·최신 결정 보존 계약). 테스트는 (a) 보존 대상만으로 예산 안이면 전체가 18000 이하, (b) 이미 초과하면 보존 대상이 유지되는지로 나눠 검증한다. context.text의 기본 총량은 6000자이며 저장소 근거 최대 3000자와 memory 최대 2000자를 그 안에 포함하고 별도 가산하지 않는다.
 
-상수 텍스트는 런타임에서 중간을 잘라 쓰지 않는다. 공통/각 프로필의 길이를 테스트로 제한하며 초과하면 문구를 편집한다. 모델 감지 원문은 system에 넣지 않아 임의 모델 문자열 길이가 예산이나 지시 권한에 영향을 주지 않게 한다. 출력 `maxTokens=1024`의 기존 한도도 늘리지 않으며, 긴 요청에서 생성 draft가 잘릴 가능성은 기존 제약으로 보고한다.
+상수 텍스트는 런타임에서 중간을 잘라 쓰지 않는다. 공통/각 프로필의 길이를 테스트로 제한하며 초과하면 문구를 편집한다. 모델 감지 원문은 system에 넣지 않아 임의 모델 문자열 길이가 예산이나 지시 권한에 영향을 주지 않게 한다. 당시 설계는 출력 기본값 `maxTokens=1024`를 유지했다. 이후 요구사항 구체화 변경에서는 기본값을 `2048`로 늘렸으며, 긴 생성 초안의 출력 한도는 여전히 유한하다.
 
 ## 5. 결정 c — 모델 식별
 
@@ -324,9 +331,12 @@ export interface GuidanceStatus {
 }
 
 export const TARGET_MODEL_TIMEOUT_MS = 500
-export const COMMON_GUIDANCE_MAX_CHARS = 1500
+export const COMMON_GUIDANCE_MAX_CHARS = 2400
 export const MODEL_GUIDANCE_MAX_CHARS = 800
-export const GUIDANCE_SYSTEM_MAX_CHARS = 7600
+export const BASE_PROMPT_MAX_CHARS = 1300
+export const FIXED_CONTRACT_MAX_CHARS = 700
+export const GUIDANCE_SYSTEM_MAX_CHARS = 9400
+export const MAX_REQUEST_CHARS = 18000
 
 // EnginePorts의 기존 session을 확장하고 다른 필드는 유지한다.
 // session: Pick<EngineInterface['session'], 'messages'|'cwd'|'root'|'repo'>
@@ -380,7 +390,7 @@ optional EnginePorts는 구형 테스트/호스트에서 감지 불가를 안전
 | 정규화 | 표의 모든 7개 프로필, Mythos 2개, Haiku, 별칭 5개, 날짜/[1m] 조합, 대소문자/공백/표시명, 빈 값/non-string, unknown/new-version, 비슷한 prefix·suffix 오매칭 거절, raw 불변 |
 | 감지 | 성공, 동기 throw, reject, never-resolve→500ms, 빈 문자열, 누락 포트, timer 실패, off에서는 0회 조회, 외부 취소, 늦은 성공/늦은 reject, 타이머/리스너 정리 |
 | 조립 | common 정확히 1회, 선택 모델 블록만 1회, common일 때 모델 블록 없음, extra 유무/공백, 최종 FIXED_CONTRACT 순서·역할 제한·JSON 키, raw 모델 미포함 |
-| 길이 | 공통 ≤1500, 각 모델 ≤800, system ≤7600, 초기 최대 원문/context 및 extra 0/4000, dialogue 절삭, context 절삭, 보존 대상만으로 초과하는 기존 예외, 원문 불변 |
+| 길이 | 공통 ≤2400, 각 모델 ≤800, 공통 제외 BASE ≤1300, 고정 계약 ≤700, system은 extra 없을 때 ≤5400·최대 extra 포함 ≤9400, 초기 최대 원문/context 및 extra 0/4000, 전체 요청 ≤18000, 오래된 dialogue → context → 이전 draft 절삭, 보존 대상만으로 초과하는 예외, 원문·최신 질문과 답변 불변 |
 | controller | 첫 호출/재시도/보완마다 조회, 같은 workflow에서 모델 전환, extra 파일 1회 read, config off/on, 실패 후 common, 모델 감지 취소 후 completion 0회, 새 세션/작업에 늦은 결과 미반영, extra await 취소 경쟁 |
 | 경계/상태 | prompt.submit 예약 경로, command 시작/retry, pane 보완/retry 모두 연결; optimizer request.model과 effort 불변; completion 1회; status가 조회하지 않음; 마지막 적용 기준/미감지/disabled/timeout/reset |
 
@@ -558,4 +568,4 @@ D → J ──────────────┘
 
 **C 결과로 확정할 핵심 미결 사항은 없다.** getter 형식·전환 반영·effort 비분기를 위 설계에 반영했다. 추가 사용자 결정을 요구하지 않는다.
 
-구현 후 확인할 사항은 세 엔진 경계의 새 closure/clock.sleep 로드 가능 여부, 예약된 round의 감지/취소 통합, prompt 의미 보존의 수동 검토다. 다른 CLI 버전·OAuth·Bedrock/Vertex·미확인 provider ID, 실제 모델의 품질/가용성은 C의 증거 범위 밖이다. 이 제한 때문에 알려지지 않은 문자열을 추정 매핑하지 않는다. 긴 draft 등 보존 대상 자체가 16000자를 넘는 기존 예외와 추가 출력 토큰 한도는 이번 설계에서 별도 해결하지 않는다.
+구현 후 확인할 사항은 세 엔진 경계의 새 closure/clock.sleep 로드 가능 여부, 예약된 round의 감지/취소 통합, prompt 의미 보존의 수동 검토다. 다른 CLI 버전·OAuth·Bedrock/Vertex·미확인 provider ID, 실제 모델의 품질/가용성은 C의 증거 범위 밖이다. 이 제한 때문에 알려지지 않은 문자열을 추정 매핑하지 않는다. 원문·최신 사용자 결정 등 보존할 입력만으로 18000자를 넘는 예외와 유한한 출력 토큰 한도는 현재 구현에도 남는다.

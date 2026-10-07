@@ -71,28 +71,28 @@
       "title": "Model",
       "description": "Model alias or id used for the optimizer's own completions.",
       "required": false,
-      "default": "haiku"
+      "default": "sonnet"
     },
     "maxTokens": {
       "type": "number",
       "title": "Max tokens",
       "description": "Output cap for one optimizer completion (128-2048).",
       "required": false,
-      "default": 1024
+      "default": 2048
     },
     "timeoutMs": {
       "type": "number",
       "title": "Timeout (ms)",
       "description": "Time limit for one optimizer completion (1000-30000).",
       "required": false,
-      "default": 12000
+      "default": 30000
     },
     "maxRounds": {
       "type": "number",
       "title": "Max rounds",
       "description": "Most completions allowed in one workflow (1-5).",
       "required": false,
-      "default": 3
+      "default": 5
     },
     "contextTurns": {
       "type": "number",

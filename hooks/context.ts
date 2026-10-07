@@ -16,6 +16,7 @@ import {
   CONTEXT_LOCATION_CHARS,
   CONTEXT_MEMORY_CHARS,
   CONTEXT_MESSAGES_MAX,
+  CONTEXT_PROJECT_CHARS,
   CONTEXT_RULES_CHARS,
   CONTEXT_TOOLS_CHARS,
   CONTEXT_TOTAL_CHARS,
@@ -23,6 +24,7 @@ import {
   type EnginePorts,
   type OptimizerConfig,
 } from './contracts'
+import { collectProjectEvidence } from './project-context'
 
 /** Per-message character cap before a long message is cut head/tail. */
 export const CONTEXT_MESSAGE_CHARS = 1200
@@ -54,6 +56,8 @@ export interface SnapshotInput {
   contextMaxChars: number
   /** Injected long-term memory text, already rendered; empty injects nothing. */
   memory: string
+  /** Bounded repository excerpts collected for the current request. */
+  project?: string
 }
 
 /**
@@ -61,8 +65,9 @@ export interface SnapshotInput {
  *
  * Conversation is selected newest-first within the last `contextTurns` user
  * turns, then reordered oldest-first. When the overall budget is exceeded the
- * oldest conversation lines are dropped first; only if the assembled text
- * still exceeds the budget with no conversation left does the final
+ * oldest conversation lines are dropped first. Repository evidence keeps up
+ * to two latest rows (500 chars each) by trimming the fixed-section tail when
+ * the budget permits. Otherwise, with no conversation left the final
  * {@link truncateHead} cut the tail of the whole text, which may trim the
  * fixed sections too (tools, then memory, location, rules in turn). Single
  * sections and single messages are trimmed with a marker, never mid-surrogate.
@@ -82,12 +87,14 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
     CONTEXT_LOCATION_CHARS,
   )
   const memory = truncateHead(input.memory, CONTEXT_MEMORY_CHARS)
+  const project = truncateHead(input.project ?? '', CONTEXT_PROJECT_CHARS)
   const tools = truncateHead(collectTools(window), CONTEXT_TOOLS_CHARS)
 
   const assemble = (conversationLines: readonly string[]): string => {
     const parts: string[] = []
     if (rules.length > 0) parts.push(`## Project rules\n${rules}`)
     if (location.length > 0) parts.push(`## Location\n${location}`)
+    if (project.length > 0) parts.push(`## Repository evidence (partial, read-only)\n${project}`)
     if (memory.length > 0) {
       parts.push(`## Long-term memory (injected by other plugins)\n${memory}`)
     }
@@ -99,9 +106,24 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
   }
 
   let text = assemble(lines)
-  while (text.length > budget && lines.length > 0) {
+  const preserveCount = project.length > 0 ? Math.min(2, lines.length) : 0
+  while (text.length > budget && lines.length > preserveCount) {
     lines.shift()
     text = assemble(lines)
+  }
+  // Repository excerpts must not erase the latest user decision. In a tight
+  // budget reserve up to two recent rows, trimming low-priority fixed tails.
+  if (text.length > budget && preserveCount > 0) {
+    const recent = lines.map(line => truncateHead(line, 500))
+    const recentSection = `## Recent conversation\n${recent.join('\n')}`
+    if (budget >= recentSection.length + 200) {
+      lines.splice(0, lines.length, ...recent)
+      text = `${truncateHead(assemble([]), budget - recentSection.length - 2)}\n\n${recentSection}`
+    } else {
+      // Very small configured budgets still prioritize rules and file evidence.
+      lines.splice(0, lines.length)
+      text = assemble(lines)
+    }
   }
   if (text.length > budget) text = truncateHead(text, budget)
 
@@ -110,6 +132,7 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
     rules,
     location,
     memory,
+    project,
     tools,
     text,
     chars: text.length,
@@ -127,12 +150,16 @@ export async function collectContext(
   $: EnginePorts,
   config: OptimizerConfig,
   memory = '',
+  request = '',
 ): Promise<ContextSnapshot> {
   const messages = await readMessages($)
   const cwd = await readText(() => $.session.cwd())
   const root = await readText(() => $.session.root())
   const repoName = await readRepoName($)
   const rules = await readRules($, root, cwd)
+  const project = config.contextMaxChars > 0
+    ? await collectProjectEvidence($, root, cwd, request)
+    : ''
 
   return buildSnapshot({
     messages,
@@ -143,6 +170,7 @@ export async function collectContext(
     contextTurns: config.contextTurns,
     contextMaxChars: config.contextMaxChars,
     memory: config.memoryContext ? memory : '',
+    project,
   })
 }
 
@@ -262,7 +290,7 @@ async function readRepoName($: EnginePorts): Promise<string | null> {
   }
 }
 
-/** The three CLAUDE.md candidates, read only when small enough to be worth it. */
+/** Local project instructions, read only when small enough to be worth it. */
 async function readRules(
   $: EnginePorts,
   root: string,
@@ -273,8 +301,11 @@ async function readRules(
   const candidates: string[] = [
     joinPath(root, 'CLAUDE.md'),
     joinPath(root, '.claude/CLAUDE.md'),
+    joinPath(root, 'AGENTS.md'),
   ]
-  if (cwd.length > 0 && cwd !== root) candidates.push(joinPath(cwd, 'CLAUDE.md'))
+  if (cwd.length > 0 && cwd !== root) {
+    candidates.push(joinPath(cwd, 'CLAUDE.md'), joinPath(cwd, 'AGENTS.md'))
+  }
 
   const found: { path: string; text: string }[] = []
   const seen = new Set<string>()

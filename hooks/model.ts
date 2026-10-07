@@ -6,9 +6,9 @@
  * model, `effort`, `maxTokens` and `timeoutMs`, the caller's system prompt,
  * and a tagged prompt holding the context snapshot, the original prompt, the
  * current draft, the recent dialogue and the caller's instruction. The whole
- * prompt plus system stays within {@link MAX_REQUEST_CHARS}: first the oldest
- * dialogue turns are dropped, then the context is trimmed; the original prompt
- * is never cut.
+ * prompt plus system is budgeted against {@link MAX_REQUEST_CHARS}: older
+ * dialogue, context and the previous draft yield to the latest exchange. The
+ * original prompt and the latest user decisions are never cut.
  *
  * {@link completeRewrite} makes exactly one `$.model.complete` call — no retry,
  * no model fallback, no `$.model.fork` — and maps every outcome (answer,
@@ -82,6 +82,8 @@ interface PromptParts {
   draft: string | null
   dialogue: readonly OptimizerMessage[]
   instruction: string
+  round: number
+  maxRounds: number
 }
 
 /**
@@ -93,7 +95,7 @@ interface PromptParts {
  */
 export function neutralizeTags(text: string): string {
   return text.replace(
-    /<(\s*\/?\s*(?:context|original_prompt|current_draft|dialogue|instruction)\b)/gi,
+    /<(\s*\/?\s*(?:context|original_prompt|current_draft|dialogue|instruction|refinement_round)\b)/gi,
     '‹$1',
   )
 }
@@ -114,7 +116,12 @@ function renderPrompt(parts: PromptParts): string {
     blocks.push(`<dialogue>\n${lines}\n</dialogue>`)
   }
   if (parts.instruction !== '') blocks.push(`<instruction>\n${parts.instruction}\n</instruction>`)
-  blocks.push('JSON 객체만 출력한다. 코드 펜스 없이 위 계약의 JSON 객체 하나만 보낸다.')
+  blocks.push(
+    `<refinement_round>\ncurrent: ${parts.round}\nmax: ${parts.maxRounds}\nremaining: ${Math.max(0, parts.maxRounds - parts.round)}\n</refinement_round>`,
+  )
+  blocks.push(
+    'JSON 객체만 출력한다. 코드 펜스 없이 위 계약의 JSON 객체 하나만 보낸다. draft·message·question은 <original_prompt>와 같은 언어로 쓴다.',
+  )
   return blocks.join('\n\n')
 }
 
@@ -127,9 +134,10 @@ function renderPrompt(parts: PromptParts): string {
  * given, else the dialogue's most recent user supplement.
  *
  * When the prompt plus `system` exceeds {@link MAX_REQUEST_CHARS}, the newest
- * dialogue turns are kept (the oldest are dropped first), then the context text
- * is trimmed from its tail; the kept dialogue is rendered oldest first, and the
- * original prompt is never truncated.
+ * dialogue turns are kept (the oldest are dropped first), then context and the
+ * generated draft are trimmed. The latest question/answer stays together and
+ * the original prompt is never truncated. Oversized user input alone can
+ * exceed the budget; it is never silently rewritten or discarded here.
  */
 export function buildModelRequest(
   workflow: Readonly<Workflow>,
@@ -138,19 +146,27 @@ export function buildModelRequest(
   instruction?: string,
 ): ModelCompleteRequest {
   const original = workflow.original
-  const draft = workflow.draft !== '' && workflow.draft !== original ? workflow.draft : null
+  let draft = workflow.draft !== '' && workflow.draft !== original ? workflow.draft : null
   const instructionText = instruction !== undefined ? instruction : lastUserInstruction(workflow.dialogue) ?? ''
 
   const dialogue = workflow.dialogue.slice()
+  // An answer such as "the first option" is meaningless without its question.
+  // Keep the latest optimizer question and subsequent answers as one exchange.
+  const lastOptimizer = dialogue.findLastIndex(message => message.role === 'optimizer')
+  const protectedTurns = dialogue.length === 0 ? 0
+    : lastOptimizer < 0 ? 1 : dialogue.length - lastOptimizer
   let context = workflow.context?.text ?? ''
 
   const build = (): string =>
-    renderPrompt({ context, original, draft, dialogue, instruction: instructionText })
+    renderPrompt({
+      context, original, draft, dialogue, instruction: instructionText,
+      round: workflow.rounds + 1, maxRounds: config.maxRounds,
+    })
 
   let prompt = build()
 
   // 1) Drop the oldest dialogue turns until the request fits.
-  while (prompt.length + system.length > MAX_REQUEST_CHARS && dialogue.length > 0) {
+  while (prompt.length + system.length > MAX_REQUEST_CHARS && dialogue.length > protectedTurns) {
     dialogue.shift()
     prompt = build()
   }
@@ -159,6 +175,16 @@ export function buildModelRequest(
   if (prompt.length + system.length > MAX_REQUEST_CHARS && context !== '') {
     const overflow = prompt.length + system.length - MAX_REQUEST_CHARS
     context = context.slice(0, Math.max(0, context.length - overflow))
+    prompt = build()
+  }
+
+  // Large prior drafts are replaceable summaries. Preserve the user's original
+  // and latest decision before preserving generated prose, and flag truncation.
+  if (prompt.length + system.length > MAX_REQUEST_CHARS && draft !== null) {
+    const overflow = prompt.length + system.length - MAX_REQUEST_CHARS
+    const marker = '\n[Earlier draft truncated; retain the original request and user decisions.]'
+    const keep = Math.max(0, draft.length - overflow - marker.length)
+    draft = keep > 0 ? draft.slice(0, keep) + marker : null
     prompt = build()
   }
 
@@ -236,7 +262,9 @@ export async function completeRewrite(
  * Parses one reply against the fixed JSON contract.
  *
  * Surrounding whitespace and a code fence are tolerated: the first `{` to the
- * last `}` is extracted and parsed. `draft` must be a non-empty string (trimmed);
+ * last `}` is extracted and parsed. Two narrowly recognized question-tail
+ * mistakes can be repaired ({@link parseObject}); truncated draft/message
+ * values are never repaired. `draft` must be a non-empty string (trimmed);
  * `message` defaults to `''`; `question` is a non-empty string or `null`. Any
  * other field is ignored. A missing object or unparseable JSON is `invalid-json`;
  * a missing or blank draft is `empty-draft`.
@@ -249,17 +277,10 @@ export function parseReply(
   const end = body.lastIndexOf('}')
   if (start === -1 || end < start) return { ok: false, reason: 'invalid-json' }
 
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(body.slice(start, end + 1))
-  } catch {
-    return { ok: false, reason: 'invalid-json' }
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, reason: 'invalid-json' }
-  }
+  const tail = body.slice(end + 1).trim()
+  const record = parseObject(body.slice(start, end + 1), tail === '' || tail === '```')
+  if (record === null) return { ok: false, reason: 'invalid-json' }
 
-  const record = parsed as Record<string, unknown>
   const draft = typeof record.draft === 'string' ? record.draft.trim() : ''
   if (draft === '') return { ok: false, reason: 'empty-draft' }
 
@@ -268,4 +289,42 @@ export function parseReply(
     typeof record.question === 'string' && record.question.trim() !== '' ? record.question : null
 
   return { ok: true, reply: { draft, message, question } }
+}
+
+/**
+ * Repairs only the two tail mistakes observed in real replies. A missing
+ * quote must belong to the final `question` value, with no literal brace that
+ * could instead be an interior brace at a truncation point. A stray `,"`
+ * may be removed only after all values are already complete. Repairs require
+ * the final brace to end the reply (apart from an optional closing fence).
+ * Without a model stop reason, even this narrow repair cannot prove that an
+ * otherwise complete-looking question was not cut off.
+ */
+function parseObject(json: string, allowRepair: boolean): Record<string, unknown> | null {
+  const direct = parseRecord(json)
+  if (direct !== null) return direct
+  if (!allowRepair) return null
+
+  const head = json.slice(0, -1)
+  if (/"question"\s*:\s*"(?:[^"\\{}\r\n]|\\.)*$/.test(head)) {
+    const record = parseRecord(`${head}"}`)
+    if (record !== null && typeof record.question === 'string') return record
+  }
+  if (/,\s*"\s*$/.test(head)) {
+    const record = parseRecord(`${head.replace(/,\s*"\s*$/, '')}}`)
+    if (record !== null && Object.hasOwn(record, 'question')) return record
+  }
+  return null
+}
+
+/** `JSON.parse` narrowed to a plain object; anything else is null. */
+function parseRecord(json: string): Record<string, unknown> | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  return parsed as Record<string, unknown>
 }

@@ -28,6 +28,7 @@ import type {
 } from 'claude-code'
 import type { Engine, MockClock } from 'claude-code/testing'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import { MAX_REQUEST_CHARS } from '../hooks/contracts'
 
 /** The plugin's own name, as `plugin.json` declares it. */
 const PLUGIN = 'prompt-optimizer'
@@ -167,7 +168,10 @@ interface World {
  * before the first `$` call, as the kit requires; the plugin's own hooks then
  * sit above them.
  */
-function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] } = {}): World {
+function setup($: Engine, on: On, input: {
+  messages?: readonly SessionMessage[]
+  projectEvidence?: boolean
+} = {}): World {
   const clock = mock.clock(on)
 
   const submits: PromptSubmitInput[] = []
@@ -204,8 +208,17 @@ function setup($: Engine, on: On, input: { messages?: readonly SessionMessage[] 
     modelReads += 1
     return modelRefusal === null ? { value: modelRaw } : { deny: modelRefusal }
   })
-  on('fs.stat', () => ({ value: { kind: 'file', size: 9, mtimeMs: 0, isLink: false } }))
-  on('fs.read', () => ({ value: '규칙 텍스트' }))
+  on('fs.stat', (_$, e) => ({ value: {
+    kind: input.projectEvidence && (e.path === '/repo' || e.path === '/repo/sub') ? 'dir' : 'file',
+    size: 90, mtimeMs: 0, isLink: false,
+    ...(input.projectEvidence && e.resolve ? { realPath: e.path } : {}),
+  } }))
+  on('fs.list', (_$, e) => ({ value: input.projectEvidence && e.path === '/repo'
+    ? [{ name: 'node-images.ts', kind: 'file', size: 90, mtimeMs: 0, isLink: false }]
+    : [] }))
+  on('fs.read', (_$, e) => ({ value: input.projectEvidence && e.path === '/repo/node-images.ts'
+    ? 'export const imageProperty = "image"; // node image property resolver'
+    : '규칙 텍스트' }))
   on('env.get', () => ({ value: undefined }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('config.set', (_$, e) => ({ value: e.value }))
@@ -425,6 +438,24 @@ async function assertInv5CommandDelivery($: Engine, on: On): Promise<void> {
 }
 
 describe('integration — session isolation and delivery accuracy', () => {
+  for (const trigger of ['composer', 'command'] as const) {
+    test(`repository evidence reaches the optimizer through ${trigger}`, { options: { uiMode: 'composer' } }, async ($, on) => {
+      const w = setup($, on, { projectEvidence: true })
+      await w.start()
+      const original = '노드별 image와 property diff API를 추가해줘'
+      if (trigger === 'command') await w.run(original)
+      else await w.submit(original)
+      await w.advance(1)
+      await w.waitFor(() => w.completes.length === 1)
+
+      expect(w.completes[0]?.prompt).toContain('node-images.ts')
+      expect(w.completes[0]?.prompt).toContain('imageProperty')
+      expect(w.completes[0]?.prompt).toContain('Partial excerpts only')
+      expect(w.submits).toHaveLength(0)
+      expect(w.forks).toBe(0)
+    })
+  }
+
   // Invariant 1: a plain composer submission is dropped; nothing reaches main.
   test('INV1 · 일반 composer 제출은 drop되고 하위 submit·turn·completion이 없다', { options: { uiMode: 'composer' } }, async ($, on) => {
     const w = setup($, on)
@@ -781,8 +812,8 @@ describe('integration — session isolation and delivery accuracy', () => {
   })
 
   // Invariant 16: the first request carries the original and context, the
-  // system prompt holds the JSON contract, and the whole stays within 16000.
-  test('INV16 · 첫 요청에 원문·context가 실리고 system이 JSON 계약을 지키며 16000 이하다', { options: { uiMode: 'composer' } }, async ($, on) => {
+  // system prompt holds the JSON contract, and the whole stays within its budget.
+  test('INV16 · 첫 요청에 원문·context가 실리고 system이 JSON 계약과 요청 상한을 지킨다', { options: { uiMode: 'composer' } }, async ($, on) => {
     const w = setup($, on, {
       messages: [
         { role: 'user', text: '이전에 물어본 내용', toolUses: [] },
@@ -800,8 +831,8 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(request?.prompt).toContain(ORIGINAL)
     expect(request?.system ?? '').toContain('"draft"')
     expect(request?.system ?? '').toContain('JSON')
-    expect((request?.prompt.length ?? 0) + (request?.system?.length ?? 0)).toBeLessThanOrEqual(16000)
-    expect(request?.model).toBe('haiku')
+    expect((request?.prompt.length ?? 0) + (request?.system?.length ?? 0)).toBeLessThanOrEqual(MAX_REQUEST_CHARS)
+    expect(request?.model).toBe('sonnet')
   })
 
   // Long-term memory capture: the plugin's `classic.SessionStart` and
@@ -1107,7 +1138,7 @@ describe('integration — session isolation and delivery accuracy', () => {
 const BLOCK_TAG = '[대상 모델 편집 지침:'
 
 /** The shared editing guidance that is present even when no model block is added. */
-const COMMON_TAG = '[요청 편집 지침]'
+const COMMON_TAG = '[요구사항 구체화 지침]'
 
 /** The fixed role/JSON contract, always the last section. */
 const CONTRACT_TAG = '[고정 계약]'
@@ -1148,7 +1179,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(request?.system ?? '').not.toContain('sonnet-5-5')
     expect(request?.system ?? '').toContain(COMMON_TAG)
     expect(request?.system ?? '').toContain(CONTRACT_TAG)
-    expect(request?.model).toBe('haiku')
+    expect(request?.model).toBe('sonnet')
     expect(request?.effort).toBe('low')
     expect(w.modelReads).toBe(1)
   })
@@ -1172,7 +1203,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     const request = w.completes[1]
     expect(request?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
     expect(request?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
-    expect(request?.model).toBe('haiku')
+    expect(request?.model).toBe('sonnet')
     expect(request?.effort).toBe('low')
     expect(w.modelReads).toBe(2)
   })
@@ -1188,7 +1219,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     await w.advance(1)
     expect(w.completes).toHaveLength(1)
     expect(w.completes[0]?.system ?? '').toContain(`${BLOCK_TAG} opus-5-5]`)
-    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.model).toBe('sonnet')
     expect(w.completes[0]?.effort).toBe('low')
 
     w.setModelValue(SONNET_55)
@@ -1197,7 +1228,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(w.completes).toHaveLength(2)
     expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
     expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
-    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.model).toBe('sonnet')
     expect(w.completes[1]?.effort).toBe('low')
     expect(w.modelReads).toBe(2)
   })
@@ -1227,7 +1258,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(w.completes[2]?.system ?? '').not.toContain(`${BLOCK_TAG} sonnet-5-5]`)
 
     for (const request of w.completes) {
-      expect(request.model).toBe('haiku')
+      expect(request.model).toBe('sonnet')
       expect(request.effort).toBe('low')
     }
     expect(w.modelReads).toBe(3)
@@ -1248,7 +1279,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(request?.system ?? '').not.toContain(BLOCK_TAG)
     expect(request?.system ?? '').toContain(COMMON_TAG)
     expect(request?.system ?? '').toContain(CONTRACT_TAG)
-    expect(request?.model).toBe('haiku')
+    expect(request?.model).toBe('sonnet')
     expect(request?.effort).toBe('low')
     expect(w.modelReads).toBe(1)
   })
@@ -1265,7 +1296,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
 
     expect(w.completes).toHaveLength(1)
     expect(w.completes[0]?.system ?? '').not.toContain(BLOCK_TAG)
-    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.model).toBe('sonnet')
     expect(w.completes[0]?.effort).toBe('low')
     expect(w.modelReads).toBe(1)
   })
@@ -1282,7 +1313,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
 
     expect(w.completes).toHaveLength(1)
     expect(w.completes[0]?.system ?? '').not.toContain(BLOCK_TAG)
-    expect(w.completes[0]?.model).toBe('haiku')
+    expect(w.completes[0]?.model).toBe('sonnet')
     expect(w.completes[0]?.effort).toBe('low')
     expect(w.modelReads).toBe(0)
   })
@@ -1307,7 +1338,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
 
     expect(w.completes).toHaveLength(2)
     expect(w.completes[1]?.system ?? '').not.toContain(BLOCK_TAG)
-    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.model).toBe('sonnet')
     expect(w.completes[1]?.effort).toBe('low')
     expect(w.modelReads).toBe(1)
   })
@@ -1348,7 +1379,7 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(w.completes).toHaveLength(2)
     expect(w.completes[1]?.system ?? '').toContain(`${BLOCK_TAG} sonnet-5-5]`)
     expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
-    expect(w.completes[1]?.model).toBe('haiku')
+    expect(w.completes[1]?.model).toBe('sonnet')
     expect(w.completes[1]?.effort).toBe('low')
   })
 })
