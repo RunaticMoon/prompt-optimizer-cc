@@ -21,7 +21,7 @@ const CTRL_U: ClientKeyEvent = { key: 'u', ctrl: true }
 
 describe('RAW_MODE_HINT', () => {
   test('is the exact hint line the UI shows while armed', () => {
-    expect(RAW_MODE_HINT).toBe('⏭ 옵티마이저 끔 · ctrl+u 다시 켜기')
+    expect(RAW_MODE_HINT).toBe('최적화 끔 ctrl+u 켜기')
   })
 })
 

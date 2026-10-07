@@ -33,7 +33,7 @@ export type RawEditDecision =
   | { kind: 'pass' }
 
 /** Hint shown at the end of the prompt hint line while the mode is armed. */
-export const RAW_MODE_HINT = '⏭ 옵티마이저 끔 · ctrl+u 다시 켜기'
+export const RAW_MODE_HINT = '최적화 끔 ctrl+u 켜기'
 
 /**
  * Decides what one prompt edit means for the optimizer-off mode.

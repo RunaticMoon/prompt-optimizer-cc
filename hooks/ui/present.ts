@@ -11,9 +11,9 @@ export const COMPOSER_GUIDE =
 // Paint meaning with the host's theme; never add layout rows for decoration.
 export const UI_COLORS = {
   heading: 'claude',
-  original: 'subtle',
+  original: 'text',
   draft: 'suggestion',
-  section: 'remember',
+  section: 'text',
   text: 'text',
   unavailable: 'inactive',
   progress: 'warning',
@@ -22,10 +22,8 @@ export const UI_COLORS = {
 } as const satisfies Record<string, ThemeKey>
 
 // PromptHint.tail is string-only and dimmed by core. Keep its live pills and
-// width clipping, using textual badges instead of replacing the engine tree.
+// width clipping. Short copy keeps the re-enable key visible at 80 columns.
 export const RAW_MODE_BADGE_HINT = RAW_MODE_HINT
-  .replace('옵티마이저 끔', '[옵티마이저 끔]')
-  .replace('ctrl+u', '[ctrl+u]')
 
 export function phaseColor(phase: Workflow['phase']): ThemeKey {
   if (phase === 'failed') return UI_COLORS.error

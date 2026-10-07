@@ -152,6 +152,29 @@ export function hardWrapPreview(value: string, columns: number, maxLines: number
   return hardWrapPreviewWithStatus(value, columns, maxLines).lines
 }
 
+/** Preserve paragraphs and whitespace while counting the band's terminal rows. */
+function bandLines(value: string, columns: number): string[] {
+  return value.replace(/\r\n?/g, '\n').split('\n').flatMap(source => {
+    const lines: string[] = []
+    let line = ''
+    let cells = 0
+    for (const char of source.replace(/\t/g, '    ')) {
+      const width = cellWidth(char)
+      if (cells + width > columns) {
+        if (line) lines.push(line)
+        line = ''
+        cells = 0
+      }
+      line += width > columns ? '…' : char
+      cells += Math.min(width, columns)
+    }
+    lines.push(line)
+    return lines
+  })
+}
+
+const errorSummary = (value: string): string => `오류: ${value.replace(/\s+/g, ' ').trim()}`
+
 /** Escape and the pane close mark both arrive with origin `person`. */
 export async function handlePaneClose(
   controller: OptimizerController,
@@ -199,7 +222,12 @@ export function registerUi(
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const workflow = controller.getState().workflow
     observeWorkflow(workflow)
+    // maxRows is read-only host space; viewport.rows is the whole surface.
+    // Never read scroll.bodyRows: it depends on our previous rendered tree.
+    const bandRows = Math.max(0, Math.min(e.props.maxRows,
+      Math.floor((e.viewport?.rows ?? e.props.maxRows) / 2)))
     const eligible = workflow && !e.props.hasSurvey && !e.props.view.agentId
+      && bandRows > 0
       && (e.surface === 'terminal' || e.surface === 'desktop')
       && !(workflow.ui === 'pane' && !paneClosed && isCompactViewport(e.viewport)
         && panePlacements.get(e.surface) !== 'dock')
@@ -220,6 +248,25 @@ export function registerUi(
       || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')
     const draftColor = workflow.draft ? UI_COLORS.draft : workflow.lastError ? UI_COLORS.error
       : busy ? UI_COLORS.progress : UI_COLORS.unavailable
+    const columns = Math.max(1, e.props.bodyColumns - 2)
+    const originalLines = bandLines(original, columns)
+    const draftLines = bandLines(draftText, columns)
+    const guideRows = workflow.ui === 'composer' ? 1 : 0
+    const overflow = originalLines.length + draftLines.length + 2 + guideRows > bandRows
+    // Reserve the original label, draft title, optional guide, and overflow row.
+    // When space is tight, prioritise the title/error and the recovery hint.
+    const contentRows = Math.max(0, bandRows - 2 - guideRows - (overflow ? 1 : 0))
+    const originalRows = overflow ? Math.min(originalLines.length, Math.floor(contentRows / 3)) : originalLines.length
+    const draftRows = overflow ? contentRows - originalRows : draftLines.length
+    const omittedRows = originalLines.length - originalRows + draftLines.length - draftRows
+    const title = (
+      <Text bold color={UI_COLORS.draft} wrap="truncate-end">
+        ↓ 개선안 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
+        {workflow.lastError && workflow.draft && <Text color={UI_COLORS.error}>{` · ${errorSummary(workflow.lastError)}`}</Text>}
+        <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${getMaxRounds()}회  ${tokens}토큰`}</Text>
+      </Text>
+    )
+    const more = <Text color={UI_COLORS.section} wrap="truncate-end">{`… ${omittedRows}줄 더 · 전문: ${workflow.ui === 'pane' ? '1 입력창' : '/optimize accept'}`}</Text>
     // RenderResultOf has no accepted/denied signal for a tree. Keep the key
     // stable as workflow.id+surface and invalidate only once per draw transition.
     if (!drawnBands.has(key)) {
@@ -228,14 +275,12 @@ export function registerUi(
     }
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text bold color={UI_COLORS.original}>원문</Text>
-        <Text color={UI_COLORS.original} wrap="wrap">{original}</Text>
-        <Text bold color={UI_COLORS.draft} wrap="truncate-end">
-          ↓ 개선안 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
-          <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${getMaxRounds()}회  ${tokens}토큰`}</Text>
-        </Text>
-        <Text color={draftColor} wrap="wrap">{draftText}</Text>
-        {workflow.ui === 'composer' && <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}
+        {bandRows >= 4 + guideRows && <Text bold color={UI_COLORS.original} wrap="truncate-end">원문</Text>}
+        {originalRows > 0 && <Text color={UI_COLORS.original} wrap="wrap">{originalLines.slice(0, originalRows).join('\n')}</Text>}
+        {title}
+        {draftRows > 0 && <Text color={draftColor} wrap="wrap">{draftLines.slice(0, draftRows).join('\n')}</Text>}
+        {workflow.ui === 'composer' && bandRows >= 4 + guideRows && <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}
+        {overflow && bandRows > 1 && more}
       </Box>
     )
   })
@@ -299,12 +344,11 @@ export function registerUi(
       // Derive the budget from the viewport, never the rendered bodyRows:
       // inline panes shrink to their own content height and can feed that back.
       const estimatedRows = estimatedCompactRows(e.viewport!)
-      const previewLines = Math.max(1, estimatedRows - 3)
+      const previewLines = estimatedRows - 3 - (workflow.lastError ? 1 : 0)
       const previewColumns = Math.max(1, e.props.bodyColumns - 2)
       const draftPreview = workflow.draft.trim()
       const preview = draftPreview
-        || (workflow.lastError ? `오류: ${workflow.lastError}` : '')
-        || (busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
+        || (workflow.lastError ? '' : busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
       const { lines: wrappedPreview, truncated: previewTruncated, altered: previewAltered } = hardWrapPreviewWithStatus(preview, previewColumns, previewLines)
       const previewColor = draftPreview ? UI_COLORS.draft : workflow.lastError ? UI_COLORS.error
         : busy ? UI_COLORS.progress : message ? UI_COLORS.text : UI_COLORS.unavailable
@@ -318,6 +362,7 @@ export function registerUi(
         ? workflow.original : `${originalChars.slice(0, 180).join('')}…`
       return (
         <Box flexDirection="column" paddingX={1}>
+          {workflow.lastError && <Text color={UI_COLORS.error} wrap="truncate-end">{errorSummary(workflow.lastError)}</Text>}
           {wrappedPreview.map((line, index) =>
             <Text key={`preview:${index}`} bold color={previewColor} wrap="truncate-end">{line}</Text>)}
           {draftReady
@@ -350,7 +395,8 @@ export function registerUi(
             {originalChars.length > 180 && (busy
               ? <Text color={UI_COLORS.unavailable} dimColor>0: {originalToggleLabel} (사용 불가)</Text>
               : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />)}
-            {workflow.lastError && (previewNeedsFullText || preview !== `오류: ${workflow.lastError}`) &&
+            {workflow.lastError && (bandLines(errorSummary(workflow.lastError), previewColumns).length > 1
+              || errorSummary(workflow.lastError) !== `오류: ${workflow.lastError}`) &&
               <Text wrap="wrap" color={UI_COLORS.error}>{`오류: ${workflow.lastError}`}</Text>}
           </Box>
         </Box>
