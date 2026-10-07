@@ -649,9 +649,59 @@ describe('optimizer UI', () => {
     }
     expect(hardWrapPreview('✓✓✓', 3, 1)).toEqual(['✓✓✓'])
     expect(hardWrapPreview('✅\ufe0f✅\ufe0f', 4, 1)).toEqual(['✅\ufe0f✅\ufe0f'])
-    // Counting each wide base separately is conservative for joined emoji;
-    // the joiner itself must not consume another cell or row.
+    // A joined emoji measures as one wide glyph; the sequence is never split.
     expect(hardWrapPreview('👩\u200d💻', 4, 1)).toEqual(['👩\u200d💻'])
+    expect(hardWrapPreview('👩\u200d💻', 2, 1)).toEqual(['👩\u200d💻'])
+  })
+
+  test('emoji sequences measure per grapheme: VS16, ZWJ joins and flags', () => {
+    // U+1F7F0 has emoji presentation even though it postdates older range tables.
+    expect(hardWrapPreview('🟰'.repeat(3), 4, 3)).toEqual(['🟰🟰', '🟰'])
+    // VS16 requests the wide emoji presentation; the bare sign stays narrow.
+    expect(hardWrapPreview('⚠️'.repeat(3), 4, 3)).toEqual(['⚠️⚠️', '⚠️'])
+    expect(hardWrapPreview('⚠'.repeat(4), 4, 3)).toEqual(['⚠⚠⚠⚠'])
+    // 🏷 defaults to text presentation: narrow alone, wide with VS16.
+    expect(hardWrapPreview('🏷🏷🏷', 3, 3)).toEqual(['🏷🏷🏷'])
+    expect(hardWrapPreview('🏷️'.repeat(3), 4, 3)).toEqual(['🏷️🏷️', '🏷️'])
+    // A joined family and a flag pair are one two-cell glyph, never split.
+    expect(hardWrapPreview('👨‍👩‍👧', 2, 3)).toEqual(['👨‍👩‍👧'])
+    expect(hardWrapPreview('🇰🇷'.repeat(3), 4, 3)).toEqual(['🇰🇷🇰🇷', '🇰🇷'])
+    expect(hardWrapPreview('a👨‍👩‍👧b', 4, 3)).toEqual(['a👨‍👩‍👧b'])
+    expect(hardWrapPreview('a👨‍👩‍👧b', 2, 3)).toEqual(['a', '👨‍👩‍👧', 'b'])
+  })
+
+  test('VS16 emoji fill the band at two cells and keep the overflow count', async ($, on) => {
+    const { controller } = fakeController(state({ ...workflow(), draft: '⚠️'.repeat(1200) }))
+    const ui = await captureUi($, on, controller)
+    await ui.render(PANE) // Establish dock placement for the compact-height case.
+    for (const [isFullscreen, bodyColumns, maxRows, draftRows, omitted] of [
+      [false, 115, 40, 16, 6], [true, 68, 15, 11, 26], [true, 74, 10, 6, 28],
+    ] as const) {
+      const tree = await ui.render({ ...BAND, viewport: { columns: 120, rows: isFullscreen && maxRows === 10 ? 20 : 40, isFullscreen },
+        props: { ...BAND.props, bodyColumns, maxRows } }) as UiNode
+      const rows = tree.children!.filter(child => child && typeof child === 'object').flatMap(child => contentOf(child).split('\n'))
+      expect(rows).toHaveLength(Math.min(maxRows, 20))
+      expect(rows[rows.length - 1]).toBe(`… ${omitted}줄 더 · 전문: 1 입력창`)
+      const draft = nodesOf(tree).find(node => node.type === 'Text' && contentOf(node).startsWith('⚠'))!
+      const lines = contentOf(draft).split('\n')
+      expect(lines).toHaveLength(draftRows)
+      // Each row holds whole sequences only and stays within two-cell math.
+      expect(lines.every(line => /^(?:⚠️)*$/.test(line)
+        && (line.match(/⚠️/g)?.length ?? 0) * 2 <= bodyColumns - 2)).toBe(true)
+    }
+  })
+
+  test('compact preview wraps a joined emoji sequence whole at two cells', async ($, on) => {
+    const current = state({ ...workflow(), draft: '👨‍👩‍👧'.repeat(40) })
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const compact = { ...PANE, viewport: { columns: 80, rows: 24 }, props: {
+      ...PANE.props, placement: 'inline' as const, bodyColumns: 10,
+    } }
+    const tree = await ui.render(compact) as UiNode
+    // Three preview rows at a 24-row screen; eight columns hold four glyphs.
+    const lines = tree.children!.slice(0, 3).map(contentOf)
+    expect(lines).toEqual(['👨‍👩‍👧'.repeat(4), '👨‍👩‍👧'.repeat(4), `${'👨‍👩‍👧'.repeat(3)}…`])
   })
 
   test('compact pane orders preview, accept, Input, send and raw before scrollable details', async ($, on) => {

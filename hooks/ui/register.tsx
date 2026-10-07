@@ -77,28 +77,30 @@ function latestOptimizerMessage(workflow: Workflow): string {
   return [...workflow.dialogue].reverse().find((entry) => entry.role === 'optimizer')?.text ?? ''
 }
 
-// Wide emoji ranges (Emoji_Presentation / East Asian Width W). Keep text
-// symbols such as ✓ U+2713 narrow rather than widening the entire symbol block.
-const WIDE_EMOJI: readonly (readonly [number, number])[] = [
-  [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3],
-  [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f],
-  [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be],
-  [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea],
-  [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd],
-  [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c],
-  [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
-  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50],
-  [0x2b55, 0x2b55], [0x1f004, 0x1f004], [0x1f0cf, 0x1f0cf], [0x1f18e, 0x1f18e],
-  [0x1f191, 0x1f19a], [0x1f200, 0x1f2ff], [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff],
-  [0x1f7e0, 0x1f7eb], [0x1f90c, 0x1f9ff], [0x1fa70, 0x1faff],
-]
+// Width is measured per grapheme cluster so an emoji sequence — a VS16
+// presentation request, a ZWJ join or a flag pair — wraps as one glyph.
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u
+const EXTENDED_PICTOGRAPHIC = /\p{Extended_Pictographic}/u
 
-/** Terminal cell width for the wide characters used by the preview. */
-function cellWidth(char: string): number {
-  const code = char.codePointAt(0)!
-  if (code >= 0x300 && code <= 0x36f || code === 0x200d
+/** Grapheme clusters of `text`; each one wraps or ellipsizes as a single glyph. */
+function graphemes(text: string): string[] {
+  return Array.from(GRAPHEME_SEGMENTER.segment(text), part => part.segment)
+}
+
+/** Terminal cell width for one grapheme cluster. */
+function cellWidth(grapheme: string): number {
+  const code = grapheme.codePointAt(0)
+  if (code === undefined
+    || code >= 0x300 && code <= 0x36f || code === 0x200d
     || code >= 0xfe00 && code <= 0xfe0f) return 0 // combining marks, ZWJ, variation selectors
-  if (WIDE_EMOJI.some(([start, end]) => code >= start && code <= end)) return 2
+  const first = String.fromCodePoint(code)
+  // Emoji presentation occupies two cells: an explicit VS16 request, an
+  // emoji-presentation code point, a joined pictographic sequence or a flag.
+  if (grapheme.includes('\ufe0f')
+    || EMOJI_PRESENTATION.test(first)
+    || grapheme.includes('\u200d') && EXTENDED_PICTOGRAPHIC.test(first)
+    || code >= 0x1f1e6 && code <= 0x1f1ff) return 2
   return code >= 0x1100 && (
     code <= 0x115f || code >= 0x2329 && code <= 0x232a
     || code >= 0x2e80 && code <= 0xa4cf
@@ -113,10 +115,10 @@ function cellWidth(char: string): number {
 
 /** Add an overflow mark without introducing another terminal row. */
 function ellipsizeLine(line: string, columns: number): string {
-  const chars = Array.from(line)
-  let cells = chars.reduce((sum, char) => sum + cellWidth(char), 0)
-  while (cells + 1 > columns) cells -= cellWidth(chars.pop()!)
-  return `${chars.join('').trimEnd()}…`
+  const parts = graphemes(line)
+  let cells = parts.reduce((sum, part) => sum + cellWidth(part), 0)
+  while (cells + 1 > columns) cells -= cellWidth(parts.pop()!)
+  return `${parts.join('').trimEnd()}…`
 }
 
 /** Hard-wrap by cells; report overflow, replacement, and whitespace changes. */
@@ -134,8 +136,8 @@ export function hardWrapPreviewWithStatus(value: string, columns: number, maxLin
     if (!sourceLine) continue
     let line = ''
     let used = 0
-    for (const char of sourceLine) {
-      const width = cellWidth(char)
+    for (const grapheme of graphemes(sourceLine)) {
+      const width = cellWidth(grapheme)
       if (used + width > columns) {
         if (!line) { // Replace an unfit wide glyph; continue with the next.
           lines.push('…')
@@ -154,7 +156,7 @@ export function hardWrapPreviewWithStatus(value: string, columns: number, maxLin
           continue
         }
       }
-      line += char
+      line += grapheme
       used += width
     }
     if (line) {
@@ -181,14 +183,14 @@ function bandLines(value: string, columns: number): string[] {
     const lines: string[] = []
     let line = ''
     let cells = 0
-    for (const char of source.replace(/\t/g, '    ')) {
-      const width = cellWidth(char)
+    for (const grapheme of graphemes(source.replace(/\t/g, '    '))) {
+      const width = cellWidth(grapheme)
       if (cells + width > columns) {
         if (line) lines.push(line)
         line = ''
         cells = 0
       }
-      line += width > columns ? '…' : char
+      line += width > columns ? '…' : grapheme
       cells += Math.min(width, columns)
     }
     lines.push(line)
