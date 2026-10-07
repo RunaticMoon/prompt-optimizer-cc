@@ -5,8 +5,7 @@ import type { EngineInterface, On, RenderViewport } from 'claude-code'
 import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
-import { RAW_MODE_HINT } from '../raw-mode'
-import { COMPOSER_GUIDE, phaseLabel } from './present'
+import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, UI_COLORS, phaseColor, phaseLabel } from './present'
 import { PANE_ROWS } from './ui-ports'
 
 const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
@@ -78,10 +77,36 @@ function latestOptimizerMessage(workflow: Workflow): string {
   return [...workflow.dialogue].reverse().find((entry) => entry.role === 'optimizer')?.text ?? ''
 }
 
-/** Terminal cell width for the wide characters used by the preview. */
-function cellWidth(char: string): number {
-  const code = char.codePointAt(0)!
-  if (code >= 0x300 && code <= 0x36f) return 0 // combining marks
+// Width is measured per grapheme cluster so an emoji sequence — a VS16
+// presentation request, a ZWJ join or a flag pair — wraps as one glyph.
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const EMOJI = /\p{Emoji}/u
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u
+const EXTENDED_PICTOGRAPHIC = /\p{Extended_Pictographic}/u
+const REGIONAL_INDICATORS = /[\u{1f1e6}-\u{1f1ff}]/gu
+
+/** Grapheme clusters of `text`; each one wraps or ellipsizes as a single glyph. */
+function graphemes(text: string): string[] {
+  return Array.from(GRAPHEME_SEGMENTER.segment(text), part => part.segment)
+}
+
+/** Terminal cell width for one grapheme cluster. */
+function cellWidth(grapheme: string): number {
+  const code = grapheme.codePointAt(0)
+  if (code === undefined
+    || code >= 0x300 && code <= 0x36f || code === 0x200d
+    || code >= 0xfe00 && code <= 0xfe0f) return 0 // combining marks, ZWJ, variation selectors
+  // A regional indicator is wide only as a flag pair; a lone one is narrow,
+  // so this branch runs before the emoji-presentation check it also matches.
+  if (code >= 0x1f1e6 && code <= 0x1f1ff) {
+    return (grapheme.match(REGIONAL_INDICATORS) ?? []).length === 2 ? 2 : 1
+  }
+  const first = String.fromCodePoint(code)
+  // Emoji presentation occupies two cells: a VS16 request on an emoji base,
+  // an emoji-presentation code point, or a joined pictographic sequence.
+  if (grapheme.includes('\ufe0f') && EMOJI.test(first)
+    || EMOJI_PRESENTATION.test(first)
+    || grapheme.includes('\u200d') && EXTENDED_PICTOGRAPHIC.test(first)) return 2
   return code >= 0x1100 && (
     code <= 0x115f || code >= 0x2329 && code <= 0x232a
     || code >= 0x2e80 && code <= 0xa4cf
@@ -90,9 +115,16 @@ function cellWidth(char: string): number {
     || code >= 0xfe10 && code <= 0xfe6f
     || code >= 0xff01 && code <= 0xff60
     || code >= 0xffe0 && code <= 0xffe6
-    || code >= 0x1f300 && code <= 0x1faff
     || code >= 0x20000 && code <= 0x3fffd
   ) ? 2 : 1
+}
+
+/** Add an overflow mark without introducing another terminal row. */
+function ellipsizeLine(line: string, columns: number): string {
+  const parts = graphemes(line)
+  let cells = parts.reduce((sum, part) => sum + cellWidth(part), 0)
+  while (cells + 1 > columns) cells -= cellWidth(parts.pop()!)
+  return `${parts.join('').trimEnd()}…`
 }
 
 /** Hard-wrap by cells; report overflow, replacement, and whitespace changes. */
@@ -110,8 +142,8 @@ export function hardWrapPreviewWithStatus(value: string, columns: number, maxLin
     if (!sourceLine) continue
     let line = ''
     let used = 0
-    for (const char of sourceLine) {
-      const width = cellWidth(char)
+    for (const grapheme of graphemes(sourceLine)) {
+      const width = cellWidth(grapheme)
       if (used + width > columns) {
         if (!line) { // Replace an unfit wide glyph; continue with the next.
           lines.push('…')
@@ -130,7 +162,7 @@ export function hardWrapPreviewWithStatus(value: string, columns: number, maxLin
           continue
         }
       }
-      line += char
+      line += grapheme
       used += width
     }
     if (line) {
@@ -140,9 +172,7 @@ export function hardWrapPreviewWithStatus(value: string, columns: number, maxLin
   }
   if (lines.length > maxLines) {
     const visible = lines.slice(0, maxLines)
-    const last = Array.from(visible[maxLines - 1] ?? '')
-    while (last.reduce((sum, char) => sum + cellWidth(char), 0) + 1 > columns) last.pop()
-    visible[maxLines - 1] = `${last.join('').trimEnd()}…`
+    visible[maxLines - 1] = ellipsizeLine(visible[maxLines - 1] ?? '', columns)
     return { lines: visible, truncated: true, altered }
   }
   return { lines, truncated, altered }
@@ -152,6 +182,29 @@ export function hardWrapPreviewWithStatus(value: string, columns: number, maxLin
 export function hardWrapPreview(value: string, columns: number, maxLines: number): string[] {
   return hardWrapPreviewWithStatus(value, columns, maxLines).lines
 }
+
+/** Preserve paragraphs and whitespace while counting the band's terminal rows. */
+function bandLines(value: string, columns: number): string[] {
+  return value.replace(/\r\n?/g, '\n').split('\n').flatMap(source => {
+    const lines: string[] = []
+    let line = ''
+    let cells = 0
+    for (const grapheme of graphemes(source.replace(/\t/g, '    '))) {
+      const width = cellWidth(grapheme)
+      if (cells + width > columns) {
+        if (line) lines.push(line)
+        line = ''
+        cells = 0
+      }
+      line += width > columns ? '…' : grapheme
+      cells += Math.min(width, columns)
+    }
+    lines.push(line)
+    return lines
+  })
+}
+
+const errorSummary = (value: string): string => `오류: ${value.replace(/\s+/g, ' ').trim()}`
 
 /** Escape and the pane close mark both arrive with origin `person`. */
 export async function handlePaneClose(
@@ -188,19 +241,24 @@ export function registerUi(
   }
 
   // The optimizer-off mode shows its hint at the end of the engine's own hint
-  // line: only the surfaces that draw `tail` are touched, everything else
-  // passes unchanged. The line repaints only when the mode flips (`register.ts`
-  // invalidates then).
+  // line. Core owns the tail's dim styling and width clipping; desktop may
+  // leave it undrawn. The line repaints only when the mode flips
+  // (`register.ts` invalidates then).
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const s = controller.getState()
     if (s.rawMode === null || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
-    return next({ ...e, props: { ...e.props, tail: RAW_MODE_HINT } })
+    return next({ ...e, props: { ...e.props, tail: RAW_MODE_BADGE_HINT } })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const workflow = controller.getState().workflow
     observeWorkflow(workflow)
+    // maxRows is read-only host space; viewport.rows is the whole surface.
+    // Never read scroll.bodyRows: it depends on our previous rendered tree.
+    const bandRows = Math.max(0, Math.min(e.props.maxRows,
+      Math.floor((e.viewport?.rows ?? e.props.maxRows) / 2)))
     const eligible = workflow && !e.props.hasSurvey && !e.props.view.agentId
+      && bandRows > 0
       && (e.surface === 'terminal' || e.surface === 'desktop')
       && !(workflow.ui === 'pane' && !paneClosed && isCompactViewport(e.viewport)
         && panePlacements.get(e.surface) !== 'dock')
@@ -216,6 +274,38 @@ export function registerUi(
       ? workflow.original
       : `${originalChars.slice(0, 180).join('')}…`
     const busy = isBusy(workflow.phase)
+    const tokens = Object.values(workflow.usage).reduce((sum, count) => sum + count, 0)
+    const draftText = workflow.draft || (workflow.lastError ? `오류: ${workflow.lastError}` : '')
+      || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')
+    const draftColor = workflow.draft ? UI_COLORS.draft : workflow.lastError ? UI_COLORS.error
+      : busy ? UI_COLORS.progress : UI_COLORS.unavailable
+    const columns = Math.max(1, e.props.bodyColumns - 2)
+    const originalLines = bandLines(original, columns)
+    const draftLines = bandLines(draftText, columns)
+    const guideRows = workflow.ui === 'composer' ? 1 : 0
+    const overflow = originalLines.length + draftLines.length + 2 + guideRows > bandRows
+    // Reserve the original label, draft title, optional guide, and overflow row.
+    // When space is tight, prioritise the title/error and the recovery hint.
+    const contentRows = Math.max(0, bandRows - 2 - guideRows - (overflow ? 1 : 0))
+    // The dock hides its original section after the band draws, so expansion
+    // must give the original first claim on the same fixed row budget.
+    const originalRows = overflow
+      ? Math.min(originalLines.length, showOriginal ? contentRows : Math.floor(contentRows / 3))
+      : originalLines.length
+    const draftRows = overflow ? Math.min(draftLines.length, contentRows - originalRows) : draftLines.length
+    const visibleOriginal = originalLines.slice(0, originalRows)
+    if (originalRows > 0 && originalRows < originalLines.length) {
+      visibleOriginal[originalRows - 1] = ellipsizeLine(visibleOriginal[originalRows - 1]!, columns)
+    }
+    const omittedRows = originalLines.length - originalRows + draftLines.length - draftRows
+    const title = (
+      <Text bold color={UI_COLORS.draft} wrap="truncate-end">
+        ↓ 개선안 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
+        {workflow.lastError && workflow.draft && <Text color={UI_COLORS.error}>{` · ${errorSummary(workflow.lastError)}`}</Text>}
+        <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${getMaxRounds()}회  ${tokens}토큰`}</Text>
+      </Text>
+    )
+    const more = <Text color={UI_COLORS.section} wrap="truncate-end">{`… ${omittedRows}줄 더 · 전문: ${workflow.ui === 'pane' ? '1 입력창' : '/optimize accept'}`}</Text>
     // RenderResultOf has no accepted/denied signal for a tree. Keep the key
     // stable as workflow.id+surface and invalidate only once per draw transition.
     if (!drawnBands.has(key)) {
@@ -224,11 +314,12 @@ export function registerUi(
     }
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text bold>원문</Text>
-        <Text wrap="wrap">{original}</Text>
-        <Text bold>↓ 개선안</Text>
-        <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
-        {workflow.ui === 'composer' && <Text dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}
+        {bandRows >= 4 + guideRows && <Text bold color={UI_COLORS.original} wrap="truncate-end">원문</Text>}
+        {originalRows > 0 && <Text color={UI_COLORS.original} wrap="wrap">{visibleOriginal.join('\n')}</Text>}
+        {title}
+        {draftRows > 0 && <Text color={draftColor} wrap="wrap">{draftLines.slice(0, draftRows).join('\n')}</Text>}
+        {workflow.ui === 'composer' && bandRows >= 4 + guideRows && <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}
+        {overflow && bandRows > 1 && more}
       </Box>
     )
   })
@@ -246,8 +337,8 @@ export function registerUi(
       $.ui.invalidate('ui.render')
     }
     if (workflow?.ui === 'pane') paneClosed = false
-    if (!workflow) return <Text>진행 중인 개선 작업이 없습니다</Text>
-    if (workflow.ui === 'composer') return <Text>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
+    if (!workflow) return <Text color={UI_COLORS.unavailable}>진행 중인 개선 작업이 없습니다</Text>
+    if (workflow.ui === 'composer') return <Text color={UI_COLORS.section}>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
 
     const maxRounds = getMaxRounds()
     const busy = isBusy(workflow.phase)
@@ -258,25 +349,32 @@ export function registerUi(
     const originalToggleLabel = showOriginal ? '원문 접기' : '원문 전체 보기'
     const message = latestOptimizerMessage(workflow)
     const bandDrawn = drawnBands.has(bandKey(workflow.id, e.surface))
+    const draftColor = workflow.draft ? UI_COLORS.draft : busy ? UI_COLORS.progress : UI_COLORS.unavailable
+    const header = (
+      <Text bold color={UI_COLORS.heading} wrap="wrap">
+        프롬프트 옵티마이저 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
+        <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+      </Text>
+    )
 
     // A surface without Button needs command text; mobile can still use its Button table.
     if (typeof Button !== 'function') {
       return (
         <Box flexDirection="column" paddingX={1}>
-          <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
-          <Text bold>원문</Text>
-          <Text wrap="wrap">{workflow.original}</Text>
-          <Text bold>현재 개선안</Text>
-          <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+          {header}
+          <Text bold color={UI_COLORS.original}>원문</Text>
+          <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
+          <Text bold color={UI_COLORS.draft}>현재 개선안</Text>
+          <Text color={draftColor} wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
           {message && (
             <Box marginTop={1} flexDirection="column">
-              <Text bold>옵티마이저 메시지</Text>
-              <Text wrap="wrap">{message}</Text>
+              <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+              <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
             </Box>
           )}
-          {workflow.lastError && <Text wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
-          {busy && <Text>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
-          <Text wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
+          {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
+          {busy && <Text color={UI_COLORS.progress}>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
+          <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
         </Box>
       )
     }
@@ -285,57 +383,60 @@ export function registerUi(
       // Derive the budget from the viewport, never the rendered bodyRows:
       // inline panes shrink to their own content height and can feed that back.
       const estimatedRows = estimatedCompactRows(e.viewport!)
-      const previewLines = Math.max(1, estimatedRows - 3)
+      const previewLines = estimatedRows - 3 - (workflow.lastError ? 1 : 0)
       const previewColumns = Math.max(1, e.props.bodyColumns - 2)
       const draftPreview = workflow.draft.trim()
       const preview = draftPreview
-        || (workflow.lastError ? `오류: ${workflow.lastError}` : '')
-        || (busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
+        || (workflow.lastError ? '' : busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
       const { lines: wrappedPreview, truncated: previewTruncated, altered: previewAltered } = hardWrapPreviewWithStatus(preview, previewColumns, previewLines)
+      const previewColor = draftPreview ? UI_COLORS.draft : workflow.lastError ? UI_COLORS.error
+        : busy ? UI_COLORS.progress : message ? UI_COLORS.text : UI_COLORS.unavailable
       const previewNeedsFullText = previewTruncated || previewAltered || Boolean(draftPreview && workflow.draft !== draftPreview)
       const compactInstruction = retryReady
         ? typeof Input === 'function'
           ? <Input key={KEYS.instruction} label="보완" placeholder="보완 내용" onSubmit={() => undefined} />
-          : <Text wrap="truncate-end">보완: /optimize retry &lt;내용&gt;</Text>
-        : <Text dimColor wrap="truncate-end">보완 (사용 불가)</Text>
+          : <Text color={UI_COLORS.section} wrap="truncate-end">보완: /optimize retry &lt;내용&gt;</Text>
+        : <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">보완 (사용 불가)</Text>
       const originalPreview = showOriginal || originalChars.length <= 180
         ? workflow.original : `${originalChars.slice(0, 180).join('')}…`
       return (
         <Box flexDirection="column" paddingX={1}>
+          {workflow.lastError && <Text color={UI_COLORS.error} wrap="truncate-end">{errorSummary(workflow.lastError)}</Text>}
           {wrappedPreview.map((line, index) =>
-            <Text key={`preview:${index}`} wrap="truncate-end">{line}</Text>)}
+            <Text key={`preview:${index}`} bold color={previewColor} wrap="truncate-end">{line}</Text>)}
           {draftReady
-            ? <Button key={KEYS.accept} hotkey="1" label="넣기" plain autoFocus onPress={() => undefined} />
-            : <Text dimColor>1: 넣기 (사용 불가)</Text>}
+            ? <Button key={KEYS.accept} hotkey="1" label="1: 넣기" variant="primary" autoFocus onPress={() => undefined} />
+            : <Text color={UI_COLORS.unavailable} dimColor>1: 넣기 (사용 불가)</Text>}
           {compactInstruction}
           <Box flexDirection="row" flexWrap="wrap">
             {draftReady
-              ? <Button key={KEYS.send} hotkey="2" label="전송" plain onPress={() => undefined} />
-              : <Text dimColor>2: 전송 (사용 불가)</Text>}
-            <Text> · </Text>
+              ? <Button key={KEYS.send} hotkey="2" label="2: 전송" onPress={() => undefined} />
+              : <Text color={UI_COLORS.unavailable} dimColor>2: 전송 (사용 불가)</Text>}
+            <Text color={UI_COLORS.original}> · </Text>
             {!busy
-              ? <Button key={KEYS.raw} hotkey="3" label="원문" plain onPress={() => undefined} />
-              : <Text dimColor>3: 원문 (사용 불가)</Text>}
+              ? <Button key={KEYS.raw} hotkey="3" label="3: 원문" onPress={() => undefined} />
+              : <Text color={UI_COLORS.unavailable} dimColor>3: 원문 (사용 불가)</Text>}
           </Box>
           {/* Keep details below the first view: their height prevents an inline
               pane from shrinking to the compact controls and preserves context. */}
           <Box marginTop={1} flexDirection="column">
-            <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+            {header}
             {draftPreview && previewNeedsFullText && <Box flexDirection="column">
-              <Text bold>개선안 전문</Text>
-              <Text wrap="wrap">{workflow.draft}</Text>
+              <Text bold color={UI_COLORS.draft}>개선안 전문</Text>
+              <Text color={UI_COLORS.draft} wrap="wrap">{workflow.draft}</Text>
             </Box>}
             {message && (previewNeedsFullText || preview !== message) && <Box flexDirection="column">
-              <Text bold>옵티마이저 메시지</Text>
-              <Text wrap="wrap">{message}</Text>
+              <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+              <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
             </Box>}
-            <Text bold>원문</Text>
-            <Text wrap="wrap">{originalPreview}</Text>
+            <Text bold color={UI_COLORS.original}>원문</Text>
+            <Text color={UI_COLORS.original} wrap="wrap">{originalPreview}</Text>
             {originalChars.length > 180 && (busy
-              ? <Text dimColor>0: {originalToggleLabel} (사용 불가)</Text>
-              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />)}
-            {workflow.lastError && (previewNeedsFullText || preview !== `오류: ${workflow.lastError}`) &&
-              <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
+              ? <Text color={UI_COLORS.unavailable} dimColor>0: {originalToggleLabel} (사용 불가)</Text>
+              : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />)}
+            {workflow.lastError && (bandLines(errorSummary(workflow.lastError), previewColumns).length > 1
+              || errorSummary(workflow.lastError) !== `오류: ${workflow.lastError}`) &&
+              <Text wrap="wrap" color={UI_COLORS.error}>{`오류: ${workflow.lastError}`}</Text>}
           </Box>
         </Box>
       )
@@ -343,15 +444,15 @@ export function registerUi(
 
     const acceptAction = draftReady
       ? <Button key={KEYS.accept} hotkey="1" label="1: 입력창에 넣기 (수정 후 전송)" variant="primary" autoFocus onPress={() => undefined} />
-      : <Text dimColor>[1: 입력창에 넣기 · 사용 불가]</Text>
+      : <Text color={UI_COLORS.unavailable} dimColor>[1: 입력창에 넣기 · 사용 불가]</Text>
     const sendActions = (
       <Box marginTop={1} flexDirection="row" flexWrap="wrap" gap={1}>
         {draftReady
           ? <Button key={KEYS.send} hotkey="2" label="2: 개선안 바로 전송" onPress={() => undefined} />
-          : <Text dimColor>[2: 개선안 바로 전송 · 사용 불가]</Text>}
+          : <Text color={UI_COLORS.unavailable} dimColor>[2: 개선안 바로 전송 · 사용 불가]</Text>}
         {!busy
           ? <Button key={KEYS.raw} hotkey="3" label="3: 원문 그대로 전송" onPress={() => undefined} />
-          : <Text dimColor>[3: 원문 그대로 전송 · 사용 불가]</Text>}
+          : <Text color={UI_COLORS.unavailable} dimColor>[3: 원문 그대로 전송 · 사용 불가]</Text>}
       </Box>
     )
     // Arrows move focus on some hosts but scroll the pane body on others, so the
@@ -377,81 +478,81 @@ export function registerUi(
               draftReady ? '1/2/3 선택' : '3 선택',
               'Esc 닫기',
             ].join(' · ')
-    const keyHint = <Text dimColor wrap="wrap">{keyHintText}</Text>
+    const keyHint = <Text color={busy ? UI_COLORS.progress : UI_COLORS.section} wrap="wrap">{keyHintText}</Text>
     const instruction = retryReady
       ? typeof Input === 'function'
         ? <Input key={KEYS.instruction} label="보완 내용" placeholder="수정하거나 확인할 내용을 입력하세요" submitLabel="Enter로 다시 다듬기" onSubmit={() => undefined} />
-        : <Text wrap="wrap">보완은 /optimize retry &lt;보완 내용&gt;</Text>
-      : <Text dimColor>지금은 보완 요청을 입력할 수 없습니다.</Text>
+        : <Text color={UI_COLORS.section} wrap="wrap">보완은 /optimize retry &lt;보완 내용&gt;</Text>
+      : <Text color={UI_COLORS.unavailable} dimColor>지금은 보완 요청을 입력할 수 없습니다.</Text>
 
     if ((e.viewport?.columns ?? e.props.bodyColumns) <= 90) {
       return (
         <Box flexDirection="column" paddingX={1}>
-          <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+          {header}
           {keyHint}
           <Box marginTop={1}>{acceptAction}</Box>
           <Box marginTop={1} flexDirection="column">
-            <Text bold>보완 요청</Text>
+            <Text bold color={UI_COLORS.section}>보완 요청</Text>
             {instruction}
           </Box>
           {sendActions}
           {!bandDrawn && <Box marginTop={1} flexDirection="column">
-            <Text bold>원문</Text>
-            <Text wrap="wrap">{workflow.original}</Text>
-            <Text bold>현재 개선안</Text>
-            <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+            <Text bold color={UI_COLORS.original}>원문</Text>
+            <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
+            <Text bold color={UI_COLORS.draft}>현재 개선안</Text>
+            <Text color={draftColor} wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
           </Box>}
           {message && (
             <Box marginTop={1} flexDirection="column">
-              <Text bold>옵티마이저 메시지</Text>
-              <Text wrap="wrap">{message}</Text>
+              <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+              <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
             </Box>
           )}
           {bandDrawn && originalChars.length > 180 && <Box marginTop={1}>
             {busy
-              ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
-              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />}
+              ? <Text color={UI_COLORS.unavailable} dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+              : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />}
           </Box>}
-          {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
-          {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
+          {workflow.lastError && <Text wrap="wrap" color={UI_COLORS.error}>{`오류: ${workflow.lastError}`}</Text>}
+          {busy && <Text color={UI_COLORS.progress}>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
         </Box>
       )
     }
 
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+        {header}
         {keyHint}
         <Box marginTop={1}>{acceptAction}</Box>
         <Box marginTop={1} flexDirection="column">
-          <Text bold>보완 요청</Text>
+          <Text bold color={UI_COLORS.section}>보완 요청</Text>
           {instruction}
         </Box>
         {sendActions}
         {!bandDrawn && <Box marginTop={1} flexDirection="column">
-          <Text bold>원문</Text>
-          <Text wrap="wrap">{workflow.original}</Text>
-          <Text bold>현재 개선안</Text>
-          <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+          <Text bold color={UI_COLORS.original}>원문</Text>
+          <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
+          <Text bold color={UI_COLORS.draft}>현재 개선안</Text>
+          <Text color={draftColor} wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
         </Box>}
         {message && (
           <Box marginTop={1} flexDirection="column">
-            <Text bold>옵티마이저 메시지</Text>
-            <Text wrap="wrap">{message}</Text>
+            <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+            <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
           </Box>
         )}
         {bandDrawn && originalChars.length > 180 && <Box marginTop={1}>
           {busy
-            ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
-            : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />}
+            ? <Text color={UI_COLORS.unavailable} dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+            : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />}
         </Box>}
         {workflow.lastError && (
           <Box marginTop={1} flexDirection="column">
-            <Text bold color="error">오류</Text>
-            <Text wrap="wrap">{workflow.lastError}</Text>
+            <Text bold color={UI_COLORS.error}>오류</Text>
+            <Text color={UI_COLORS.error} wrap="wrap">{workflow.lastError}</Text>
           </Box>
         )}
-        {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
+        {busy && <Text color={UI_COLORS.progress}>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
       </Box>
     )
   })

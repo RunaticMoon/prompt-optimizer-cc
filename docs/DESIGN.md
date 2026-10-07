@@ -6,6 +6,8 @@
 
 > 설계 에이전트(📐 A) 산출물 원문. 실험 파일은 /tmp/popt-f94f-mod-probe, /tmp/popt-f94f-runtime (저장소 외부).
 
+> 참고(2026-10-07): 2.1.290의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·classic `SessionStart`/`UserPromptSubmit`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니므로, 실패하면 그 훅만 건너뛰고 나머지 훅과 코어가 그대로 진행(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다. 2.1.292는 `$.model.complete`의 `prompt`/`system`이 텍스트 블록 배열(`ModelTextBlock`, `cache: true`)도 받는 프롬프트 캐시를 추가했으나, 이 플러그인은 아직 string만 쓴다.
+
 📐[POPT-F94F] A 설계 완료. **제출을 먼저 `drop`하고, 플러그인 자체 상태에서 개선 대화를 진행한 뒤 입력창에 복원하는 구조**를 권장합니다. 제품 저장소는 변경하지 않았습니다.
 
 가장 중요한 발견은 **제공된 레퍼런스가 2.1.277이고, 설치된 2.1.285의 API 계약이 달라졌다는 점**입니다. 구현은 설치본이 생성한 타입을 기준으로 해야 합니다.
@@ -136,7 +138,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 - release는 `ctrl+u`(커서 위치 무관)다. 그 편집을 소비해 글자를 지우지 않고 모드만 끈다. 꺼진 뒤의 `ctrl+u`는 원래대로 줄 앞부분을 지운다.
 - Backspace@0·Esc·기록 이동(↑↓)·제출 후 비워짐 등 `prompt.edit`가 오지 않는 경로로 입력창이 바뀌면, 다음 편집에서 `e.text`(편집 전 상자)가 기억한 초안과 다른 것으로 감지해 모드를 푼다. 그 감지 전에 Enter하면 모드가 켜진 채 전송될 수 있다.
 - 제출 규칙 순서: eligibility에서 **empty 다음, bypass 앞**에 `rawMode` 규칙을 둔다. 모드가 켜져 있으면 텍스트 비교 없이 `{ kind: 'raw', text }`로 `next`에 그대로 통과시키고, 제출 뒤 모드는 꺼진다. 기존의 제출 시 `rawPrefix` 제거·빈 마커 드롭 규칙은 삭제한다.
-- 표시: 모드가 켜져 있는 동안 `ui.render`의 `PromptHint` `tail`에 `⏭ 옵티마이저 끔 · ctrl+u 다시 켜기`를 넣고, 상태가 바뀔 때마다 `$.ui.invalidate('ui.render')`를 호출한다.
+- 표시: 모드가 켜져 있는 동안 `ui.render`의 `PromptHint` `tail`에 `최적화 끔 ctrl+u 켜기`를 넣고, 상태가 바뀔 때마다 `$.ui.invalidate('ui.render')`를 호출한다.
 
 첨부파일은 메타데이터만 노출되므로 `drop` 후 원본 바이너리를 재구성할 수 없습니다. **이미지·오디오·문서 첨부 제출은 v1에서 그대로 통과**시킵니다.
 
