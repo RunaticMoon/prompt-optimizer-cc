@@ -1,9 +1,38 @@
+import type { ThemeKey } from 'claude-code'
+
 import type { RuntimeState, Workflow } from '../contracts'
 import { PANE_ID } from '../controller'
+import { RAW_MODE_HINT } from '../raw-mode'
 import type { UiPorts } from './ui-ports'
 
 export const COMPOSER_GUIDE =
   '보완 내용을 입력해 Enter · /optimize accept(입력창으로) · /optimize send · /optimize raw · /optimize cancel'
+
+// Paint meaning with the host's theme; never add layout rows for decoration.
+export const UI_COLORS = {
+  heading: 'claude',
+  original: 'subtle',
+  draft: 'suggestion',
+  section: 'remember',
+  text: 'text',
+  unavailable: 'inactive',
+  progress: 'warning',
+  ready: 'success',
+  error: 'error',
+} as const satisfies Record<string, ThemeKey>
+
+// PromptHint.tail is string-only and dimmed by core. Keep its live pills and
+// width clipping, using textual badges instead of replacing the engine tree.
+export const RAW_MODE_BADGE_HINT = RAW_MODE_HINT
+  .replace('옵티마이저 끔', '[옵티마이저 끔]')
+  .replace('ctrl+u', '[ctrl+u]')
+
+export function phaseColor(phase: Workflow['phase']): ThemeKey {
+  if (phase === 'failed') return UI_COLORS.error
+  if (phase === 'reviewing') return UI_COLORS.ready
+  if (phase === 'idle') return UI_COLORS.unavailable
+  return UI_COLORS.progress
+}
 
 const phaseText: Record<Workflow['phase'], string> = {
   idle: '대기',

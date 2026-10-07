@@ -5,8 +5,7 @@ import type { EngineInterface, On, RenderViewport } from 'claude-code'
 import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
-import { RAW_MODE_HINT } from '../raw-mode'
-import { COMPOSER_GUIDE, phaseLabel } from './present'
+import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, UI_COLORS, phaseColor, phaseLabel } from './present'
 import { PANE_ROWS } from './ui-ports'
 
 const BUSY_PHASES: readonly Workflow['phase'][] = ['idle', 'collecting', 'generating', 'transferring', 'sending']
@@ -188,13 +187,13 @@ export function registerUi(
   }
 
   // The optimizer-off mode shows its hint at the end of the engine's own hint
-  // line: only the surfaces that draw `tail` are touched, everything else
-  // passes unchanged. The line repaints only when the mode flips (`register.ts`
-  // invalidates then).
+  // line. Core owns the tail's dim styling and width clipping; desktop may
+  // leave it undrawn. The line repaints only when the mode flips
+  // (`register.ts` invalidates then).
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const s = controller.getState()
     if (s.rawMode === null || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
-    return next({ ...e, props: { ...e.props, tail: RAW_MODE_HINT } })
+    return next({ ...e, props: { ...e.props, tail: RAW_MODE_BADGE_HINT } })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -216,6 +215,11 @@ export function registerUi(
       ? workflow.original
       : `${originalChars.slice(0, 180).join('')}…`
     const busy = isBusy(workflow.phase)
+    const tokens = Object.values(workflow.usage).reduce((sum, count) => sum + count, 0)
+    const draftText = workflow.draft || (workflow.lastError ? `오류: ${workflow.lastError}` : '')
+      || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')
+    const draftColor = workflow.draft ? UI_COLORS.draft : workflow.lastError ? UI_COLORS.error
+      : busy ? UI_COLORS.progress : UI_COLORS.unavailable
     // RenderResultOf has no accepted/denied signal for a tree. Keep the key
     // stable as workflow.id+surface and invalidate only once per draw transition.
     if (!drawnBands.has(key)) {
@@ -224,11 +228,14 @@ export function registerUi(
     }
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text bold>원문</Text>
-        <Text wrap="wrap">{original}</Text>
-        <Text bold>↓ 개선안</Text>
-        <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
-        {workflow.ui === 'composer' && <Text dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}
+        <Text bold color={UI_COLORS.original}>원문</Text>
+        <Text color={UI_COLORS.original} wrap="wrap">{original}</Text>
+        <Text bold color={UI_COLORS.draft} wrap="truncate-end">
+          ↓ 개선안 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
+          <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${getMaxRounds()}회  ${tokens}토큰`}</Text>
+        </Text>
+        <Text color={draftColor} wrap="wrap">{draftText}</Text>
+        {workflow.ui === 'composer' && <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{COMPOSER_GUIDE}</Text>}
       </Box>
     )
   })
@@ -246,8 +253,8 @@ export function registerUi(
       $.ui.invalidate('ui.render')
     }
     if (workflow?.ui === 'pane') paneClosed = false
-    if (!workflow) return <Text>진행 중인 개선 작업이 없습니다</Text>
-    if (workflow.ui === 'composer') return <Text>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
+    if (!workflow) return <Text color={UI_COLORS.unavailable}>진행 중인 개선 작업이 없습니다</Text>
+    if (workflow.ui === 'composer') return <Text color={UI_COLORS.section}>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
 
     const maxRounds = getMaxRounds()
     const busy = isBusy(workflow.phase)
@@ -258,25 +265,32 @@ export function registerUi(
     const originalToggleLabel = showOriginal ? '원문 접기' : '원문 전체 보기'
     const message = latestOptimizerMessage(workflow)
     const bandDrawn = drawnBands.has(bandKey(workflow.id, e.surface))
+    const draftColor = workflow.draft ? UI_COLORS.draft : busy ? UI_COLORS.progress : UI_COLORS.unavailable
+    const header = (
+      <Text bold color={UI_COLORS.heading} wrap="wrap">
+        프롬프트 옵티마이저 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
+        <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+      </Text>
+    )
 
     // A surface without Button needs command text; mobile can still use its Button table.
     if (typeof Button !== 'function') {
       return (
         <Box flexDirection="column" paddingX={1}>
-          <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
-          <Text bold>원문</Text>
-          <Text wrap="wrap">{workflow.original}</Text>
-          <Text bold>현재 개선안</Text>
-          <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+          {header}
+          <Text bold color={UI_COLORS.original}>원문</Text>
+          <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
+          <Text bold color={UI_COLORS.draft}>현재 개선안</Text>
+          <Text color={draftColor} wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
           {message && (
             <Box marginTop={1} flexDirection="column">
-              <Text bold>옵티마이저 메시지</Text>
-              <Text wrap="wrap">{message}</Text>
+              <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+              <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
             </Box>
           )}
-          {workflow.lastError && <Text wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
-          {busy && <Text>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
-          <Text wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
+          {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
+          {busy && <Text color={UI_COLORS.progress}>{`${phaseLabel(workflow.phase)} · 잠시 기다려 주세요.`}</Text>}
+          <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
         </Box>
       )
     }
@@ -292,50 +306,52 @@ export function registerUi(
         || (workflow.lastError ? `오류: ${workflow.lastError}` : '')
         || (busy ? '개선안을 준비하고 있습니다…' : message || '아직 개선안이 없습니다.')
       const { lines: wrappedPreview, truncated: previewTruncated, altered: previewAltered } = hardWrapPreviewWithStatus(preview, previewColumns, previewLines)
+      const previewColor = draftPreview ? UI_COLORS.draft : workflow.lastError ? UI_COLORS.error
+        : busy ? UI_COLORS.progress : message ? UI_COLORS.text : UI_COLORS.unavailable
       const previewNeedsFullText = previewTruncated || previewAltered || Boolean(draftPreview && workflow.draft !== draftPreview)
       const compactInstruction = retryReady
         ? typeof Input === 'function'
           ? <Input key={KEYS.instruction} label="보완" placeholder="보완 내용" onSubmit={() => undefined} />
-          : <Text wrap="truncate-end">보완: /optimize retry &lt;내용&gt;</Text>
-        : <Text dimColor wrap="truncate-end">보완 (사용 불가)</Text>
+          : <Text color={UI_COLORS.section} wrap="truncate-end">보완: /optimize retry &lt;내용&gt;</Text>
+        : <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">보완 (사용 불가)</Text>
       const originalPreview = showOriginal || originalChars.length <= 180
         ? workflow.original : `${originalChars.slice(0, 180).join('')}…`
       return (
         <Box flexDirection="column" paddingX={1}>
           {wrappedPreview.map((line, index) =>
-            <Text key={`preview:${index}`} wrap="truncate-end">{line}</Text>)}
+            <Text key={`preview:${index}`} bold color={previewColor} wrap="truncate-end">{line}</Text>)}
           {draftReady
-            ? <Button key={KEYS.accept} hotkey="1" label="넣기" plain autoFocus onPress={() => undefined} />
-            : <Text dimColor>1: 넣기 (사용 불가)</Text>}
+            ? <Button key={KEYS.accept} hotkey="1" label="1: 넣기" variant="primary" autoFocus onPress={() => undefined} />
+            : <Text color={UI_COLORS.unavailable} dimColor>1: 넣기 (사용 불가)</Text>}
           {compactInstruction}
           <Box flexDirection="row" flexWrap="wrap">
             {draftReady
-              ? <Button key={KEYS.send} hotkey="2" label="전송" plain onPress={() => undefined} />
-              : <Text dimColor>2: 전송 (사용 불가)</Text>}
-            <Text> · </Text>
+              ? <Button key={KEYS.send} hotkey="2" label="2: 전송" onPress={() => undefined} />
+              : <Text color={UI_COLORS.unavailable} dimColor>2: 전송 (사용 불가)</Text>}
+            <Text color={UI_COLORS.original}> · </Text>
             {!busy
-              ? <Button key={KEYS.raw} hotkey="3" label="원문" plain onPress={() => undefined} />
-              : <Text dimColor>3: 원문 (사용 불가)</Text>}
+              ? <Button key={KEYS.raw} hotkey="3" label="3: 원문" onPress={() => undefined} />
+              : <Text color={UI_COLORS.unavailable} dimColor>3: 원문 (사용 불가)</Text>}
           </Box>
           {/* Keep details below the first view: their height prevents an inline
               pane from shrinking to the compact controls and preserves context. */}
           <Box marginTop={1} flexDirection="column">
-            <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+            {header}
             {draftPreview && previewNeedsFullText && <Box flexDirection="column">
-              <Text bold>개선안 전문</Text>
-              <Text wrap="wrap">{workflow.draft}</Text>
+              <Text bold color={UI_COLORS.draft}>개선안 전문</Text>
+              <Text color={UI_COLORS.draft} wrap="wrap">{workflow.draft}</Text>
             </Box>}
             {message && (previewNeedsFullText || preview !== message) && <Box flexDirection="column">
-              <Text bold>옵티마이저 메시지</Text>
-              <Text wrap="wrap">{message}</Text>
+              <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+              <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
             </Box>}
-            <Text bold>원문</Text>
-            <Text wrap="wrap">{originalPreview}</Text>
+            <Text bold color={UI_COLORS.original}>원문</Text>
+            <Text color={UI_COLORS.original} wrap="wrap">{originalPreview}</Text>
             {originalChars.length > 180 && (busy
-              ? <Text dimColor>0: {originalToggleLabel} (사용 불가)</Text>
-              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />)}
+              ? <Text color={UI_COLORS.unavailable} dimColor>0: {originalToggleLabel} (사용 불가)</Text>
+              : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />)}
             {workflow.lastError && (previewNeedsFullText || preview !== `오류: ${workflow.lastError}`) &&
-              <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
+              <Text wrap="wrap" color={UI_COLORS.error}>{`오류: ${workflow.lastError}`}</Text>}
           </Box>
         </Box>
       )
@@ -343,15 +359,15 @@ export function registerUi(
 
     const acceptAction = draftReady
       ? <Button key={KEYS.accept} hotkey="1" label="1: 입력창에 넣기 (수정 후 전송)" variant="primary" autoFocus onPress={() => undefined} />
-      : <Text dimColor>[1: 입력창에 넣기 · 사용 불가]</Text>
+      : <Text color={UI_COLORS.unavailable} dimColor>[1: 입력창에 넣기 · 사용 불가]</Text>
     const sendActions = (
       <Box marginTop={1} flexDirection="row" flexWrap="wrap" gap={1}>
         {draftReady
           ? <Button key={KEYS.send} hotkey="2" label="2: 개선안 바로 전송" onPress={() => undefined} />
-          : <Text dimColor>[2: 개선안 바로 전송 · 사용 불가]</Text>}
+          : <Text color={UI_COLORS.unavailable} dimColor>[2: 개선안 바로 전송 · 사용 불가]</Text>}
         {!busy
           ? <Button key={KEYS.raw} hotkey="3" label="3: 원문 그대로 전송" onPress={() => undefined} />
-          : <Text dimColor>[3: 원문 그대로 전송 · 사용 불가]</Text>}
+          : <Text color={UI_COLORS.unavailable} dimColor>[3: 원문 그대로 전송 · 사용 불가]</Text>}
       </Box>
     )
     // Arrows move focus on some hosts but scroll the pane body on others, so the
@@ -377,81 +393,81 @@ export function registerUi(
               draftReady ? '1/2/3 선택' : '3 선택',
               'Esc 닫기',
             ].join(' · ')
-    const keyHint = <Text dimColor wrap="wrap">{keyHintText}</Text>
+    const keyHint = <Text color={busy ? UI_COLORS.progress : UI_COLORS.section} wrap="wrap">{keyHintText}</Text>
     const instruction = retryReady
       ? typeof Input === 'function'
         ? <Input key={KEYS.instruction} label="보완 내용" placeholder="수정하거나 확인할 내용을 입력하세요" submitLabel="Enter로 다시 다듬기" onSubmit={() => undefined} />
-        : <Text wrap="wrap">보완은 /optimize retry &lt;보완 내용&gt;</Text>
-      : <Text dimColor>지금은 보완 요청을 입력할 수 없습니다.</Text>
+        : <Text color={UI_COLORS.section} wrap="wrap">보완은 /optimize retry &lt;보완 내용&gt;</Text>
+      : <Text color={UI_COLORS.unavailable} dimColor>지금은 보완 요청을 입력할 수 없습니다.</Text>
 
     if ((e.viewport?.columns ?? e.props.bodyColumns) <= 90) {
       return (
         <Box flexDirection="column" paddingX={1}>
-          <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+          {header}
           {keyHint}
           <Box marginTop={1}>{acceptAction}</Box>
           <Box marginTop={1} flexDirection="column">
-            <Text bold>보완 요청</Text>
+            <Text bold color={UI_COLORS.section}>보완 요청</Text>
             {instruction}
           </Box>
           {sendActions}
           {!bandDrawn && <Box marginTop={1} flexDirection="column">
-            <Text bold>원문</Text>
-            <Text wrap="wrap">{workflow.original}</Text>
-            <Text bold>현재 개선안</Text>
-            <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+            <Text bold color={UI_COLORS.original}>원문</Text>
+            <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
+            <Text bold color={UI_COLORS.draft}>현재 개선안</Text>
+            <Text color={draftColor} wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
           </Box>}
           {message && (
             <Box marginTop={1} flexDirection="column">
-              <Text bold>옵티마이저 메시지</Text>
-              <Text wrap="wrap">{message}</Text>
+              <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+              <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
             </Box>
           )}
           {bandDrawn && originalChars.length > 180 && <Box marginTop={1}>
             {busy
-              ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
-              : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />}
+              ? <Text color={UI_COLORS.unavailable} dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+              : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />}
           </Box>}
-          {workflow.lastError && <Text wrap="wrap" color="error">{`오류: ${workflow.lastError}`}</Text>}
-          {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
+          {workflow.lastError && <Text wrap="wrap" color={UI_COLORS.error}>{`오류: ${workflow.lastError}`}</Text>}
+          {busy && <Text color={UI_COLORS.progress}>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
         </Box>
       )
     }
 
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text bold wrap="wrap">{`프롬프트 옵티마이저  [${phaseLabel(workflow.phase)}]  ${workflow.rounds}/${maxRounds}회  ${tokens}토큰`}</Text>
+        {header}
         {keyHint}
         <Box marginTop={1}>{acceptAction}</Box>
         <Box marginTop={1} flexDirection="column">
-          <Text bold>보완 요청</Text>
+          <Text bold color={UI_COLORS.section}>보완 요청</Text>
           {instruction}
         </Box>
         {sendActions}
         {!bandDrawn && <Box marginTop={1} flexDirection="column">
-          <Text bold>원문</Text>
-          <Text wrap="wrap">{workflow.original}</Text>
-          <Text bold>현재 개선안</Text>
-          <Text wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
+          <Text bold color={UI_COLORS.original}>원문</Text>
+          <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
+          <Text bold color={UI_COLORS.draft}>현재 개선안</Text>
+          <Text color={draftColor} wrap="wrap">{workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}</Text>
         </Box>}
         {message && (
           <Box marginTop={1} flexDirection="column">
-            <Text bold>옵티마이저 메시지</Text>
-            <Text wrap="wrap">{message}</Text>
+            <Text bold color={UI_COLORS.section}>옵티마이저 메시지</Text>
+            <Text color={UI_COLORS.text} wrap="wrap">{message}</Text>
           </Box>
         )}
         {bandDrawn && originalChars.length > 180 && <Box marginTop={1}>
           {busy
-            ? <Text dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
-            : <Button key={KEYS.original} hotkey="0" label={originalToggleLabel} plain onPress={() => undefined} />}
+            ? <Text color={UI_COLORS.unavailable} dimColor>{`[0: ${originalToggleLabel} · 사용 불가]`}</Text>
+            : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />}
         </Box>}
         {workflow.lastError && (
           <Box marginTop={1} flexDirection="column">
-            <Text bold color="error">오류</Text>
-            <Text wrap="wrap">{workflow.lastError}</Text>
+            <Text bold color={UI_COLORS.error}>오류</Text>
+            <Text color={UI_COLORS.error} wrap="wrap">{workflow.lastError}</Text>
           </Box>
         )}
-        {busy && <Text dimColor>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
+        {busy && <Text color={UI_COLORS.progress}>{phaseLabel(workflow.phase)} · 잠시 기다려 주세요.</Text>}
       </Box>
     )
   })
