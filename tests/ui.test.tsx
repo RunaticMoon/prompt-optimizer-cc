@@ -282,7 +282,7 @@ describe('optimizer UI', () => {
     expect(calls).toHaveLength(0)
   })
 
-  test('compact first views prioritize draft, question, choices, direct input, then actions within row budget', async ($, on) => {
+  test('compact first views keep draft and question context before accept and refinement within row budget', async ($, on) => {
     const item = { ...workflow(), draft: '긴 한국어 개선안 '.repeat(80), message: '검토 메시지', question: '형식을 고르세요', options: ['목록', '보고서', '표', '요약'] }
     const { controller } = fakeController(state(item))
     const ui = await captureUi($, on, controller)
@@ -295,8 +295,8 @@ describe('optimizer UI', () => {
       expect(contentOf(first[first.length - (budget > 4 ? 2 : 1)])).toBe(budget > 4 ? '' : '검토 메시지')
       const drawn = textOf(tree)
       expect(drawn.indexOf('질문:')).toBeLessThan(drawn.indexOf('optimizer:option:0'))
-      expect(drawn.indexOf('optimizer:option:3')).toBeLessThan(drawn.indexOf('optimizer:instruction'))
-      expect(drawn.indexOf('optimizer:instruction')).toBeLessThan(drawn.indexOf('optimizer:accept'))
+      expect(drawn.indexOf('optimizer:option:3')).toBeLessThan(drawn.indexOf('optimizer:accept'))
+      expect(drawn.indexOf('optimizer:accept')).toBeLessThan(drawn.indexOf('optimizer:instruction'))
       expect(drawn).toContain(item.draft)
       expect(drawn).toContain(item.message)
       expect(nodesOf(tree).filter(node => node.props.autoFocus === true)).toHaveLength(1)
@@ -532,17 +532,34 @@ describe('optimizer UI', () => {
     }
   })
 
-  test('digit actions remain distinct from answers and hint follows question focus', async ($, on) => {
+  test('accept stays distinct from answers and hint follows question focus', async ($, on) => {
     const current = state({ ...workflow(), question: '형식?', options: ['목록'] })
     const { controller } = fakeController(current)
     const ui = await captureUi($, on, controller)
     const tree = await ui.render(PANE)
     const buttons = nodesOf(tree).filter(node => node.type === 'Button')
-    expect(buttons.map(node => node.props.hotkey)).toEqual(['a', '1', '2', '3', '0'])
+    expect(buttons.map(node => node.props.hotkey)).toEqual(['a', '1', '0'])
     expect(contentOf(tree)).toContain('답변 선택')
     expect(contentOf(tree)).not.toContain('Enter 입력창')
     current.workflow = workflow()
     expect(nodesOf(await ui.render(PANE)).find(node => node.props.key === 'optimizer:accept')?.props.autoFocus).toBe(true)
+  })
+
+  test('review focus order is accept then refinement in compact and full panes without send buttons', async ($, on) => {
+    const { controller } = fakeController(state(workflow()))
+    const ui = await captureUi($, on, controller)
+    for (const placement of ['inline', 'dock'] as const) {
+      for (const rows of [20, 24, 40]) {
+        for (const isFullscreen of [false, true]) {
+          const tree = await ui.render({ ...PANE, viewport: { columns: 80, rows, isFullscreen }, props: { ...PANE.props, placement } })
+          const controls = nodesOf(tree).filter(node => ['Button', 'Input'].includes(node.type))
+          expect(controls.map(node => node.props.key)).toEqual(['optimizer:accept', 'optimizer:instruction', 'optimizer:original'])
+          expect(controls.filter(node => node.props.autoFocus === true).map(node => node.props.key)).toEqual(['optimizer:accept'])
+          expect(controls.filter(node => node.type === 'Button').map(node => node.props.hotkey)).toEqual(['1', '0'])
+          expect(contentOf(tree)).toContain('Esc 취소 (원문 복원)')
+        }
+      }
+    }
   })
 
   test('original toggle works for short and long originals, stays in panel, and ignores busy presses', async ($, on) => {
@@ -831,8 +848,9 @@ describe('optimizer UI', () => {
     const ui = await captureUi($, on, controller, 'Input')
     const drawn = textOf(await ui.render({ ...PANE, surface: 'mobile' }))
     expect(drawn).toContain('한국어로 작성한 개선안입니다.')
-    for (const label of ['입력창에 넣기', '개선안 바로 전송', '원문 그대로 전송']) {
-      expect(drawn).toContain(label)
+    expect(drawn).toContain('입력창에 넣기')
+    for (const label of ['개선안 바로 전송', '원문 그대로 전송']) {
+      expect(drawn).not.toContain(label)
     }
     expect(drawn).toContain('/optimize retry <보완 내용>')
     expect(drawn).not.toContain('명령: /optimize accept')
@@ -847,28 +865,28 @@ describe('optimizer UI', () => {
 
     // A ready draft: the focused hint teaches Tab, never the arrows.
     const focused = textOf(await paneAt(true))
-    expect(focused).toContain('Enter 입력창 · Tab 이동 · 2 바로 전송 · 3 원문 전송 · Esc 닫기')
+    expect(focused).toContain('Enter 입력창 · Tab 이동 · Esc 취소 (원문 복원)')
     expect(focused).not.toContain('↑↓')
-    expect(textOf(await paneAt(false))).toContain('ctrl+x tab 포커스 · Tab 이동 · 1/2/3 선택 · Esc 닫기')
+    expect(textOf(await paneAt(false))).toContain('ctrl+x tab 포커스 · 1 입력창 · Tab 이동 · Esc 취소 (원문 복원)')
 
-    // Busy (generating): 1/2/3 are all disabled, so the hint is a short note.
+    // Busy (generating): accepting is unavailable, so the hint explains cancel.
     current.workflow = workflow('generating')
-    expect(textOf(await paneAt(true))).toContain('생성 중에는 Esc로 취소할 수 있습니다')
-    expect(textOf(await paneAt(false))).toContain('생성 중에는 Esc로 취소할 수 있습니다')
+    expect(textOf(await paneAt(true))).toContain('생성 중에도 Esc로 취소하고 원문을 복원할 수 있습니다')
+    expect(textOf(await paneAt(false))).toContain('생성 중에도 Esc로 취소하고 원문을 복원할 수 있습니다')
 
     // Transferring/sending: Esc cannot cancel, so the note says it is sending.
     current.workflow = workflow('sending')
     expect(textOf(await paneAt(true))).toContain('전송 중입니다')
     expect(textOf(await paneAt(false))).toContain('전송 중입니다')
 
-    // Failed with no draft: Enter and 2 must not be advertised.
+    // Failed with no draft: accepting must not be advertised.
     current.workflow = { ...workflow('failed'), draft: '', lastError: '실패했습니다' }
     const failedFocused = textOf(await paneAt(true))
-    expect(failedFocused).toContain('Tab 이동 · 3 원문 전송 · Esc 닫기')
+    expect(failedFocused).toContain('Tab 이동 · Esc 취소 (원문 복원)')
     expect(failedFocused).not.toContain('Enter 입력창')
     expect(failedFocused).not.toContain('2 바로 전송')
     const failedUnfocused = textOf(await paneAt(false))
-    expect(failedUnfocused).toContain('ctrl+x tab 포커스 · Tab 이동 · 3 선택 · Esc 닫기')
+    expect(failedUnfocused).toContain('ctrl+x tab 포커스 · Tab 이동 · Esc 취소 (원문 복원)')
     expect(failedUnfocused).not.toContain('1/2/3 선택')
   })
 
@@ -922,37 +940,31 @@ describe('optimizer UI', () => {
     expect(focusCalls).toEqual([])
   })
 
-  test('actions call the matching controller method once, and busy actions are unavailable', async ($, on) => {
+  test('accept remains available while removed send actions never dispatch', async ($, on) => {
     const current = state(workflow())
     const { controller, calls } = fakeController(current)
     const ui = await captureUi($, on, controller)
     const press = (element: string) =>
       ui.press({ component: 'Pane', requestId: PANE_ID, plugin: 'test', element })
 
-    const actions = [
-      ['optimizer:accept', 'accept'],
-      ['optimizer:send', 'sendDraft'],
-      ['optimizer:raw', 'sendOriginal'],
-    ] as const
-    for (const [key, call] of actions) {
-      await press(key)
-      expect(calls.at(-1)).toBe(call)
-    }
-    expect(calls).toHaveLength(actions.length)
+    await press('optimizer:accept')
+    await press('optimizer:send')
+    await press('optimizer:raw')
+    expect(calls).toEqual(['accept'])
 
     current.workflow = workflow('generating')
     const busy = textOf(await ui.render(PANE))
     expect(busy).toContain('1: 입력창에 넣기 · 사용 불가')
     expect(busy).toContain('개선안 생성 중')
     await press('optimizer:accept')
-    expect(calls).toHaveLength(actions.length)
+    expect(calls).toEqual(['accept'])
 
     current.workflow = { ...workflow('failed'), draft: '', lastError: '다시 시도할 수 있습니다.' }
     const failed = textOf(await ui.render(PANE))
     expect(failed).toContain('1: 입력창에 넣기 · 사용 불가')
     expect(failed).toContain('다시 시도할 수 있습니다.')
     await press('optimizer:send')
-    expect(calls).toHaveLength(actions.length)
+    expect(calls).toEqual(['accept'])
   })
 
   test('Input Enter refines; an empty instruction does not', async ($, on) => {

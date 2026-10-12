@@ -1312,6 +1312,104 @@ describe('accept and send', () => {
 })
 
 describe('cancel', () => {
+  test('restores the saved original after clearing the consumed composer and bypasses exactly once', async () => {
+    const original = '처음 작성한 원문 요청'
+    const h = harness({ box: original })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'pane')
+    await h.flush()
+    expect(h.fills.map(fill => fill.text)).toEqual([''])
+    expect((await h.ports.prompt.read()).text).toBe('')
+    expect(h.controller.getState().workflow?.original).toBe(original)
+
+    expect(await h.controller.cancel(h.ports)).toEqual({ ok: true })
+    expect((await h.ports.prompt.read()).text).toBe(original)
+    expect(h.fills.map(fill => fill.text)).toEqual(['', original])
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane')).toEqual({ action: 'next', text: original })
+    expect((await h.controller.onSubmit(h.ports, submit(original), 'pane')).action).toBe('drop')
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.submit).toBe(0)
+  })
+
+  test('restores the first original after the composer supplement has also been consumed and cleared', async () => {
+    const original = '처음 작성한 원문 요청'
+    const supplement = '이 보완 내용도 반영해줘'
+    let box = original
+    const h = harness({ fill: input => {
+      box = input.text
+      return { isFilled: true, text: box, cursor: box.length }
+    } })
+    h.ports.prompt.read = async () => ({ text: box, cursor: box.length })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'composer')
+    await h.flush()
+    box = supplement
+    await h.controller.onSubmit(h.ports, submit(supplement), 'composer')
+    await h.flush()
+    expect(box).toBe('')
+    expect(h.controller.getState().workflow?.original).toBe(original)
+    expect(h.controller.getState().workflow?.dialogue.some(m => m.text === supplement)).toBe(true)
+
+    expect(await h.controller.cancel(h.ports)).toEqual({ ok: true })
+    expect(box).toBe(original)
+    expect(h.fills.map(fill => fill.text)).toEqual(['', '', original])
+    expect(h.controller.getState().bypass?.text).toBe(original)
+    expect(h.calls.complete).toBe(2)
+    expect(h.calls.submit).toBe(0)
+  })
+
+  for (const timing of ['before', 'after'] as const) {
+    test(`restores the saved expanded original when a paste placeholder returns ${timing} the clear timer`, async () => {
+      const placeholder = '[Pasted text #1 +3 lines]'
+      const original = '<pasted_content>\n첫 번째 원문 줄\n두 번째 원문 줄\n세 번째 원문 줄\n</pasted_content>'
+      let box = ''
+      const h = harness({ fill: input => {
+        box = input.text
+        return { isFilled: true, text: box, cursor: box.length }
+      } })
+      h.ports.prompt.read = async () => ({ text: box, cursor: box.length })
+      h.controller.onSessionStart('sess-1')
+      h.controller.observeComposer(placeholder)
+      await h.controller.onSubmit(h.ports, submit(original), 'pane')
+      if (timing === 'before') box = placeholder
+      await h.flush()
+      expect(box).toBe('')
+      if (timing === 'after') box = placeholder
+
+      expect(await h.controller.cancel(h.ports)).toEqual({ ok: true })
+      expect(box).toBe(original)
+      expect(h.fills.map(fill => fill.text)).toEqual(timing === 'before' ? ['', original] : [original])
+      expect(h.controller.getState().bypass?.text).toBe(original)
+      expect(h.calls.complete).toBe(1)
+      expect(h.calls.submit).toBe(0)
+    })
+  }
+
+  test('preserves a new composer draft when cancellation cannot safely restore the saved original', async () => {
+    const original = '처음 작성한 원문 요청'
+    const fresh = '별도로 새로 작성한 요청'
+    let box = original
+    const h = harness({ fill: input => {
+      box = input.text
+      return { isFilled: true, text: box, cursor: box.length }
+    } })
+    h.ports.prompt.read = async () => ({ text: box, cursor: box.length })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'pane')
+    await h.flush()
+    box = fresh
+    h.controller.onPromptEdit(fresh)
+
+    const outcome = await h.controller.cancel(h.ports)
+    expect(outcome.ok).toBe(false)
+    expect(box).toBe(fresh)
+    expect(h.fills.map(fill => fill.text)).toEqual([''])
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.submit).toBe(0)
+  })
+
   test('aborts the call, restores the original with a permit, and ignores the late reply', async () => {
     let resolveComplete: ((result: ModelCompleteResult) => void) | undefined
     const h = harness({
