@@ -108,6 +108,7 @@ describe('parseOptimizeArgs', () => {
     expect(parseOptimizeArgs('send')).toEqual({ kind: 'send' })
     expect(parseOptimizeArgs('RAW')).toEqual({ kind: 'raw' })
     expect(parseOptimizeArgs('Cancel')).toEqual({ kind: 'cancel' })
+    expect(parseOptimizeArgs('MORE')).toEqual({ kind: 'more' })
     expect(parseOptimizeArgs('status')).toEqual({ kind: 'status' })
     expect(parseOptimizeArgs('HELP')).toEqual({ kind: 'help' })
   })
@@ -139,6 +140,7 @@ describe('parseOptimizeArgs', () => {
   test('the `--` escape always starts an optimization', () => {
     expect(parseOptimizeArgs('-- status 명령을 설명해줘')).toEqual({ kind: 'start', text: 'status 명령을 설명해줘' })
     expect(parseOptimizeArgs('--  raw  ')).toEqual({ kind: 'start', text: 'raw' })
+    expect(parseOptimizeArgs('-- more details')).toEqual({ kind: 'start', text: 'more details' })
     expect(parseOptimizeArgs('--')).toEqual({ kind: 'start' })
     // A longer token that merely begins with `--` is not the escape.
     expect(parseOptimizeArgs('--status')).toEqual({ kind: 'start', text: '--status' })
@@ -169,6 +171,12 @@ describe('formatStatus', () => {
     const text = formatStatus(config(), liveState())
     expect(text).toContain('그대로 보내기: 맨 앞에 ">> " 입력(ctrl+u로 해제)')
     expect(text).not.toContain('그대로 보내기: 꺼짐')
+  })
+
+  test('reports the approved job limit separately from the unchanged configured limit', () => {
+    const text = formatStatus(config(), liveState({ workflow: workflow({ rounds: 5, roundLimit: 10 }) }))
+    expect(text).toContain('최대 라운드: 5')
+    expect(text).toContain('진행 중인 개선 작업: wf-1 · 단계 reviewing · 5/10회')
   })
 
   test('says as-is send is off when rawPrefix is empty', () => {
@@ -292,7 +300,7 @@ interface Rig {
   /** Which UI choice `chooseUi` answers with. */
   uiChoice: 'pane' | 'composer'
   /** What each controller action returns; success unless a test overrides one. */
-  results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult>
+  results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds', ActionResult>
   /** Callbacks the deferred `$.clock.after` captured, in order. */
   scheduled: Array<() => void>
   /** Every `ui.toast` the hook made. */
@@ -314,7 +322,7 @@ function rig(
     setResult?: { ok: false; error: string }
     configSetResult?: { value?: unknown; deny?: string }
     configSetError?: unknown
-    results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult>>
+    results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds', ActionResult>>
     /**
      * When the key is present, the controller exposes `getGuidanceStatus`
      * (returning this value); when absent, the controller is the legacy facade.
@@ -331,11 +339,12 @@ function rig(
   const sendCalls: Array<{ method: 'draft' | 'original'; workflowId: string | undefined }> = []
   const current = opts.current ?? liveState()
   const currentConfig = opts.config ?? config()
-  const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel', ActionResult> = {
+  const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds', ActionResult> = {
     accept: { ok: true },
     sendDraft: { ok: true },
     sendOriginal: { ok: true },
     cancel: { ok: true },
+    extendRounds: { ok: true },
     ...opts.results,
   }
 
@@ -349,6 +358,10 @@ function rig(
     },
     retry: async (_ports, instruction) => {
       calls.push(instruction === undefined ? 'retry()' : `retry(${instruction})`)
+    },
+    extendRounds: async () => {
+      calls.push('extendRounds')
+      return results.extendRounds
     },
     accept: async () => {
       calls.push('accept')
@@ -623,6 +636,7 @@ describe('registerCommands — settings intents', () => {
     wire(on, r)
     const result = await run($, 'help')
     expect(result.text).toContain('/optimize accept')
+    expect(result.text).toContain('/optimize more')
     expect(result.text).toContain('/optimize model <id>')
     expect(r.sets).toEqual([])
     expect(r.calls).toEqual([])
@@ -801,10 +815,30 @@ describe('registerCommands — controller intents', () => {
     expect(r.calls).toEqual(['retry(더 짧게)', 'retry()'])
   })
 
+  test('more approves five rounds through the controller without changing settings', async ($, on) => {
+    const r = rig()
+    wire(on, r)
+    const result = await run($, 'more')
+    expect(result.text).toBe('이번 개선 작업에 5회를 추가로 허용했습니다.')
+    expect(r.calls).toEqual(['extendRounds'])
+    expect(r.sets).toEqual([])
+    expect(r.configSets).toEqual([])
+  })
+
+  test('a refused more command preserves the controller reason', async ($, on) => {
+    const reason = '추가 라운드 승인 창에서 답을 선택하세요.'
+    const r = rig({ results: { extendRounds: { ok: false, reason } } })
+    wire(on, r)
+    expect((await run($, 'more')).text).toBe(reason)
+    expect(r.calls).toEqual(['extendRounds'])
+    expect(r.sets).toEqual([])
+    expect(r.configSets).toEqual([])
+  })
+
   test('an active-workflow command with no run says so and calls nothing', async ($, on) => {
     const r = rig({ current: liveState({ workflow: null }) })
     wire(on, r)
-    for (const args of ['accept', 'send', 'raw', 'cancel', 'retry']) {
+    for (const args of ['accept', 'send', 'raw', 'cancel', 'retry', 'more']) {
       const result = await run($, args)
       expect(result.text).toContain('진행 중인 개선 작업이 없습니다')
     }

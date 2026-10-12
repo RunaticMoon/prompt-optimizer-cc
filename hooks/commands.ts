@@ -29,13 +29,14 @@ import type {
   RuntimeState,
 } from './contracts'
 import { IN_FLIGHT_REASON, type ActionResult } from './controller'
+import { workflowRoundLimit } from './state'
 import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
 export const OPTIMIZE_COMMAND: CommandSpec = {
   name: 'optimize',
   description: '프롬프트 옵티마이저: 개선 시작·승인·전송·설정',
-  argumentHint: '[text|on|off|accept|send|raw|cancel|retry|status|model <id>]',
+  argumentHint: '[text|on|off|accept|send|raw|cancel|retry|more|status|model <id>]',
   immediate: true,
 }
 
@@ -55,7 +56,7 @@ export interface SettingsPort {
  * The controller surface the command drives (task I's `OptimizerController`).
  *
  * Declared locally with only the members used here; TypeScript's structural
- * typing lets task I's implementation pass as-is. The four actions that may be
+ * typing lets task I's implementation pass as-is. The actions that may be
  * refused return the controller's {@link ActionResult}, so the command answers
  * with the reason it carried when it did not succeed. Each method takes the
  * engine ports the command built, never `$`.
@@ -76,6 +77,8 @@ export interface CommandController {
   refine(ports: EnginePorts, instruction: string): Promise<void>
   /** Re-runs the last completion, optionally with a supplement. */
   retry(ports: EnginePorts, instruction?: string): Promise<void>
+  /** Explicitly approves five more rounds for the active job. */
+  extendRounds(ports: EnginePorts): Promise<ActionResult>
   /** Restores the draft into the composer. */
   accept(ports: EnginePorts): Promise<ActionResult>
   /** Sends the improved draft now. */
@@ -133,6 +136,7 @@ export type ParsedCommand =
   | { kind: 'raw' }
   | { kind: 'cancel' }
   | { kind: 'retry'; instruction?: string }
+  | { kind: 'more' }
   | { kind: 'status' }
   | { kind: 'model'; model: string }
   | { kind: 'help' }
@@ -147,6 +151,7 @@ const HELP_TEXT = [
   '/optimize send — 개선안을 지금 보내기',
   '/optimize raw — 원문을 그대로 보내기',
   '/optimize retry [instruction] — 보완 내용으로 다시 다듬기',
+  '/optimize more — 미해결 질문이 남은 이번 작업에 5회 더 허용',
   '/optimize cancel — 개선 작업 취소',
   '/optimize status — 설정과 진행 상황 보기',
   '/optimize model <id> — 옵티마이저 모델 변경',
@@ -190,6 +195,8 @@ export function parseOptimizeArgs(args: string): ParsedCommand {
       return { kind: 'raw' }
     case 'cancel':
       return { kind: 'cancel' }
+    case 'more':
+      return { kind: 'more' }
     case 'status':
       return { kind: 'status' }
     case 'help':
@@ -237,7 +244,7 @@ export function formatStatus(
   if (workflow === null) {
     lines.push('진행 중인 개선 작업: 없음')
   } else {
-    lines.push(`진행 중인 개선 작업: ${workflow.id} · 단계 ${workflow.phase} · ${workflow.rounds}/${config.maxRounds}회`)
+    lines.push(`진행 중인 개선 작업: ${workflow.id} · 단계 ${workflow.phase} · ${workflow.rounds}/${workflowRoundLimit(workflow, config.maxRounds)}회`)
     if (workflow.lastError !== undefined) lines.push(`마지막 오류: ${workflow.lastError}`)
   }
 
@@ -467,6 +474,13 @@ async function dispatch(
     case 'cancel': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       return actionOutcome(await deps.controller.cancel(ports), '개선 작업을 취소했습니다.')
+    }
+    case 'more': {
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
+      return actionOutcome(
+        await deps.controller.extendRounds(ports),
+        '이번 개선 작업에 5회를 추가로 허용했습니다.',
+      )
     }
     case 'retry':
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }

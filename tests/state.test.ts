@@ -18,6 +18,7 @@ import {
   initialState,
   isStale,
   reduce,
+  workflowRoundLimit,
 } from '../hooks/state'
 
 const SESSION = 'sess-1'
@@ -155,6 +156,97 @@ describe('canStartRound', () => {
     expect(canStartRound(state({ workflow: workflow({ rounds: 2 }) }), 3)).toBe(true)
     expect(canStartRound(state({ workflow: workflow({ rounds: 3 }) }), 3)).toBe(false)
     expect(canStartRound(state({ workflow: workflow({ rounds: 4 }) }), 3)).toBe(false)
+  })
+
+  test('an approved limit applies only to its workflow and never lowers the configured allowance', () => {
+    const extended = workflow({ rounds: 5, roundLimit: 10 })
+    expect(workflowRoundLimit(null, 5)).toBe(5)
+    expect(workflowRoundLimit(extended, 5)).toBe(10)
+    expect(workflowRoundLimit(extended, 12)).toBe(12)
+    expect(canStartRound(state({ workflow: extended }), 5)).toBe(true)
+    expect(canStartRound(state({ workflow: { ...extended, rounds: 10 } }), 5)).toBe(false)
+    expect(canStartRound(state({ workflow: workflow({ rounds: 5 }) }), 5)).toBe(false)
+  })
+})
+
+describe('reduce — round limit approval', () => {
+  test('tracks an approval and extends the current allowance without spending a round', () => {
+    const current = deepFreeze(state({ workflow: workflow({ rounds: 5 }) }))
+    const pending = reduce(current, { type: 'limit-ask', workflowId: 'wf-1', round: 5, status: 'pending' }, 1)
+    expect(pending.workflow?.limitAsk).toBe('pending')
+    expect(reduce(pending, { type: 'limit-ask', workflowId: 'wf-1', round: 5, status: 'pending' }, 2)).toBe(pending)
+    const next = reduce(pending, { type: 'limit-extended', workflowId: 'wf-1', round: 5, maxRounds: 10 }, 3)
+    expect(next.workflow?.roundLimit).toBe(10)
+    expect(next.workflow?.limitAsk).toBe('closed')
+    expect(next.workflow?.rounds).toBe(5)
+    expect(next.workflow?.question).toBe(current.workflow?.question)
+    expect(next.usage).toBe(current.usage)
+    expect(canStartRound(next, 5)).toBe(true)
+  })
+
+  test('closed and declined approvals keep the cap and allow later explicit extension', () => {
+    for (const status of ['closed', 'declined'] as const) {
+      const current = state({ workflow: workflow({ phase: 'failed', rounds: 5, limitAsk: 'pending' }) })
+      const dismissed = reduce(current, { type: 'limit-ask', workflowId: 'wf-1', round: 5, status }, 1)
+      expect(dismissed.workflow?.limitAsk).toBe(status)
+      expect(canStartRound(dismissed, 5)).toBe(false)
+      const extended = reduce(dismissed, { type: 'limit-extended', workflowId: 'wf-1', round: 5, maxRounds: 10 }, 2)
+      expect(canStartRound(extended, 5)).toBe(true)
+    }
+  })
+
+  test('closing the current pending approval clears it even after the workflow phase changed', () => {
+    for (const phase of ['idle', 'collecting', 'generating', 'reviewing', 'failed', 'transferring', 'sending'] as const) {
+      const current = deepFreeze(state({ workflow: workflow({ phase, rounds: 5, limitAsk: 'pending' }) }))
+      const next = reduce(current, { type: 'limit-ask', workflowId: 'wf-1', round: 5, status: 'closed' }, 1)
+      expect(next.workflow?.limitAsk).toBe('closed')
+      expect(next.workflow?.phase).toBe(phase)
+      expect(next.workflow?.rounds).toBe(5)
+      expect(next.workflow?.roundLimit).toBeUndefined()
+    }
+  })
+
+  test('a late close cannot alter another round or workflow, and in-flight updates only close pending approvals', () => {
+    const close: OptimizerEvent = { type: 'limit-ask', workflowId: 'wf-1', round: 5, status: 'closed' }
+    for (const item of [null, workflow({ id: 'other', rounds: 5, limitAsk: 'pending' }), workflow({ rounds: 6, limitAsk: 'pending' })]) {
+      const current = state({ workflow: item })
+      expect(reduce(current, close, 1)).toBe(current)
+    }
+    for (const limitAsk of [undefined, 'closed', 'declined'] as const) {
+      const current = state({ workflow: workflow({ phase: 'transferring', rounds: 5, limitAsk }) })
+      expect(reduce(current, close, 1)).toBe(current)
+    }
+    const pending = state({ workflow: workflow({ phase: 'sending', rounds: 5, limitAsk: 'pending' }) })
+    expect(reduce(pending, { ...close, status: 'declined' }, 1)).toBe(pending)
+  })
+
+  test('stale, in-flight, duplicate and non-increasing approvals have no effect', () => {
+    const ask: OptimizerEvent = { type: 'limit-ask', workflowId: 'wf-1', round: 5, status: 'pending' }
+    const extend: OptimizerEvent = { type: 'limit-extended', workflowId: 'wf-1', round: 5, maxRounds: 10 }
+    for (const item of [null, workflow({ id: 'other', rounds: 5 }), workflow({ rounds: 6 }),
+      ...(['idle', 'collecting', 'generating', 'transferring', 'sending'] as const).map(phase => workflow({ phase, rounds: 5 }))]) {
+      const current = state({ workflow: item })
+      expect(reduce(current, ask, 1)).toBe(current)
+      expect(reduce(current, extend, 1)).toBe(current)
+    }
+    for (const [rounds, roundLimit, maxRounds] of [[5, undefined, 5], [5, 10, 10], [5, 10, 9], [5, 10, Number.NaN]] as const) {
+      const current = state({ workflow: workflow({ rounds, roundLimit }) })
+      expect(reduce(current, { ...extend, maxRounds }, 1)).toBe(current)
+    }
+  })
+
+  test('a new reply, failure or instruction clears approval status but preserves the approved limit', () => {
+    const events: OptimizerEvent[] = [
+      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply(), usage: ZERO },
+      { type: 'failed', workflowId: 'wf-1', generation: 1, error: 'try again' },
+      { type: 'instruct', workflowId: 'wf-1', text: '더 짧게' },
+    ]
+    for (const event of events) {
+      const current = deepFreeze(state({ workflow: workflow({ rounds: 5, roundLimit: 10, limitAsk: 'closed' }) }))
+      const next = reduce(current, event, 1)
+      expect(next.workflow?.limitAsk).toBeUndefined()
+      expect(next.workflow?.roundLimit).toBe(10)
+    }
   })
 })
 

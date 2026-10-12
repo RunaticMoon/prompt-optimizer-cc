@@ -3,7 +3,7 @@
  *
  * This module owns `register(on, options)`. It resolves the settings once,
  * builds the controller (task I), the presenter (K) and the ports the helper
- * modules take, then binds every module to the engine's real events: the six
+ * modules take, then binds every module to the engine's real events: the
  * lifecycle/submission events below, plus the UI (K) and the `/optimize`
  * command (J) through `registerUi`/`registerCommands`.
  *
@@ -19,7 +19,7 @@
  *   refreshes `currentSchedule` for the controller.
  *
  * Events registered here, once each and without a matcher: `session.start`,
- * `session.end`, `prompt.submit`, `prompt.edit`, `prompt.fill`, `config.set`,
+ * `session.end`, `prompt.submit`, `prompt.edit`, `prompt.autocomplete`, `prompt.fill`, `config.set`,
  * `classic.SessionStart` and `classic.UserPromptSubmit`. The `prompt.edit`
  * hook feeds the optimizer-off mode to the controller: a consumed edit (the
  * marker typed, or ctrl+u) becomes the box the hook returns, and a state flip
@@ -329,15 +329,23 @@ export function register(on: On, options: PluginOptions): void {
       // follow the box the edit produced, or its ticket keeps the pre-arm text
       // and the submit mismatches. The rawMode's draft is the same text here,
       // so re-seeing it is harmless.
-      if (controller.getState().bypass !== null) controller.onPromptEdit(consumed.text)
+      controller.onPromptEdit(consumed.text)
       if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
       return consumed
     }
     const r = await next(e)
-    const s = controller.getState()
-    if (s.bypass !== null || s.rawMode !== null) controller.onPromptEdit(r.text)
+    // Also remember raw paste placeholders: submit sees their expanded text,
+    // while a dropped submission can restore the display text instead.
+    controller.onPromptEdit(r.text)
     if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
     return r
+  })
+
+  // Long pastes can update the box without prompt.edit. Autocomplete sees the
+  // raw placeholder display before Enter expands it; leave its suggestions as-is.
+  on('prompt.autocomplete', async (_$, e, next) => {
+    controller.observeComposer(e.text)
+    return next(e)
   })
 
   on('prompt.fill', async ($, e, next) => {
@@ -349,6 +357,7 @@ export function register(on: On, options: PluginOptions): void {
     // Any landed fill changed the box, so the armed mode no longer describes
     // what the person is about to send, whichever plugin made the fill.
     if (r.isFilled) {
+      controller.clearComposerSnapshot()
       const wasArmed = controller.getState().rawMode !== null
       controller.clearRawMode()
       if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')

@@ -175,6 +175,32 @@ describe('transferDraft — draft conflict', () => {
     expect(result.kind).toBe('filled')
   })
 
+  test('accepts either the submitted text or its pasted composer form', async () => {
+    const candidates = ['붙여넣은 원문 전체', '[Pasted text #1 +8 lines]'] as const
+    for (const candidate of candidates) {
+      const { engine, fills } = fakeEngine({ box: `  ${candidate}\n` })
+      const result = await transferDraft(engine, transfer(), {
+        now: 0,
+        expectedDraft: candidates,
+      })
+
+      expect(result.kind).toBe('filled')
+      expect(fills).toHaveLength(1)
+      expect(fills[0]?.text).toBe('개선된 초안')
+    }
+  })
+
+  test('multiple expected draft forms still protect unrelated new input', async () => {
+    const { engine, fills } = fakeEngine({ box: '사용자가 새로 쓴 내용' })
+    const result = await transferDraft(engine, transfer(), {
+      now: 0,
+      expectedDraft: ['붙여넣은 원문 전체', '[Pasted text #1 +8 lines]'],
+    })
+
+    expect(result).toEqual({ kind: 'refused', reason: 'draft-conflict' })
+    expect(fills).toHaveLength(0)
+  })
+
   test('overwrites when the box already holds the target text', async () => {
     const { engine, fills } = fakeEngine({ box: '  개선된 초안 ' })
     const result = await transferDraft(engine, transfer(), { now: 0 })
