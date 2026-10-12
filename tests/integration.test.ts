@@ -909,9 +909,7 @@ describe('integration — session isolation and delivery accuracy', () => {
     await assertInv5CommandDelivery($, on)
   })
 
-  // Invariant 5, working path: the pane's send button submits once (the host
-  // check applies only to command hooks, not to ui.press).
-  test('INV5(UI) · pane의 send 버튼은 개선안을 1회 전송한다', { options: { uiMode: 'pane' } }, async ($, on) => {
+  test('pane의 보완 후 1 버튼은 개선안을 입력창에 넣고 Enter 전에는 전송하지 않는다', { options: { uiMode: 'pane' } }, async ($, on) => {
     const w = setup($, on)
     await w.start()
     w.setModel((_request, call) => answered(`초안${call}`))
@@ -924,27 +922,65 @@ describe('integration — session isolation and delivery accuracy', () => {
     await w.settle()
     expect(w.completes).toHaveLength(2)
 
-    await mounted.press({ key: 'optimizer:send' })
+    await mounted.press({ key: 'optimizer:accept' })
     await w.settle()
 
+    expect(w.box()).toBe('초안2')
+    expect(w.submits).toHaveLength(0)
+    expect(await w.submit('초안2')).toEqual({ text: '초안2' })
     expect(w.submits).toHaveLength(1)
     expect(w.submits[0]?.text).toBe('초안2')
   })
 
-  // Invariant 5, working path: the pane's raw button sends the stored original.
-  test('INV5(UI) · pane의 raw 버튼은 원문을 1회 전송하고 개선안을 섞지 않는다', { options: { uiMode: 'pane' } }, async ($, on) => {
+  for (const source of [ORIGINAL, PASTE_EXPANDED]) {
+    test(`pane cancel restores the saved ${source === ORIGINAL ? 'original' : 'pasted original'} after clearing and refinement`, { options: { uiMode: 'pane' } }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      await w.edit(source === ORIGINAL ? source : PASTE_PLACEHOLDER)
+      await w.submit(source)
+      await w.advance(1)
+      expect(w.box()).toBe('')
+
+      const mounted = await mountPane($)
+      await mounted.input({ key: 'optimizer:instruction', text: '더 짧게' })
+      expect(w.completes).toHaveLength(2)
+      // The kit exposes no host ui.close event; Esc's controller mapping is
+      // covered in ui.test.tsx and the actual terminal smoke.
+      await w.run('cancel')
+      await w.settle()
+
+      expect(w.box()).toBe(source)
+      expect(w.fills.map(fill => fill.text)).toEqual(['', source])
+      expect(w.submits).toHaveLength(0)
+      expect(await w.run('status')).toContain('진행 중인 개선 작업: 없음')
+      expect(await w.submit(source)).toEqual({ text: source })
+      expect(w.submits).toHaveLength(1)
+      expect(w.completes).toHaveLength(2)
+    })
+  }
+
+  test('pane cancel restores a cleared original while generation is pending and ignores its late reply', { options: { uiMode: 'pane' } }, async ($, on) => {
     const w = setup($, on)
     await w.start()
+    let release: (result: ModelCompleteResult) => void = () => undefined
+    w.setModel(() => new Promise(resolve => { release = resolve }))
+    w.setBox(ORIGINAL)
     await w.submit(ORIGINAL)
-    await w.advance(1)
+    const advancing = w.advance(1)
+    await w.settle()
+    await w.waitFor(() => w.completes.length === 1)
+    expect(w.box()).toBe('')
 
-    const mounted = await mountPane($)
-    await mounted.press({ key: 'optimizer:raw' })
+    await w.run('cancel')
+    expect(w.box()).toBe(ORIGINAL)
+    release(answered('취소 후 늦은 개선안'))
+    await advancing
     await w.settle()
 
-    expect(w.submits).toHaveLength(1)
-    expect(w.submits[0]?.text).toBe(ORIGINAL)
-    expect(w.submits[0]?.text).not.toBe(DRAFT)
+    expect(w.box()).toBe(ORIGINAL)
+    expect(w.fills.map(fill => fill.text)).toEqual(['', ORIGINAL])
+    expect(w.submits).toHaveLength(0)
+    expect(await w.run('status')).toContain('진행 중인 개선 작업: 없음')
   })
 
   // Invariants 6 + 8: cancel restores the original, never auto-sends, and a
@@ -1021,19 +1057,15 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(w.fills).toHaveLength(1)
   })
 
-  // Invariant 9: a double send submits once (through the pane button, since the
-  // command path is the product bug above).
-  test('INV9 · pane send 연타는 submit 1회다', { options: { uiMode: 'pane' } }, async ($, on) => {
+  // Invariant 9: explicit send commands still submit once when called twice.
+  test('INV9 · send 명령 연타는 submit 1회다', { options: { uiMode: 'pane' } }, async ($, on) => {
     const w = setup($, on)
     await w.start()
     await w.submit(ORIGINAL)
     await w.advance(1)
 
-    const mounted = await mountPane($)
-    await Promise.all([
-      mounted.press({ key: 'optimizer:send' }),
-      mounted.press({ key: 'optimizer:send' }),
-    ])
+    await Promise.all([w.run('send'), w.run('send')])
+    await w.advance(1)
     await w.settle()
 
     expect(w.submits).toHaveLength(1)

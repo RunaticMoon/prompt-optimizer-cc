@@ -37,8 +37,6 @@ const KEYS = {
   original: 'optimizer:original',
   instruction: 'optimizer:instruction',
   accept: 'optimizer:accept',
-  send: 'optimizer:send',
-  raw: 'optimizer:raw',
   more: 'optimizer:more',
 } as const
 
@@ -402,6 +400,8 @@ export function registerUi(
     const options = replyOptions(workflow)
     const waiting = Boolean(workflow.question) && retryReady
     const message = latestOptimizerMessage(workflow)
+    const escapeHint = workflow.phase === 'transferring' || workflow.phase === 'sending'
+      ? '전송 중입니다' : 'Esc 취소 (원문 복원)'
     const bandDrawn = drawnBands.has(bandKey(workflow.id, e.surface))
     const draftText = workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')
     const draftColor = workflow.draft ? UI_COLORS.draft : busy ? UI_COLORS.progress : UI_COLORS.unavailable
@@ -448,7 +448,7 @@ export function registerUi(
         <Box flexDirection="column">
           {rows.slice(budget)}{header}{limitRow}{question}{optionsText}{draft}{messageSection}
           <Text color={UI_COLORS.section} wrap="wrap">직접 입력: /optimize retry &lt;선택지 답변 또는 보완 내용&gt;</Text>
-          <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
+          <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · cancel · retry <보완>'}</Text>
           <Text bold color={UI_COLORS.original}>원문</Text>
           <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
           {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
@@ -464,7 +464,7 @@ export function registerUi(
       {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
       {busy && <Text color={UI_COLORS.section}>토큰은 응답 완료 시 갱신됩니다.</Text>}
       <Text color={UI_COLORS.section} wrap="wrap">직접 입력: /optimize retry &lt;선택지 답변 또는 보완 내용&gt;</Text>
-      <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
+      <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · cancel · retry <보완>'}</Text>
     </Box>
 
     const optionButtons = (compact: boolean) => options.map((option, index) => {
@@ -491,12 +491,6 @@ export function registerUi(
       ? <Button key={KEYS.accept} hotkey="1" label={compact ? '1: 넣기' : '1: 입력창에 넣기 (수정 후 전송)'}
           variant={waiting ? 'secondary' : 'primary'} autoFocus={!waiting ? true : undefined} onPress={() => undefined} />
       : <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{compact ? '1: 넣기 ×' : '1: 입력창에 넣기 · 사용 불가'}</Text>
-    const sendActions = (compact: boolean) => <Box flexDirection="row" gap={1}>
-      {draftReady ? <Button key={KEYS.send} hotkey="2" label={compact ? '2: 전송' : '2: 개선안 바로 전송'} onPress={() => undefined} />
-        : <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{compact ? '2: 전송 ×' : '2: 개선안 바로 전송 · 사용 불가'}</Text>}
-      {!busy ? <Button key={KEYS.raw} hotkey="3" label={compact ? '3: 원문' : '3: 원문 그대로 전송'} onPress={() => undefined} />
-        : <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{compact ? '3: 원문 ×' : '3: 원문 그대로 전송 · 사용 불가'}</Text>}
-    </Box>
     const originalSection = <Box flexDirection="column">
       {busy ? <Text color={UI_COLORS.unavailable} dimColor wrap="truncate-end">{`0: ${originalToggleLabel} · 사용 불가`}</Text>
         : <Button key={KEYS.original} hotkey="0" label={`0: ${originalToggleLabel}`} onPress={() => undefined} />}
@@ -515,11 +509,9 @@ export function registerUi(
       const optionRows = hasOptions ? 1 : 0
       const errorRows = workflow.lastError ? 1 : 0
       const messageRows = message ? 1 : 0
-      // Essential context and input precede actions. If the host offers only
-      // four rows, actions continue immediately in the scrollable portion.
-      const essential = progressRows + 1 + questionRows + optionRows + errorRows + messageRows + 1
-      const actionsFit = essential + 1 <= budget
-      const previewRows = Math.max(1, budget - progressRows - questionRows - optionRows - errorRows - messageRows - 1 - (actionsFit ? 1 : 0))
+      // Keep accepting the draft directly before refinement in the focus ring.
+      // Controls continue in the scrollable portion when context fills the view.
+      const previewRows = Math.max(1, budget - progressRows - questionRows - optionRows - errorRows - messageRows - 2)
       const preview = hardWrapPreviewWithStatus(`개선안 · ${draftText}`, columns, previewRows)
       const first = [
         ...(progress ? [<Text color={UI_COLORS.progress} wrap="truncate-end">{hardWrapPreview(progress, columns, 1)[0]}</Text>] : []),
@@ -528,8 +520,8 @@ export function registerUi(
         ...(hasOptions ? [<Box flexDirection="row">{optionButtons(true)}</Box>] : []),
         ...(workflow.lastError ? [<Text color={UI_COLORS.error} wrap="truncate-end">{errorSummary(workflow.lastError)}</Text>] : []),
         ...(messageRows ? [<Text color={UI_COLORS.text} wrap="truncate-end">{hardWrapPreview(message, columns, 1)[0]}</Text>] : []),
+        acceptAction(true),
         instruction(true),
-        ...(actionsFit ? [<Box flexDirection="row" gap={1}>{acceptAction(true)}{sendActions(true)}</Box>] : []),
       ]
       // Even a stale question plus error and message cannot overflow the first
       // view: remaining rows continue directly below, without losing controls.
@@ -537,10 +529,9 @@ export function registerUi(
         {first.slice(0, budget)}
         <Box flexDirection="column">
           {first.slice(budget)}
-          {!actionsFit && <Box flexDirection="row" gap={1}>{acceptAction(true)}{sendActions(true)}</Box>}
           {header}
           {limitRow}
-          <Text color={UI_COLORS.section} wrap="truncate-end">Tab 이동 · 아래로 스크롤하여 전문 확인 · Esc 닫기</Text>
+          <Text color={UI_COLORS.section} wrap="truncate-end">{`Tab 이동 · 아래로 스크롤하여 전문 확인 · ${escapeHint}`}</Text>
           {question}{optionsText}
           <Text bold color={UI_COLORS.draft}>개선안 전문</Text>
           <Text color={draftColor} wrap="wrap">{draftText}</Text>
@@ -551,10 +542,10 @@ export function registerUi(
     }
 
     const keyHintText = workflow.phase === 'transferring' || workflow.phase === 'sending' ? '전송 중입니다'
-      : busy ? '생성 중에는 Esc로 취소할 수 있습니다'
-      : waiting ? `${e.props.isFocused ? '' : 'ctrl+x tab 포커스 · '}${options.length ? `${OPTION_HOTKEYS.slice(0, options.length).join('/')} 답변 선택 · ` : '직접 입력 후 Enter · '}Tab 이동 · Esc 닫기`
-      : e.props.isFocused ? [ ...(draftReady ? ['Enter 입력창'] : []), 'Tab 이동', ...(draftReady ? ['2 바로 전송'] : []), '3 원문 전송', 'Esc 닫기' ].join(' · ')
-      : `ctrl+x tab 포커스 · Tab 이동 · ${draftReady ? '1/2/3' : '3'} 선택 · Esc 닫기`
+      : busy ? '생성 중에도 Esc로 취소하고 원문을 복원할 수 있습니다'
+      : waiting ? `${e.props.isFocused ? '' : 'ctrl+x tab 포커스 · '}${options.length ? `${OPTION_HOTKEYS.slice(0, options.length).join('/')} 답변 선택 · ` : '직접 입력 후 Enter · '}Tab 이동 · Esc 취소 (원문 복원)`
+      : e.props.isFocused ? [ ...(draftReady ? ['Enter 입력창'] : []), 'Tab 이동', 'Esc 취소 (원문 복원)' ].join(' · ')
+      : `ctrl+x tab 포커스 · ${draftReady ? '1 입력창 · ' : ''}Tab 이동 · Esc 취소 (원문 복원)`
     return <Box flexDirection="column" paddingX={1}>
       {header}
       {progressRow}
@@ -562,7 +553,7 @@ export function registerUi(
       {question}
       {retryReady && options.length > 0 && <Box flexDirection="column">{optionButtons(false)}</Box>}
       {draft}
-      {instruction(false)}{acceptAction(false)}{sendActions(false)}
+      {acceptAction(false)}{instruction(false)}
       {atLimit && workflow.limitAsk !== 'pending' && limitRow}
       {!bandDrawn && messageSection}
       {originalSection}
@@ -596,8 +587,6 @@ export function registerUi(
 
     const ports = portsOf($)
     if (e.element === KEYS.accept && workflow.draft.trim()) await controller.accept(ports)
-    else if (e.element === KEYS.send && workflow.draft.trim()) await controller.sendDraft(ports)
-    else if (e.element === KEYS.raw) await controller.sendOriginal(ports)
     else if (e.element === KEYS.more) {
       if (workflow.rounds >= workflowRoundLimit(workflow, getMaxRounds()) && workflow.question?.trim() && workflow.limitAsk !== 'pending') {
         await controller.extendRounds(ports)
