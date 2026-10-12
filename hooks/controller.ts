@@ -31,7 +31,7 @@ import { buildModelRequest, completeRewrite } from './model'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
 import { resolveTargetModel } from './resolve-target-model'
-import { canStartRound, initialState, isStale, reduce } from './state'
+import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import type {
   ContextSnapshot,
@@ -55,6 +55,9 @@ const BUSY_NOTICE = '프롬프트 옵티마이저가 작업 중입니다. /optim
 const REPLY_NOTICE = '보완 요청을 옵티마이저에 전달했습니다.'
 const OPTIMIZE_NOTICE = '프롬프트를 다듬는 중입니다.'
 const LIMIT_NOTICE = '개선 횟수 한도에 도달했습니다'
+const EXTEND_APPROVAL = '추가 5회 허용'
+const EXTEND_DECLINE = '현재 개선안 유지'
+const EXTEND_GUIDE = '미해결 질문이 남아 있습니다. 5회를 더 허용하려면 패널에서 선택하거나 /optimize more 를 입력하세요.'
 const ACCEPT_NOTICE = '개선안을 입력창에 넣었습니다. Enter 로 전송하세요.'
 /** Result reason for an action refused while its run is mid-flight. */
 export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
@@ -124,11 +127,17 @@ export interface OptimizerController {
   startExplicit(ports: EnginePorts, text: string | undefined, ui: 'pane' | 'composer'): Promise<void>
   refine(ports: EnginePorts, instruction: string): Promise<void>
   retry(ports: EnginePorts, instruction?: string): Promise<void>
+  /** Explicit approval from the extension button or `/optimize more`. */
+  extendRounds(ports: EnginePorts): Promise<ActionResult>
   accept(ports: EnginePorts): Promise<ActionResult>
   sendDraft(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   cancel(ports: EnginePorts): Promise<ActionResult>
   onPromptEdit(text: string): void
+  /** Observes display text on paths such as long paste that emit no edit. */
+  observeComposer(text: string): void
+  /** A fill invalidates the last user-edit snapshot, but keeps accepted text. */
+  clearComposerSnapshot(): void
   /**
    * Applies one prompt-box edit to the optimizer-off mode. Returns the box the
    * edit should be replaced with when the edit is consumed (arming or
@@ -192,6 +201,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
   // A dialog cannot be closed by the plugin. Keep its slot across workflow
   // resets until it settles, but release it when the session starts or ends.
   let pendingAsk: Workflow | null = null
+  /** Last accepted composer text, including a trigger prefix or supplement. */
+  let consumedPrompt: { workflowId: string; texts: readonly string[] } | null = null
+  /** Raw display text before submission expands pasted-content placeholders. */
+  let composerSnapshot: string | undefined
 
   function sameQuestion(asked: Workflow): boolean {
     const current = state.workflow
@@ -214,6 +227,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
   /** Detached from the round and submit hook: one dialog per eligible reply. */
   function askQuestion(ports: EnginePorts): void {
     const asked = state.workflow
+    if (asked && !canStartRound(state, deps.getConfig().maxRounds)) {
+      askRoundExtension(ports)
+      return
+    }
     if (!asked || asked.phase !== 'reviewing' || !asked.question
       || (asked.options?.length ?? 0) < 2 || asked.questionAsk || pendingAsk || !ports.ui.ask) return
     const question = asked.question
@@ -226,6 +243,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
         if (pendingAsk === asked) pendingAsk = null
         if (!sameQuestion(asked)) {
           ports.ui.log?.('prompt-optimizer: ignored a stale question answer', { to: 'debug' })
+          askQuestion(ports)
           return
         }
         mark('closed')
@@ -237,11 +255,81 @@ export function createController(deps: ControllerDeps): OptimizerController {
       }).catch(() => {
         if (pendingAsk === asked) pendingAsk = null
         mark('closed')
+        if (!sameQuestion(asked)) askQuestion(ports)
       })
     } catch {
       pendingAsk = null
       mark('closed')
     }
+  }
+
+  /** One permission dialog per exhausted round; never itself calls the model. */
+  function askRoundExtension(ports: EnginePorts): void {
+    const asked = state.workflow
+    if (!asked || asked.phase !== 'reviewing' || !asked.question?.trim()
+      || canStartRound(state, deps.getConfig().maxRounds) || asked.limitAsk || pendingAsk) return
+    const mark = (status: 'pending' | 'closed' | 'declined'): void =>
+      apply({ type: 'limit-ask', workflowId: asked.id, round: asked.rounds, status })
+    if (!ports.ui.ask) {
+      mark('closed')
+      notify(EXTEND_GUIDE)
+      return
+    }
+    const current = (): boolean => sameQuestion(asked)
+      && !canStartRound(state, deps.getConfig().maxRounds) && state.workflow?.limitAsk === 'pending'
+    pendingAsk = asked
+    mark('pending')
+    try {
+      void ports.ui.ask(
+        `${workflowRoundLimit(asked, deps.getConfig().maxRounds)}회 한도에 도달했지만 미해결 질문이 남아 있습니다. 이번 개선 작업에 5회를 더 허용할까요?`,
+        { options: [EXTEND_APPROVAL, EXTEND_DECLINE], header: '라운드 연장' },
+      ).then(async answer => {
+        if (pendingAsk === asked) pendingAsk = null
+        if (!current()) {
+          mark('closed')
+          ports.ui.log?.('prompt-optimizer: ignored a stale round-extension answer', { to: 'debug' })
+          askQuestion(ports)
+          return
+        }
+        if (answer !== EXTEND_APPROVAL) {
+          mark('declined')
+          notify('추가 호출 없이 현재 개선안과 미해결 질문을 유지합니다.')
+          return
+        }
+        mark('closed')
+        await extendRounds(ports)
+        void refocusAnsweredPane(ports, asked)
+      }).catch(() => {
+        if (pendingAsk === asked) pendingAsk = null
+        const wasCurrent = current()
+        mark('closed')
+        if (wasCurrent) notify(EXTEND_GUIDE)
+        else askQuestion(ports)
+      })
+    } catch {
+      if (pendingAsk === asked) pendingAsk = null
+      mark('closed')
+      notify(EXTEND_GUIDE)
+    }
+  }
+
+  async function extendRounds(ports: EnginePorts): Promise<ActionResult> {
+    const workflow = state.workflow
+    if (!workflow) return { ok: false, reason: '진행 중인 개선 작업이 없습니다.' }
+    if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
+      return { ok: false, reason: IN_FLIGHT_REASON }
+    }
+    if (pendingAsk || workflow.limitAsk === 'pending') {
+      return { ok: false, reason: '열린 선택 창에서 추가 라운드 허용 여부를 선택하세요.' }
+    }
+    const maxRounds = workflowRoundLimit(workflow, deps.getConfig().maxRounds)
+    if (workflow.rounds < maxRounds || !workflow.question?.trim()) {
+      return { ok: false, reason: '한도에 도달하고 미해결 질문이 남아 있을 때만 연장할 수 있습니다.' }
+    }
+    apply({ type: 'limit-extended', workflowId: workflow.id, round: workflow.rounds, maxRounds: maxRounds + 5 })
+    notify(`이번 개선 작업의 한도를 ${maxRounds + 5}회로 늘렸습니다. 남은 질문에 답하거나 보완 내용을 입력하세요.`)
+    askQuestion(ports)
+    return { ok: true }
   }
 
   /**
@@ -312,6 +400,42 @@ export function createController(deps: ControllerDeps): OptimizerController {
     )
   }
 
+  /**
+   * A dropped submission is handed back to the composer by the host. Consume
+   * that text only from the scheduled task, after the submit hook has returned,
+   * and before a completion can open a question dialog or restore a draft.
+   * A new draft, a cancelled run, or an action already in flight owns its box.
+   */
+  async function consumeAndRun(
+    ports: EnginePorts,
+    workflow: Workflow,
+    submittedTexts: readonly string[],
+    instruction?: string,
+  ): Promise<void> {
+    const current = (): boolean =>
+      state.sessionId === workflow.sessionId && !isStale(state, workflow.id, workflow.generation)
+      && state.workflow?.phase === workflow.phase && state.workflow.rounds === workflow.rounds
+
+    if (!current()) return
+    try {
+      const box = await ports.prompt.read()
+      // The CLI trims submitted text; retain the actual submitted prefix here,
+      // rather than comparing against the classifier's stripped original. A
+      // later user edit revokes the raw-placeholder candidate, even while this
+      // read is pending; that placeholder can now refer to a different paste.
+      const candidates = consumedPrompt?.texts === submittedTexts ? submittedTexts : submittedTexts.slice(0, 1)
+      if (current() && box.text !== '' && candidates.some(text => box.text.trim() === text.trim())) {
+        await ports.prompt.fill({ text: '', mode: 'replace' })
+      }
+    } catch {
+      // An unavailable/refusing composer must not prevent improvement. The
+      // normal delivery conflict check still protects whatever it holds.
+    }
+    if (!current()) return
+    if (instruction === undefined) await runRound(ports)
+    else await refine(ports, instruction)
+  }
+
   /** Aborts every in-flight completion; used on cancel and session changes. */
   function abortAll(): void {
     for (const [id, round] of rounds) {
@@ -360,6 +484,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
   function resetGuidance(): void {
     extra = null
     lastGuidance = null
+    consumedPrompt = null
+    composerSnapshot = undefined
   }
 
   function makeWorkflow(
@@ -397,7 +523,14 @@ export function createController(deps: ControllerDeps): OptimizerController {
         text,
         mode: 'replace',
       },
-      { now: deps.now(), paneId: workflow.ui === 'pane' ? PANE_ID : undefined },
+      {
+        now: deps.now(),
+        paneId: workflow.ui === 'pane' ? PANE_ID : undefined,
+        // A fill can be refused, or another submit hook can delay the host's
+        // handback until after our scheduled clear. Only the already accepted
+        // text may be replaced in either case; fresh user input stays protected.
+        expectedDraft: consumedPrompt?.workflowId === workflow.id ? consumedPrompt.texts : undefined,
+      },
     )
   }
 
@@ -532,7 +665,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
       }
 
       const system = composeSystemPrompt(extra, target.profile)
-      const request = buildModelRequest(current, config, system, instruction, { cache })
+      const request = buildModelRequest(current, {
+        ...config, maxRounds: workflowRoundLimit(current, config.maxRounds),
+      }, system, instruction, { cache })
 
       // Record the model this request actually targets, just before sending.
       lastGuidance = { workflowId, round: current.rounds + 1, target }
@@ -553,10 +688,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
       const stale = isStale(state, workflowId, generation)
 
       if (result.kind === 'ok') {
-        // There is no follow-up completion at the limit. Keep a model's stray
-        // question in the handoff instead of inviting an answer we cannot use,
-        // and keep its choices alongside it so the person still sees them.
-        if (current.rounds + 1 >= config.maxRounds && result.reply.question !== null) {
+        // Preserve unresolved decisions in the draft if the person stops here,
+        // and retain the question so explicit approval can continue the work.
+        if (current.rounds + 1 >= workflowRoundLimit(current, config.maxRounds) && result.reply.question !== null) {
           const heading = /[가-힣]/.test(result.reply.draft)
             ? '미확정 사항 (구현 전 확인)'
             : 'Open decision (resolve before implementation)'
@@ -567,8 +701,6 @@ export function createController(deps: ControllerDeps): OptimizerController {
             reply: {
               ...result.reply,
               draft: `${result.reply.draft}\n\n${heading}:\n${result.reply.question}${choiceLine}`,
-              question: null,
-              options: [],
             },
           }
         }
@@ -637,6 +769,12 @@ export function createController(deps: ControllerDeps): OptimizerController {
     e: PromptSubmitInput,
     ui: 'pane' | 'composer',
   ): Promise<SubmitOutcome> {
+    // The engine clears the box before this hook, then may hand back its raw
+    // paste placeholders on drop. The last edit is the only pre-expansion
+    // snapshot. Consume it once so another submission cannot reuse stale text.
+    const submittedTexts = e.origin.kind !== 'composer' || composerSnapshot === undefined
+      ? [e.text] : [e.text, composerSnapshot]
+    if (e.origin.kind === 'composer') composerSnapshot = undefined
     let decision: SubmissionDecision
     try {
       decision = classifySubmission(e, deps.getConfig(), state, deps.now())
@@ -674,16 +812,24 @@ export function createController(deps: ControllerDeps): OptimizerController {
       case 'busy':
         return { action: 'drop', reason: BUSY_NOTICE }
 
-      case 'reply':
+      case 'reply': {
+        const workflow = state.workflow
+        if (workflow === null) return { action: 'drop', reason: BUSY_NOTICE }
+        if (!canStartRound(state, deps.getConfig().maxRounds)) {
+          askRoundExtension(ports)
+          return { action: 'drop', reason: `${LIMIT_NOTICE}. ${EXTEND_GUIDE}` }
+        }
         try {
           scheduleTask(
-            () => refine(ports, decision.text),
+            () => consumeAndRun(ports, workflow, submittedTexts, decision.text),
             cause => `보완 요청을 처리하지 못했습니다: ${describeError(cause)}`,
           )
+          consumedPrompt = { workflowId: workflow.id, texts: submittedTexts }
         } catch (cause) {
           notify(`보완 요청을 예약하지 못했습니다: ${describeError(cause)}`)
         }
         return { action: 'drop', reason: REPLY_NOTICE }
+      }
 
       case 'optimize': {
         let workflow: Workflow | null = null
@@ -691,10 +837,12 @@ export function createController(deps: ControllerDeps): OptimizerController {
           resetExtra()
           workflow = makeWorkflow(decision.text, e.context ?? [], ui)
           apply({ type: 'start', workflow })
+          const scheduledWorkflow = workflow
           scheduleTask(
-            () => runRound(ports),
+            () => consumeAndRun(ports, scheduledWorkflow, submittedTexts),
             cause => `개선을 시작하지 못했습니다: ${describeError(cause)}`,
           )
+          consumedPrompt = { workflowId: workflow.id, texts: submittedTexts }
         } catch (cause) {
           // Undo a half-started run and let the original through, so the person
           // is not stuck behind a workflow that never had a clock to run on.
@@ -714,6 +862,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
   ): Promise<void> {
     // An explicit /optimize run supersedes the optimizer-off mode.
     clearRawMode()
+    composerSnapshot = undefined
     if (state.workflow !== null) {
       notify('이미 개선 작업이 진행 중입니다.')
       return
@@ -738,9 +887,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
       const workflow = makeWorkflow(source, [], ui)
       apply({ type: 'start', workflow })
       scheduleTask(
-        () => runRound(ports),
+        () => consumeAndRun(ports, workflow, [workflow.original]),
         cause => `개선을 시작하지 못했습니다: ${describeError(cause)}`,
       )
+      consumedPrompt = { workflowId: workflow.id, texts: [workflow.original] }
     } catch (cause) {
       notify(`개선을 시작하지 못했습니다: ${describeError(cause)}`)
     }
@@ -750,6 +900,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
     const workflow = state.workflow
     if (workflow === null || (workflow.phase !== 'reviewing' && workflow.phase !== 'failed')) {
       notify('보완할 개선안이 없습니다.')
+      return
+    }
+    if (!canStartRound(state, deps.getConfig().maxRounds)) {
+      notify(LIMIT_NOTICE)
+      askRoundExtension(ports)
       return
     }
     apply({ type: 'instruct', workflowId: workflow.id, text: instruction })
@@ -763,6 +918,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
     const workflow = state.workflow
     if (workflow === null || (workflow.phase !== 'reviewing' && workflow.phase !== 'failed')) {
       notify('다시 생성할 작업이 없습니다.')
+      return
+    }
+    if (!canStartRound(state, deps.getConfig().maxRounds)) {
+      notify(LIMIT_NOTICE)
+      askRoundExtension(ports)
       return
     }
     if (instruction !== undefined && instruction !== '') {
@@ -926,6 +1086,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
   }
 
   function onPromptEdit(text: string): void {
+    composerSnapshot = text
+    // Once the person edits again, an old paste placeholder no longer proves
+    // ownership of the box. Keep only the actual submitted text as a fallback.
+    if (consumedPrompt !== null) consumedPrompt = { ...consumedPrompt, texts: consumedPrompt.texts.slice(0, 1) }
     if (state.rawMode !== null) {
       apply({ type: 'raw-mode-seen', sessionId: state.sessionId, draft: text })
     }
@@ -989,11 +1153,21 @@ export function createController(deps: ControllerDeps): OptimizerController {
     startExplicit,
     refine,
     retry,
+    extendRounds,
     accept,
     sendDraft: (ports, workflowId) => send(ports, 'draft', workflowId),
     sendOriginal: (ports, workflowId) => send(ports, 'original', workflowId),
     cancel,
     onPromptEdit,
+    observeComposer: text => {
+      // Autocomplete also observes the host's handback. Do not treat it as a
+      // user edit or repopulate a snapshot consumed by a still-running submit.
+      const workflow = state.workflow
+      if (workflow === null || workflow.phase === 'reviewing' || workflow.phase === 'failed') {
+        composerSnapshot = text
+      }
+    },
+    clearComposerSnapshot: () => { composerSnapshot = undefined },
     onComposerEdit,
     clearRawMode,
     onSessionStart,

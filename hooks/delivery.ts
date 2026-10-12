@@ -32,11 +32,11 @@ export interface TransferOptions {
   /** Epoch milliseconds stamped on the issued permit's expiry. */
   now: number
   /**
-   * Draft the caller believes the box holds. Text that trims equal is treated
-   * as the optimizer's own and may be replaced; absent, only the target text
-   * is allowed to match.
+   * Draft, or equivalent draft forms, the caller believes the box holds. Text
+   * that trims equal to any candidate is treated as the optimizer's own and
+   * may be replaced; absent, only the target text is allowed to match.
    */
-  expectedDraft?: string
+  expectedDraft?: string | readonly string[]
   /** Pane holding the dialogue, closed before the fill. */
   paneId?: string
 }
@@ -156,10 +156,11 @@ export async function sendApproved($: EnginePorts, target: SubmitTarget): Promis
  * Whether the box's current text may be replaced without losing the person's
  * own work. Empty, the expected draft, and the target text all clear the check.
  */
-function canReplace(current: string, expectedDraft: string | undefined, target: string): boolean {
+function canReplace(current: string, expectedDraft: TransferOptions['expectedDraft'], target: string): boolean {
   const trimmed = current.trim()
   if (trimmed === '') return true
-  if (expectedDraft !== undefined && trimmed === expectedDraft.trim()) return true
+  const candidates = typeof expectedDraft === 'string' ? [expectedDraft] : expectedDraft ?? []
+  if (candidates.some(candidate => trimmed === candidate.trim())) return true
   return trimmed === target.trim()
 }
 

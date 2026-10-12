@@ -18,6 +18,8 @@ import type {
   ModelCompleteResult,
   ModelUsage,
   On,
+  PromptAutocompleteInput,
+  PromptAutocompleteResult,
   PromptBox,
   PromptEditInput,
   PromptFillInput,
@@ -52,6 +54,8 @@ const ZERO: ModelUsage = {
 
 const ORIGINAL = '로그인 오류를 고쳐줘'
 const DRAFT = '개선된 요청'
+const PASTE_PLACEHOLDER = '다음 내용을 고쳐줘\n[Pasted text #1 +3 lines]'
+const PASTE_EXPANDED = '다음 내용을 고쳐줘\n<pasted_content>\n첫째 줄: 로그인 오류\n둘째 줄: 재현 절차\n셋째 줄: 기대 동작\n</pasted_content>'
 
 /** The fixed JSON contract the optimizer's one completion returns. */
 function answered(draft: string, message = '다듬었습니다', question: string | null = null): ModelCompleteResult {
@@ -134,8 +138,8 @@ interface World {
   setModelDeny(reason?: string): void
   /** Replaces the completion behavior. */
   setModel(behavior: ModelBehavior): void
-  /** Makes the next `prompt.fill` refuse. */
-  setFill(fn: (input: PromptFillInput) => { isFilled: boolean; refusal?: 'no_composer' | 'dialog' }): void
+  /** Overrides `prompt.fill`; null restores the normal composer fill. */
+  setFill(fn: ((input: PromptFillInput) => { isFilled: boolean; refusal?: 'no_composer' | 'dialog' }) | null): void
   /** The simulated composer's current text. */
   box(): string
   setBox(text: string): void
@@ -438,6 +442,372 @@ async function assertInv5CommandDelivery($: Engine, on: On): Promise<void> {
 }
 
 describe('integration — session isolation and delivery accuracy', () => {
+  test('five rounds require explicit approval before a sixth call and keep an unsent answer', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    const dialogs: Array<{ question: string }[]> = []
+    let answerDialog: (result: { result: { questions: unknown[]; answers: Record<string, string> } }) => void = () => undefined
+    on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+      dialogs.push(e.questions)
+      return new Promise(resolve => { answerDialog = resolve })
+    })
+    w.setModel((_request, call) => answered(`개선안 ${call}`, '', call === 5 ? '아직 남은 비교 기준은 무엇인가요?' : null))
+    await w.start()
+    for (let round = 1; round <= 5; round += 1) {
+      await w.submit(round === 1 ? ORIGINAL : `보완 ${round}`)
+      await w.advance(1)
+    }
+    await w.waitFor(() => dialogs.length === 1)
+    expect(w.completes).toHaveLength(5)
+    expect(JSON.stringify(dialogs[0])).toContain('5회를 더 허용')
+    expect(await w.run('status')).toContain('5/5회')
+
+    const answer = '직전 변경 이력과 비교'
+    w.setBox(answer)
+    expect(await w.submit(answer)).toMatchObject({ drop: '개선 횟수 한도에 도달했습니다. 미해결 질문이 남아 있습니다. 5회를 더 허용하려면 패널에서 선택하거나 /optimize more 를 입력하세요.' })
+    await w.advance(1)
+    expect(w.box()).toBe(answer)
+    expect(w.completes).toHaveLength(5)
+    expect(await w.run('more')).toContain('열린 선택 창')
+
+    answerDialog({ result: { questions: [], answers: { [dialogs[0]![0]!.question]: '추가 5회 허용' } } })
+    await w.waitFor(() => w.logs.some(line => line.includes('한도를 10회로')))
+    expect(await w.run('status')).toContain('5/10회')
+    expect(w.completes).toHaveLength(5)
+    await w.submit(answer)
+    await w.advance(1)
+    expect(w.box()).toBe('')
+    expect(w.completes).toHaveLength(6)
+    expect(w.completes[5]?.prompt).toContain('max: 10\nremaining: 4')
+    expect(w.completes[5]?.prompt).toContain(answer)
+    expect(w.submits).toHaveLength(0)
+
+    expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+    expect(await w.submit('개선안 6')).toEqual({ text: '개선안 6' })
+    await w.submit('다음 요청')
+    await w.advance(1)
+    expect(await w.run('status')).toContain('1/5회')
+  })
+
+  for (const uiMode of ['pane', 'composer'] as const) {
+    test(`intercepted composer text is cleared before ${uiMode} accept and the next workflow`, { options: { uiMode } }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      w.setModel((_request, call) => answered(`개선안 ${call}`))
+
+      for (let cycle = 1; cycle <= 2; cycle += 1) {
+        const original = `${ORIGINAL} ${cycle}`
+        // A dropped submission leaves the submitted text in the real composer.
+        // The harness deliberately does not clear it on submit's behalf.
+        w.setBox(original)
+        expect(await w.submit(original)).toEqual({ drop: DROP_OPTIMIZING })
+        expect(w.box()).toBe(original)
+        await w.advance(1)
+
+        expect(w.box()).toBe('')
+        expect(w.fills.at(-1)?.text).toBe('')
+        expect(w.fills.at(-1)?.mode).toBe('replace')
+        expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+        const draft = `개선안 ${cycle}`
+        expect(w.box()).toBe(draft)
+        expect(await w.submit(draft)).toEqual({ text: draft })
+        expect(w.submits).toHaveLength(cycle)
+        expect(w.completes).toHaveLength(cycle)
+      }
+
+      // The restored text's permit was consumed; repeating it starts a run.
+      expect(await w.submit('개선안 2')).toEqual({ drop: DROP_OPTIMIZING })
+      expect(w.submits).toHaveLength(2)
+    })
+  }
+
+  test('composer supplements are consumed before importing the revised draft', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setModel((_request, call) => answered(`개선안 ${call}`))
+    w.setBox(ORIGINAL)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.box()).toBe('')
+
+    const supplement = '더 짧게'
+    w.setBox(supplement)
+    expect(await w.submit(supplement)).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    expect(w.box()).toBe(supplement)
+    await w.advance(1)
+    expect(w.box()).toBe('')
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[1]?.prompt).toContain(supplement)
+
+    expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+    expect(w.box()).toBe('개선안 2')
+    expect(w.fills.map(fill => fill.text)).toEqual(['', '', '개선안 2'])
+    expect(await w.submit('개선안 2')).toEqual({ text: '개선안 2' })
+    expect(w.submits).toHaveLength(1)
+  })
+
+  test('prefix submissions clear the submitted text including its prefix and surrounding whitespace', { options: { uiMode: 'composer', triggerMode: 'prefix' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    const submitted = `?? ${ORIGINAL}`
+    w.setBox(` \n${submitted}\n `)
+    expect(await w.submit(submitted)).toEqual({ drop: DROP_OPTIMIZING })
+    await w.advance(1)
+
+    expect(w.box()).toBe('')
+    expect(w.completes[0]?.prompt).toContain(ORIGINAL)
+    expect(w.completes[0]?.prompt).not.toContain('?? ')
+    expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+    expect(w.box()).toBe(DRAFT)
+  })
+
+  for (const handback of ['original', 'prefix', 'reply'] as const) {
+    test(`accept replaces a ${handback} handed back after the scheduled clear`, {
+      options: { uiMode: 'composer', triggerMode: handback === 'prefix' ? 'prefix' : 'always' },
+    }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      let submitted = handback === 'prefix' ? `?? ${ORIGINAL}` : ORIGINAL
+      expect(w.box()).toBe('')
+      await w.submit(submitted)
+      await w.advance(1)
+      if (handback === 'reply') {
+        submitted = '더 짧게'
+        await w.submit(submitted)
+        await w.advance(1)
+      }
+      expect(w.box()).toBe('')
+      expect(w.fills).toHaveLength(0)
+
+      // Another submit hook can delay the host's dropped-text handback until
+      // after the optimizer's timer has already observed an empty composer.
+      w.setBox(submitted)
+      expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+      expect(w.box()).toBe(DRAFT)
+      expect(w.fills.map(fill => fill.text)).toEqual([DRAFT])
+      expect(await w.submit(DRAFT)).toEqual({ text: DRAFT })
+      expect(w.submits).toHaveLength(1)
+      expect(w.completes).toHaveLength(handback === 'reply' ? 2 : 1)
+    })
+  }
+
+  for (const representation of ['placeholder', 'expanded'] as const) {
+    for (const timing of ['before', 'after'] as const) {
+      test(`a pasted ${representation} handed back ${timing} the clear timer still allows accept`, { options: { uiMode: 'composer' } }, async ($, on) => {
+        const w = setup($, on)
+        await w.start()
+        // The edit event sees the displayed placeholder, while submission
+        // expands its pasted content and the host temporarily empties the box.
+        await w.edit(PASTE_PLACEHOLDER)
+        w.setBox('')
+        expect(await w.submit(PASTE_EXPANDED)).toEqual({ drop: DROP_OPTIMIZING })
+
+        const handedBack = representation === 'placeholder' ? PASTE_PLACEHOLDER : PASTE_EXPANDED
+        if (timing === 'before') w.setBox(handedBack)
+        await w.advance(1)
+        expect(w.box()).toBe('')
+        expect(w.fills.map(fill => fill.text)).toEqual(timing === 'before' ? [''] : [])
+        if (timing === 'after') w.setBox(handedBack)
+
+        expect(w.completes[0]?.prompt).toContain('첫째 줄: 로그인 오류')
+        expect(w.completes[0]?.prompt).not.toContain('[Pasted text #1')
+        expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+        expect(w.box()).toBe(DRAFT)
+        expect(await w.submit(DRAFT)).toEqual({ text: DRAFT })
+        expect(w.submits).toHaveLength(1)
+        expect(w.completes).toHaveLength(1)
+      })
+    }
+  }
+
+  for (const timing of ['before', 'after'] as const) {
+    test(`autocomplete observes a paste without an edit event for handback ${timing} the clear timer`, { options: { uiMode: 'composer' } }, async ($, on) => {
+      const w = setup($, on)
+      const suggestions = [{ text: 'lines]', label: '기존 자동완성', description: '다른 훅의 제안' }]
+      on('prompt.autocomplete', () => ({ suggestions }))
+      await w.start()
+
+      // Large pastes can set the box directly, without a prompt.edit event.
+      // Autocomplete observes the displayed placeholder and must preserve
+      // the suggestions already supplied by another hook.
+      w.setBox(PASTE_PLACEHOLDER)
+      const start = PASTE_PLACEHOLDER.lastIndexOf(' ') + 1
+      const prompt = $.prompt as unknown as {
+        autocomplete(input: PromptAutocompleteInput): Promise<PromptAutocompleteResult>
+      }
+      expect(await prompt.autocomplete({
+        text: PASTE_PLACEHOLDER,
+        cursor: PASTE_PLACEHOLDER.length,
+        start,
+        token: PASTE_PLACEHOLDER.slice(start),
+      })).toEqual({ suggestions })
+
+      w.setBox('')
+      expect(await w.submit(PASTE_EXPANDED)).toEqual({ drop: DROP_OPTIMIZING })
+      if (timing === 'before') w.setBox(PASTE_PLACEHOLDER)
+      await w.advance(1)
+      expect(w.box()).toBe('')
+      expect(w.fills.map(fill => fill.text)).toEqual(timing === 'before' ? [''] : [])
+      if (timing === 'after') w.setBox(PASTE_PLACEHOLDER)
+
+      expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+      expect(w.box()).toBe(DRAFT)
+      expect(await w.submit(DRAFT)).toEqual({ text: DRAFT })
+      expect(w.submits).toHaveLength(1)
+      expect(w.completes).toHaveLength(1)
+    })
+  }
+
+  for (const timing of ['before', 'after'] as const) {
+    test(`a user edit ${timing} the clear timer revokes ownership of a consumed paste placeholder`, { options: { uiMode: 'composer' } }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      await w.edit(PASTE_PLACEHOLDER)
+      w.setBox('')
+      await w.submit(PASTE_EXPANDED)
+
+      // Even identical placeholder text belongs to a new draft once a real
+      // edit event produced it, rather than the host restoring the submission.
+      if (timing === 'before') await w.edit(PASTE_PLACEHOLDER)
+      await w.advance(1)
+      if (timing === 'after') await w.edit(PASTE_PLACEHOLDER)
+
+      expect(w.box()).toBe(PASTE_PLACEHOLDER)
+      expect(w.fills).toHaveLength(0)
+      expect(await w.run('accept')).toContain('새로 작성한 내용')
+      expect(w.box()).toBe(PASTE_PLACEHOLDER)
+      expect(w.fills).toHaveLength(0)
+      expect(w.completes).toHaveLength(1)
+      expect(w.submits).toHaveLength(0)
+    })
+  }
+
+  test('a subsequent submission cannot reuse the previous paste edit snapshot', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    await w.edit(PASTE_PLACEHOLDER)
+    w.setBox('')
+    await w.submit(PASTE_EXPANDED)
+    await w.advance(1)
+    // No fill or edit occurs between submissions: the first submission itself
+    // must consume the snapshot, leaving none for the following supplement.
+    expect(w.fills).toHaveLength(0)
+    expect(await w.submit('더 짧게')).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    w.setBox(PASTE_PLACEHOLDER)
+    await w.advance(1)
+
+    expect(w.box()).toBe(PASTE_PLACEHOLDER)
+    expect(w.fills).toHaveLength(0)
+    expect(await w.run('accept')).toContain('새로 작성한 내용')
+    expect(w.box()).toBe(PASTE_PLACEHOLDER)
+    expect(w.fills).toHaveLength(0)
+    expect(w.completes).toHaveLength(2)
+    expect(w.submits).toHaveLength(0)
+  })
+
+  for (const args of ['', ORIGINAL]) {
+    test(`explicit optimize clears only its source from the composer (${args === '' ? 'current draft' : 'argument'})`, { options: { uiMode: 'composer' } }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      w.setBox(ORIGINAL)
+      await w.run(args)
+      expect(w.box()).toBe(ORIGINAL)
+      await w.advance(1)
+
+      expect(w.box()).toBe('')
+      expect(w.completes).toHaveLength(1)
+      expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+      expect(w.box()).toBe(DRAFT)
+    })
+  }
+
+  for (const trigger of ['composer', 'command'] as const) {
+    test(`a new composer draft written before the scheduled ${trigger} run is preserved`, { options: { uiMode: 'composer' } }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      w.setBox(ORIGINAL)
+      if (trigger === 'composer') await w.submit(ORIGINAL)
+      else await w.run('')
+
+      const replacement = '새로 작성 중인 요청'
+      w.setBox(replacement)
+      await w.advance(1)
+      expect(w.box()).toBe(replacement)
+      expect(w.fills).toHaveLength(0)
+      expect(w.completes).toHaveLength(1)
+      expect(await w.run('accept')).toContain('새로 작성한 내용')
+      expect(w.box()).toBe(replacement)
+      expect(w.fills).toHaveLength(0)
+      expect(w.submits).toHaveLength(0)
+    })
+  }
+
+  test('a busy pane submission stays in the composer', { options: { uiMode: 'pane' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    w.setBox(ORIGINAL)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.box()).toBe('')
+
+    const unsent = '다른 요청을 작성 중'
+    w.setBox(unsent)
+    expect(await w.submit(unsent)).toEqual({ drop: '프롬프트 옵티마이저가 작업 중입니다. /optimize cancel 로 취소할 수 있습니다.' })
+    await w.advance(1)
+    expect(w.box()).toBe(unsent)
+    expect(w.fills.map(fill => fill.text)).toEqual([''])
+    expect(w.completes).toHaveLength(1)
+    expect(w.submits).toHaveLength(0)
+  })
+
+  for (const interruption of ['cancel', 'session'] as const) {
+    test(`a ${interruption} before the scheduled run prevents clearing the old source`, { options: { uiMode: 'composer' } }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      w.setBox(ORIGINAL)
+      await w.submit(ORIGINAL)
+      if (interruption === 'cancel') await w.run('cancel')
+      else {
+        await w.endSession()
+        await w.restartSession('sess-2')
+      }
+      const fillsBeforeAdvance = w.fills.length
+      await w.advance(1)
+
+      expect(w.box()).toBe(ORIGINAL)
+      expect(w.fills).toHaveLength(fillsBeforeAdvance)
+      expect(w.completes).toHaveLength(0)
+    })
+  }
+
+  for (const failure of ['refused', 'throw'] as const) {
+    test(`a ${failure} composer clear leaves the source intact and still allows accept once filling recovers`, { options: { uiMode: 'composer' } }, async ($, on) => {
+      const w = setup($, on)
+      await w.start()
+      w.setBox(ORIGINAL)
+      w.setFill(() => {
+        if (failure === 'throw') throw new Error('composer fill unavailable')
+        return { isFilled: false, refusal: 'dialog' }
+      })
+      await w.submit(ORIGINAL)
+      await w.advance(1)
+
+      expect(w.box()).toBe(ORIGINAL)
+      expect(w.fills.map(fill => fill.text)).toEqual([''])
+      expect(w.completes).toHaveLength(1)
+      expect(w.submits).toHaveLength(0)
+
+      w.setFill(null)
+      expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+      expect(w.box()).toBe(DRAFT)
+      expect(w.fills.map(fill => fill.text)).toEqual(['', DRAFT])
+      expect(await w.submit(DRAFT)).toEqual({ text: DRAFT })
+      expect(w.submits).toHaveLength(1)
+      expect(w.completes).toHaveLength(1)
+      expect(await w.submit(DRAFT)).toEqual({ drop: DROP_OPTIMIZING })
+      expect(w.submits).toHaveLength(1)
+    })
+  }
+
   for (const trigger of ['composer', 'command'] as const) {
     test(`repository evidence reaches the optimizer through ${trigger}`, { options: { uiMode: 'composer' } }, async ($, on) => {
       const w = setup($, on, { projectEvidence: true })

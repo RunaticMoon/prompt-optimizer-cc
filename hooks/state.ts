@@ -87,10 +87,15 @@ export function isStale(
   return workflow === null || workflow.id !== workflowId || workflow.generation !== generation
 }
 
+/** The configured allowance, extended only for this workflow when approved. */
+export function workflowRoundLimit(workflow: Workflow | null, configured: number): number {
+  return Math.max(configured, workflow?.roundLimit ?? 0)
+}
+
 /** Whether another completion is still allowed for the active run. */
 export function canStartRound(state: Readonly<RuntimeState>, maxRounds: number): boolean {
   const workflow = state.workflow
-  return workflow !== null && workflow.rounds < maxRounds
+  return workflow !== null && workflow.rounds < workflowRoundLimit(workflow, maxRounds)
 }
 
 /**
@@ -169,6 +174,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       // A recovery reply clears the failure that preceded it.
       delete updated.lastError
       delete updated.questionAsk
+      delete updated.limitAsk
       return { ...base, usage, workflow: updated }
     }
 
@@ -178,6 +184,25 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         || current.phase !== 'reviewing' || current.question !== event.question) return base
       if (current.questionAsk === event.status) return base
       return { ...base, workflow: { ...current, questionAsk: event.status } }
+    }
+
+    case 'limit-ask': {
+      const current = base.workflow
+      if (!current || current.id !== event.workflowId || current.rounds !== event.round) return base
+      // A dialog can close after another action changed the phase. Release its
+      // pending marker so a refused transfer can return to an actionable review.
+      const closingPending = event.status === 'closed' && current.limitAsk === 'pending'
+      if (!closingPending && current.phase !== 'reviewing' && current.phase !== 'failed') return base
+      if (current.limitAsk === event.status) return base
+      return { ...base, workflow: { ...current, limitAsk: event.status } }
+    }
+
+    case 'limit-extended': {
+      const current = base.workflow
+      if (!current || current.id !== event.workflowId || current.rounds !== event.round
+        || (current.phase !== 'reviewing' && current.phase !== 'failed')) return base
+      if (!(event.maxRounds > current.rounds && event.maxRounds > (current.roundLimit ?? 0))) return base
+      return { ...base, workflow: { ...current, roundLimit: event.maxRounds, limitAsk: 'closed' } }
     }
 
     case 'failed': {
@@ -197,6 +222,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         usage: event.usage === undefined ? current.usage : addUsage(current.usage, event.usage),
       }
       delete updated.questionAsk
+      delete updated.limitAsk
       return { ...base, usage, workflow: updated }
     }
 
@@ -232,6 +258,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
           question: null,
           options: [],
           questionAsk: undefined,
+          limitAsk: undefined,
         },
       }
     }

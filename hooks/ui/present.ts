@@ -9,7 +9,11 @@ import { progressText, tokenUsageText } from './progress'
 export const COMPOSER_GUIDE =
   '보완 내용을 입력해 Enter · /optimize accept(입력창으로) · /optimize send · /optimize raw · /optimize cancel'
 
+export const ROUND_EXTENSION_GUIDE = '/optimize more — 5회 추가 허용'
+export const ROUND_APPROVAL_PENDING = '추가 5회 승인 기다리는 중 · 선택 창에서 승인 여부를 고르세요'
+
 export function questionGuide(workflow: Workflow): string {
+  if (workflow.limitAsk === 'pending') return ROUND_APPROVAL_PENDING
   return workflow.phase === 'reviewing' && workflow.questionAsk === 'pending'
     ? '→ 선택 창에서 답을 고르세요 (Esc: 패널에서 답하기)'
     : '→ 패널에서 답을 고르세요'
@@ -110,7 +114,8 @@ export function createPresenter(): {
       }
 
       const progress = progressText(workflow)
-      ui.status(`옵티마이저 ${progress ?? phaseLabel(workflow.phase)} (${workflow.rounds}회) · ${tokenUsageText(workflow)} · ${COMPOSER_GUIDE}`)
+      const guide = workflow.limitAsk === 'pending' ? ROUND_APPROVAL_PENDING : COMPOSER_GUIDE
+      ui.status(`옵티마이저 ${progress ?? phaseLabel(workflow.phase)} (${workflow.rounds}회) · ${tokenUsageText(workflow)} · ${guide}`)
       hadStatus = true
       ui.invalidate()
 

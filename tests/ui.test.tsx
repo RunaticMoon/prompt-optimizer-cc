@@ -5,7 +5,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { OptimizerController } from '../hooks/controller'
 import { PANE_ID } from '../hooks/controller'
 import { DEFAULT_CONFIG, type RuntimeState, type Workflow } from '../hooks/contracts'
-import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, createPresenter } from '../hooks/ui/present'
+import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, ROUND_APPROVAL_PENDING, ROUND_EXTENSION_GUIDE, createPresenter, questionGuide } from '../hooks/ui/present'
 import { estimatedCompactRows, handlePaneClose, hardWrapPreview, hardWrapPreviewWithStatus, isCompactViewport, registerUi } from '../hooks/ui/register'
 import { PANE_ROWS, paneOpenArgs, type UiPorts } from '../hooks/ui/ui-ports'
 
@@ -60,6 +60,7 @@ function fakeController(current: RuntimeState, onRefine?: () => void) {
       onRefine?.()
     },
     retry: async () => { calls.push('retry') },
+    extendRounds: async () => { calls.push('extendRounds'); return { ok: true } },
     accept: async () => { calls.push('accept') },
     sendDraft: async () => { calls.push('sendDraft') },
     sendOriginal: async () => { calls.push('sendOriginal') },
@@ -1131,5 +1132,77 @@ describe('question dialog guidance', () => {
         expect(contentOf(pane)).toContain('/optimize retry')
       }
     }
+  })
+})
+
+describe('round limit approval controls', () => {
+  test('the limit button approves five more rounds and ignores pending, busy and below-limit presses', async ($, on) => {
+    const current = state({ ...workflow(), rounds: 3, question: '형식?', options: ['목록'] })
+    const { controller, calls } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const button = nodesOf(await ui.render(PANE)).find(node => node.props.key === 'optimizer:more')
+    expect(button?.props.label).toBe('5회 더 허용')
+    expect(button?.props.hotkey).toBe('4')
+    await ui.press({ component: 'Pane', requestId: PANE_ID, element: 'optimizer:more' })
+    expect(calls).toEqual(['extendRounds'])
+    for (const patch of [{ limitAsk: 'pending' as const }, { phase: 'generating' as const }, { rounds: 2 }, { roundLimit: 8 }, { question: null }, { question: '  ' }]) {
+      current.workflow = { ...workflow(), rounds: 3, question: '형식?', ...patch }
+      expect(nodesOf(await ui.render(PANE)).some(node => node.props.key === 'optimizer:more')).toBe(false)
+      await ui.press({ component: 'Pane', requestId: PANE_ID, element: 'optimizer:more' })
+    }
+    expect(calls).toEqual(['extendRounds'])
+  })
+
+  test('an approved per-workflow limit restores answers, input and focus beyond the configured cap', async ($, on) => {
+    const current = state({ ...workflow(), rounds: 3, roundLimit: 8, question: '형식?', options: ['목록'] })
+    const { controller, calls } = fakeController(current)
+    const focus: string[] = []
+    const ui = await captureUi($, on, controller, undefined, focus)
+    const pane = await ui.render(PANE)
+    expect(contentOf(pane)).toContain('3/8회')
+    expect(contentOf(await ui.render(BAND))).toContain('3/8회')
+    expect(textOf(pane)).toContain('optimizer:option:0')
+    expect(textOf(pane)).toContain('optimizer:instruction')
+    expect(textOf(pane)).not.toContain('optimizer:more')
+    await ui.press({ component: 'Pane', requestId: PANE_ID, element: 'optimizer:option:0' })
+    await ui.input({ component: 'Pane', requestId: PANE_ID, element: 'optimizer:instruction', kind: 'submit', value: '더 짧게' })
+    expect(calls).toEqual(['refine:목록', 'refine:더 짧게'])
+    expect(focus.at(-1)).toBe(`focus:${PANE_ID}:optimizer:option:0`)
+    current.workflow = { ...current.workflow!, rounds: 8 }
+    expect(textOf(await ui.render(PANE))).toContain('optimizer:more')
+    await ui.press({ component: 'Pane', requestId: PANE_ID, element: 'optimizer:option:0' })
+    await ui.input({ component: 'Pane', requestId: PANE_ID, element: 'optimizer:instruction', kind: 'submit', value: '다시' })
+    expect(calls).toHaveLength(2)
+  })
+
+  for (const omitted of [undefined, 'Button'] as const) test(`compact and full panes retain pending approval and manual recovery (${omitted ?? 'buttons'})`, async ($, on) => {
+    const current = state({ ...workflow(), rounds: 3, question: '형식?', options: ['목록'], limitAsk: 'pending' })
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller, omitted)
+    const compact = { ...PANE, viewport: { columns: 80, rows: 20, isFullscreen: true }, props: { ...PANE.props, placement: 'inline' as const } }
+    for (const event of [PANE, compact]) {
+      const pending = await ui.render(event)
+      expect(contentOf(pending)).toContain(ROUND_APPROVAL_PENDING)
+      expect(textOf(pending)).not.toContain('optimizer:more')
+      expect(textOf(pending)).not.toContain('optimizer:option:0')
+      for (const limitAsk of ['closed', 'declined'] as const) {
+        current.workflow = { ...current.workflow!, limitAsk }
+        const recoverable = await ui.render(event)
+        expect(contentOf(recoverable)).toContain(ROUND_EXTENSION_GUIDE)
+        if (!omitted) expect(textOf(recoverable)).toContain('optimizer:more')
+      }
+      current.workflow = { ...current.workflow!, limitAsk: 'pending' }
+    }
+  })
+
+  test('composer bands and the question guide explain approval before accepting more answers', async ($, on) => {
+    const current = state({ ...workflow(), ui: 'composer', rounds: 3, question: '형식?', options: ['목록'], limitAsk: 'pending' })
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const band = { ...BAND, props: { ...BAND.props, bodyColumns: 120 } }
+    expect(contentOf(await ui.render(band))).toContain(ROUND_APPROVAL_PENDING)
+    expect(questionGuide(current.workflow!)).toBe(ROUND_APPROVAL_PENDING)
+    current.workflow = { ...current.workflow!, limitAsk: 'closed' }
+    expect(contentOf(await ui.render(band))).toContain(ROUND_EXTENSION_GUIDE)
   })
 })

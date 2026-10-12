@@ -5,7 +5,8 @@ import type { EngineInterface, On, RenderViewport } from 'claude-code'
 import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
-import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, UI_COLORS, phaseColor, phaseLabel, questionGuide } from './present'
+import { workflowRoundLimit } from '../state'
+import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, ROUND_APPROVAL_PENDING, ROUND_EXTENSION_GUIDE, UI_COLORS, phaseColor, phaseLabel, questionGuide } from './present'
 import { progressText, tokenUsageText } from './progress'
 import { PANE_ROWS } from './ui-ports'
 
@@ -38,6 +39,7 @@ const KEYS = {
   accept: 'optimizer:accept',
   send: 'optimizer:send',
   raw: 'optimizer:raw',
+  more: 'optimizer:more',
 } as const
 
 /** Keep `$` at the hook registration site; helpers receive only method closures. */
@@ -231,7 +233,7 @@ async function refineAndFocus(
   await controller.refine(ports, instruction)
   const updated = controller.getState().workflow
   if (updated?.ui !== 'pane' || !canAct(updated)) return
-  const key = updated.question && updated.rounds < maxRounds
+  const key = updated.question && updated.rounds < workflowRoundLimit(updated, maxRounds)
     ? replyOptions(updated).length ? optionKey(0) : KEYS.instruction
     : updated.draft.trim() ? KEYS.accept : undefined
   if (!key) return
@@ -311,19 +313,23 @@ export function registerUi(
     const progress = progressText(workflow)
     const composer = workflow.ui === 'composer' || paneClosed
     const options = replyOptions(workflow)
+    const maxRounds = workflowRoundLimit(workflow, getMaxRounds())
+    const atLimit = canAct(workflow) && workflow.rounds >= maxRounds && Boolean(workflow.question?.trim())
+    const limitGuide = workflow.limitAsk === 'pending' ? ROUND_APPROVAL_PENDING : ROUND_EXTENSION_GUIDE
     // Give each section a visible row before expanding any body. Reserve the
     // overflow hint inside the same host/half-screen cap, independent of scroll.
     const sections: { lines: string[]; color: typeof UI_COLORS[keyof typeof UI_COLORS]; bold?: true; priority: number }[] = []
     const add = (value: string, color: typeof UI_COLORS[keyof typeof UI_COLORS], priority: number, bold?: true) => {
       if (value) sections.push({ lines: bandLines(value, columns), color, priority, bold })
     }
+    if (atLimit) add(limitGuide, UI_COLORS.progress, 0)
     add(latestOptimizerMessage(workflow), UI_COLORS.text, 4)
     add(workflow.question ? `질문: ${workflow.question}` : '', UI_COLORS.heading, 1, true)
     if (options.length) {
       if (composer) {
         if (workflow.questionAsk === 'pending' && !isBusy(workflow.phase)) add(questionGuide(workflow), UI_COLORS.heading, 2)
         options.forEach((option, index) => add(`${index + 1}. ${option}`, UI_COLORS.heading, 2))
-      } else add(isBusy(workflow.phase) ? '선택지 답변을 처리 중입니다…' : questionGuide(workflow), UI_COLORS.heading, 2)
+      } else if (!atLimit) add(isBusy(workflow.phase) ? '선택지 답변을 처리 중입니다…' : questionGuide(workflow), UI_COLORS.heading, 2)
     }
     add(workflow.lastError ? errorSummary(workflow.lastError) : '', UI_COLORS.error, 0)
     // Composer (or a surviving workflow after pane close) has no draft panel.
@@ -356,14 +362,14 @@ export function registerUi(
         <Text bold color={UI_COLORS.heading} wrap="truncate-end">
           {progress && <Text color={UI_COLORS.progress}>{`${progress} · `}</Text>}
           옵티마이저 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
-          <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${getMaxRounds()}회  ${tokenUsageText(workflow)}`}</Text>
+          <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${maxRounds}회  ${tokenUsageText(workflow)}`}</Text>
         </Text>
         {sections.flatMap((section, index) => section.lines.slice(0, counts[index]).map((line, row) =>
           <Text key={`band:${index}:${row}`} color={section.color} bold={section.bold} wrap="truncate-end">
             {row === counts[index]! - 1 && counts[index]! < section.lines.length ? ellipsizeLine(line, columns) : line}
           </Text>))}
         {overflow && bandRows > 1 && <Text color={UI_COLORS.section} wrap="truncate-end">
-          {`… ${omitted}줄 더 · ${composer ? '/optimize accept · retry <답변>' : '패널에서 확인'}`}
+          {`… ${omitted}줄 더 · ${atLimit ? limitGuide : composer ? '/optimize accept · retry <답변>' : '패널에서 확인'}`}
         </Text>}
       </Box>
     )
@@ -387,8 +393,10 @@ export function registerUi(
     if (!workflow) return <Text color={UI_COLORS.unavailable}>진행 중인 개선 작업이 없습니다</Text>
     if (workflow.ui === 'composer') return <Text color={UI_COLORS.section}>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
 
-    const maxRounds = getMaxRounds()
+    const maxRounds = workflowRoundLimit(workflow, getMaxRounds())
     const busy = isBusy(workflow.phase)
+    const atLimit = !busy && workflow.rounds >= maxRounds && Boolean(workflow.question?.trim())
+    const limitGuide = workflow.limitAsk === 'pending' ? ROUND_APPROVAL_PENDING : ROUND_EXTENSION_GUIDE
     const draftReady = Boolean(workflow.draft.trim()) && !busy
     const retryReady = !busy && workflow.rounds < maxRounds
     const options = replyOptions(workflow)
@@ -400,6 +408,7 @@ export function registerUi(
     const originalToggleLabel = showOriginal ? '원문 접기' : '원문 전체 보기'
     const progress = progressText(workflow)
     const progressRow = progress && <Text color={UI_COLORS.progress} wrap="truncate-end">{progress}</Text>
+    const limitRow = atLimit && <Text color={UI_COLORS.progress} wrap="wrap">{limitGuide}</Text>
     const header = <Text bold color={UI_COLORS.heading} wrap="truncate-end">
       프롬프트 옵티마이저 <Text color={phaseColor(workflow.phase)}>{`[${phaseLabel(workflow.phase)}]`}</Text>
       <Text color={UI_COLORS.text}>{`  ${workflow.rounds}/${maxRounds}회  ${tokenUsageText(workflow)}`}</Text>
@@ -425,6 +434,7 @@ export function registerUi(
         <Text color={color} bold={bold} wrap="truncate-end">{hardWrapPreview(value, columns, 1)[0]}</Text>
       const rows = [
         ...(progress ? [textRow(progress, UI_COLORS.progress)] : []),
+        ...(atLimit ? [textRow(limitGuide, UI_COLORS.progress)] : []),
         textRow(`개선안 · ${draftText}`, draftColor, true),
         ...(workflow.question ? [textRow(`질문: ${workflow.question}`, UI_COLORS.heading, true)] : []),
         ...(waiting && options.length ? [textRow(questionGuide(workflow), UI_COLORS.heading)] : []),
@@ -436,7 +446,7 @@ export function registerUi(
       return <Box flexDirection="column" paddingX={1}>
         {rows.slice(0, budget)}
         <Box flexDirection="column">
-          {rows.slice(budget)}{header}{question}{optionsText}{draft}{messageSection}
+          {rows.slice(budget)}{header}{limitRow}{question}{optionsText}{draft}{messageSection}
           <Text color={UI_COLORS.section} wrap="wrap">직접 입력: /optimize retry &lt;선택지 답변 또는 보완 내용&gt;</Text>
           <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · send · raw · cancel · retry <보완>'}</Text>
           <Text bold color={UI_COLORS.original}>원문</Text>
@@ -447,7 +457,7 @@ export function registerUi(
     }
 
     if (typeof Button !== 'function') return <Box flexDirection="column" paddingX={1}>
-      {header}{progressRow}{question}{optionsText}{draft}
+      {header}{progressRow}{limitRow}{question}{optionsText}{draft}
       {messageSection}
       <Text bold color={UI_COLORS.original}>원문</Text>
       <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
@@ -466,7 +476,11 @@ export function registerUi(
       return <Button key={optionKey(index)} hotkey={OPTION_HOTKEYS[index]} label={`${OPTION_HOTKEYS[index]}: ${label}`}
         variant={index === 0 ? 'primary' : undefined} autoFocus={waiting && index === 0 ? true : undefined} onPress={() => undefined} />
     })
-    const instruction = (compact: boolean) => retryReady
+    const instruction = (compact: boolean) => atLimit
+      ? workflow.limitAsk === 'pending'
+        ? <Text color={UI_COLORS.progress} wrap={compact ? 'truncate-end' : 'wrap'}>{ROUND_APPROVAL_PENDING}</Text>
+        : <Button key={KEYS.more} hotkey="4" label="5회 더 허용" onPress={() => undefined} />
+      : retryReady
       ? typeof Input === 'function'
         ? <Input key={KEYS.instruction} label={compact ? (workflow.question ? '직접 입력' : '보완') : (workflow.question ? '직접 입력' : '보완 내용')}
             placeholder={compact ? '보완 내용' : '선택지 답변 또는 수정할 내용을 입력하세요'}
@@ -525,6 +539,7 @@ export function registerUi(
           {first.slice(budget)}
           {!actionsFit && <Box flexDirection="row" gap={1}>{acceptAction(true)}{sendActions(true)}</Box>}
           {header}
+          {limitRow}
           <Text color={UI_COLORS.section} wrap="truncate-end">Tab 이동 · 아래로 스크롤하여 전문 확인 · Esc 닫기</Text>
           {question}{optionsText}
           <Text bold color={UI_COLORS.draft}>개선안 전문</Text>
@@ -548,6 +563,7 @@ export function registerUi(
       {retryReady && options.length > 0 && <Box flexDirection="column">{optionButtons(false)}</Box>}
       {draft}
       {instruction(false)}{acceptAction(false)}{sendActions(false)}
+      {atLimit && workflow.limitAsk !== 'pending' && limitRow}
       {!bandDrawn && messageSection}
       {originalSection}
       {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
@@ -573,7 +589,7 @@ export function registerUi(
       const value = e.element.slice('optimizer:option:'.length)
       const index = /^[0-3]$/.test(value) ? Number(value) : -1
       const option = replyOptions(workflow)[index]
-      if (option && workflow.rounds < getMaxRounds()) await refineAndFocus(controller, portsOf($), option, getMaxRounds(),
+      if (option && workflow.rounds < workflowRoundLimit(workflow, getMaxRounds())) await refineAndFocus(controller, portsOf($), option, getMaxRounds(),
         () => $.ui.invalidate('ui.render'), key => $.ui.focus({ requestId: PANE_ID, key }))
       return { element: e.element }
     }
@@ -582,6 +598,11 @@ export function registerUi(
     if (e.element === KEYS.accept && workflow.draft.trim()) await controller.accept(ports)
     else if (e.element === KEYS.send && workflow.draft.trim()) await controller.sendDraft(ports)
     else if (e.element === KEYS.raw) await controller.sendOriginal(ports)
+    else if (e.element === KEYS.more) {
+      if (workflow.rounds >= workflowRoundLimit(workflow, getMaxRounds()) && workflow.question?.trim() && workflow.limitAsk !== 'pending') {
+        await controller.extendRounds(ports)
+      }
+    }
     else return next(e)
     return { element: e.element }
   })
@@ -590,7 +611,7 @@ export function registerUi(
     if (e.component !== 'Pane' || e.requestId !== PANE_ID || e.kind !== 'submit') return next(e)
     const workflow = controller.getState().workflow
     const instruction = e.value.trim()
-    if (canAct(workflow) && workflow.ui === 'pane' && workflow.rounds < getMaxRounds() && instruction) {
+    if (canAct(workflow) && workflow.ui === 'pane' && workflow.rounds < workflowRoundLimit(workflow, getMaxRounds()) && instruction) {
       await refineAndFocus(controller, portsOf($), instruction, getMaxRounds(),
         () => $.ui.invalidate('ui.render'), key => $.ui.focus({ requestId: PANE_ID, key }))
     }

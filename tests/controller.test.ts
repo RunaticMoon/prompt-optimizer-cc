@@ -72,7 +72,7 @@ interface HarnessOptions {
   config?: Partial<OptimizerConfig>
   /** Overrides for individual dependencies (e.g. a throwing `getConfig`). */
   deps?: Partial<ControllerDeps>
-  /** Box texts returned by successive `prompt.read()` calls; '' when absent. */
+  /** A live box, or texts returned by successive reads; '' when absent. */
   box?: string | readonly string[]
   messages?: readonly SessionMessage[]
   files?: Readonly<Record<string, string>>
@@ -173,12 +173,8 @@ function harness(options: HarnessOptions = {}): Harness {
   const completes: ModelCompleteRequest[] = []
   const signals: Array<AbortSignal | undefined> = []
   const flags = { throwOnRepaint: false }
-  const boxes: string[] =
-    options.box === undefined
-      ? []
-      : typeof options.box === 'string'
-        ? [options.box]
-        : [...options.box]
+  let box = typeof options.box === 'string' ? options.box : ''
+  const boxes = Array.isArray(options.box) ? [...options.box] : null
   const files = options.files ?? {}
 
   const deps: ControllerDeps = {
@@ -273,14 +269,15 @@ function harness(options: HarnessOptions = {}): Harness {
     prompt: {
       read: async (): Promise<{ text: string; cursor: number }> => {
         calls.promptRead += 1
-        const text = boxes.shift() ?? ''
+        const text = boxes === null ? box : boxes.shift() ?? ''
         return { text, cursor: text.length }
       },
       fill: async (input: PromptFillArgs): Promise<PromptFilled> => {
         calls.fill += 1
         fills.push(input)
         if (options.fill !== undefined) return options.fill(input)
-        return { isFilled: true, text: input.text, cursor: input.text.length }
+        box = input.mode === 'append' || input.mode === 'insert' ? box + input.text : input.text
+        return { isFilled: true, text: box, cursor: box.length }
       },
       submit: async (input: PromptSubmitArgs): Promise<PromptSubmitResult> => {
         calls.submit += 1
@@ -648,6 +645,51 @@ describe('onSubmit — intercepts one submission', () => {
     expect(h.controller.getState().workflow).toBeNull()
   })
 
+  test('continues improvement when the consumed composer cannot be read', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    h.ports.prompt.read = async () => { throw new Error('composer unavailable') }
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.fill).toBe(0)
+    expect(h.calls.complete).toBe(1)
+    expect(h.controller.getState().workflow?.draft).toBe('개선된 요청')
+  })
+
+  for (const interruption of ['cancel', 'session'] as const) {
+    test(`a ${interruption} while reading the consumed composer prevents a late clear`, async () => {
+      const h = harness({ box: '원문' })
+      h.controller.onSessionStart('sess-1')
+      const read = h.ports.prompt.read
+      let reading = false
+      let finishRead: (box: { text: string; cursor: number }) => void = () => undefined
+      const pendingRead = new Promise<{ text: string; cursor: number }>(resolve => { finishRead = resolve })
+      h.ports.prompt.read = async () => {
+        if (reading) return read()
+        reading = true
+        return pendingRead
+      }
+
+      await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+      const pending = h.flush()
+      await h.waitFor(() => reading)
+      if (interruption === 'cancel') await h.controller.cancel(h.ports)
+      else {
+        h.controller.onSessionEnd()
+        h.controller.onSessionStart('sess-2')
+      }
+      const fillsBefore = h.fills.length
+      finishRead({ text: '원문', cursor: 2 })
+      await pending
+
+      expect(h.fills).toHaveLength(fillsBefore)
+      expect(h.calls.complete).toBe(0)
+      expect(h.controller.getState().workflow).toBeNull()
+    })
+  }
+
   test('sends an armed raw submission as typed and clears the mode', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
@@ -895,7 +937,7 @@ describe('refine — the improvement dialogue', () => {
     expect(h.calls.fork).toBe(0)
   })
 
-  test('keeps a last-round question as an open decision without inviting an unusable answer', async () => {
+  test('keeps a last-round question as an open decision until more rounds are approved', async () => {
     const h = harness({
       config: { maxRounds: 1 },
       complete: async () => answered('노드 image diff API를 추가해주세요.', '초안 작성', '비교 기준은 무엇인가요?'),
@@ -906,10 +948,12 @@ describe('refine — the improvement dialogue', () => {
 
     expect(h.completes[0]?.prompt).toContain('remaining: 0')
     expect(h.controller.getState().workflow?.draft).toContain('미확정 사항 (구현 전 확인):\n비교 기준은 무엇인가요?')
-    expect(h.notices).not.toContain('질문: 비교 기준은 무엇인가요?')
+    expect(h.controller.getState().workflow?.question).toBe('비교 기준은 무엇인가요?')
     await h.controller.refine(h.ports, '직전 이력')
+    await h.controller.retry(h.ports, '배포 기준')
     expect(h.calls.complete).toBe(1)
     expect(h.calls.submit).toBe(0)
+    expect(h.controller.getState().workflow?.question).toBe('비교 기준은 무엇인가요?')
   })
 
   test('notifies a question with its choice count', async () => {
@@ -924,7 +968,7 @@ describe('refine — the improvement dialogue', () => {
     expect(h.controller.getState().workflow?.options).toEqual(['1번', '2번'])
   })
 
-  test('folds a last-round question together with its choices', async () => {
+  test('folds a last-round question into the draft while keeping its choices for an approved extension', async () => {
     const h = harness({
       config: { maxRounds: 1 },
       complete: async () => answered('초안 요청', '초안 작성', '어느 쪽인가요?', ['1번', '2번']),
@@ -935,8 +979,8 @@ describe('refine — the improvement dialogue', () => {
 
     const workflow = h.controller.getState().workflow
     expect(workflow?.draft).toContain('미확정 사항 (구현 전 확인):\n어느 쪽인가요?\n- 선택지: 1번 / 2번')
-    expect(workflow?.question).toBeNull()
-    expect(workflow?.options).toEqual([])
+    expect(workflow?.question).toBe('어느 쪽인가요?')
+    expect(workflow?.options).toEqual(['1번', '2번'])
   })
 
   test('collects context once and completes once per round, keeping the transcript intact', async () => {
@@ -1944,6 +1988,272 @@ async function startQuestion(h: Harness, ui: 'pane' | 'composer' = 'pane') {
   await h.flush()
 }
 
+describe('round extensions — explicit approval and workflow isolation', () => {
+  test('the default fifth round asks for approval before preserving and asking its unresolved question', async () => {
+    const approval = questionDialog()
+    const followup = questionDialog()
+    const config = { ...DEFAULT_CONFIG }
+    const h = harness({
+      deps: { getConfig: () => config },
+      ui: { ask: (q, o) => (o && 'header' in o && o.header === '라운드 연장' ? approval : followup).ask(q, o) },
+      complete: async (_r, _s, n) => n === 5 ? questionReply() : answered(`개선안 ${n}`),
+    })
+    await startQuestion(h)
+    for (let n = 2; n <= 5; n += 1) await h.controller.refine(h.ports, `보완 ${n}`)
+
+    const before = h.controller.getState().workflow!
+    expect(before.rounds).toBe(5)
+    expect(before.limitAsk).toBe('pending')
+    expect(before.question).toBe(ASK_QUESTION)
+    expect(before.options).toEqual(ASK_OPTIONS)
+    expect(approval.calls).toHaveLength(1)
+    expect(approval.calls[0]?.question).toContain('5회')
+    expect(approval.calls[0]?.options).toEqual({ options: ['추가 5회 허용', '현재 개선안 유지'], header: '라운드 연장' })
+    expect(followup.calls).toHaveLength(0)
+
+    await h.controller.refine(h.ports, '승인 전 보완')
+    await h.controller.retry(h.ports, '승인 전 재시도')
+    expect((await h.controller.extendRounds(h.ports)).ok).toBe(false)
+    expect(h.calls.complete).toBe(5)
+    expect(h.controller.getState().workflow?.question).toBe(ASK_QUESTION)
+    expect(h.controller.getState().workflow?.dialogue).toEqual(before.dialogue)
+    expect(approval.calls).toHaveLength(1)
+
+    approval.resolve('추가 5회 허용')
+    await h.waitFor(() => h.controller.getState().workflow?.roundLimit === 10 && followup.calls.length === 1)
+    expect(config.maxRounds).toBe(5)
+    expect(h.calls.complete).toBe(5)
+    expect(followup.calls).toEqual([{ question: ASK_QUESTION, options: { options: ASK_OPTIONS, header: '보완 질문' } }])
+    followup.resolve('개발팀')
+    await h.waitFor(() => h.controller.getState().workflow?.rounds === 6)
+    expect(h.calls.complete).toBe(6)
+    expect(requestText(h.completes[5]?.prompt)).toContain('remaining: 4')
+    expect(h.controller.getState().workflow?.dialogue.some(m => m.role === 'user' && m.text === '추가 5회 허용')).toBe(false)
+  })
+
+  test('approving an open question keeps it visible until a user supplies a refinement', async () => {
+    const approval = questionDialog()
+    const h = harness({
+      config: { maxRounds: 1 },
+      ui: { ask: approval.ask },
+      complete: async (_r, _s, n) => n === 1 ? answered('개선안', '', ASK_QUESTION, []) : answered('최종안'),
+    })
+    await startQuestion(h, 'composer')
+    approval.resolve('추가 5회 허용')
+    await h.waitFor(() => h.controller.getState().workflow?.roundLimit === 6)
+    expect(approval.calls).toHaveLength(1)
+    expect(h.calls.complete).toBe(1)
+    expect(h.controller.getState().workflow?.question).toBe(ASK_QUESTION)
+    await h.controller.refine(h.ports, '개발팀')
+    expect(h.calls.complete).toBe(2)
+    expect(requestText(h.completes[1]?.prompt)).toContain(ASK_QUESTION)
+  })
+
+  for (const disposition of ['decline', 'escape', 'throw'] as const) {
+    test(`${disposition} preserves the draft and question at the limit, while a later explicit approval can extend`, async () => {
+      const approval = questionDialog()
+      const followup = questionDialog()
+      const h = harness({
+        config: { maxRounds: 1 },
+        ui: { ask: (q, o) => {
+          if (!o || !('header' in o) || o.header !== '라운드 연장') return followup.ask(q, o)
+          if (disposition === 'throw') throw new Error('dialog unavailable')
+          return approval.ask(q, o)
+        } },
+        complete: async () => questionReply(),
+      })
+      await startQuestion(h)
+      const before = h.controller.getState().workflow!
+      if (disposition === 'decline') approval.resolve('현재 개선안 유지')
+      if (disposition === 'escape') approval.reject(new Error('Esc'))
+      await h.waitFor(() => h.controller.getState().workflow?.limitAsk === (disposition === 'decline' ? 'declined' : 'closed'))
+
+      await h.controller.refine(h.ports, '승인 없이 계속')
+      await h.controller.retry(h.ports, '승인 없이 재시도')
+      const current = h.controller.getState().workflow!
+      expect(Math.max(1, current.roundLimit ?? 0)).toBe(1)
+      expect(current.original).toBe(before.original)
+      expect(current.draft).toBe(before.draft)
+      expect(current.question).toBe(ASK_QUESTION)
+      expect(current.options).toEqual(ASK_OPTIONS)
+      expect(current.dialogue).toEqual(before.dialogue)
+      expect(h.calls.complete).toBe(1)
+      expect(approval.calls).toHaveLength(disposition === 'throw' ? 0 : 1)
+
+      expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+      expect(h.controller.getState().workflow?.roundLimit).toBe(6)
+      expect(h.calls.complete).toBe(1)
+      expect(followup.calls).toHaveLength(1)
+    })
+  }
+
+  test('clears a stale extension dialog after the configured limit changes and it is dismissed', async () => {
+    const approval = questionDialog()
+    const config = { ...DEFAULT_CONFIG, maxRounds: 1 }
+    const h = harness({
+      deps: { getConfig: () => config },
+      ui: { ask: approval.ask },
+      complete: async () => answered('개선안', '', ASK_QUESTION, []),
+    })
+    await startQuestion(h)
+    expect(h.controller.getState().workflow?.limitAsk).toBe('pending')
+    const draft = h.controller.getState().workflow?.draft
+
+    config.maxRounds = 2
+    approval.reject(new Error('Esc after configuration changed'))
+    await h.waitFor(() => h.controller.getState().workflow?.limitAsk === 'closed')
+    config.maxRounds = 1
+
+    expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow?.roundLimit).toBe(6)
+    expect(h.controller.getState().workflow?.draft).toBe(draft)
+    expect(h.controller.getState().workflow?.question).toBe(ASK_QUESTION)
+    expect(config.maxRounds).toBe(1)
+    expect(approval.calls).toHaveLength(1)
+    expect(h.calls.complete).toBe(1)
+  })
+
+  test('clears a stale extension dialog dismissed during an accept whose pending fill is refused', async () => {
+    const approval = questionDialog()
+    const pendingFill = deferred<PromptFilled>()
+    const h = harness({
+      config: { maxRounds: 1 },
+      ui: { ask: approval.ask },
+      complete: async () => answered('개선안', '', ASK_QUESTION, []),
+      fill: () => pendingFill.promise,
+    })
+    await startQuestion(h)
+    const before = h.controller.getState().workflow!
+    expect(before.limitAsk).toBe('pending')
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    expect(h.controller.getState().workflow?.phase).toBe('transferring')
+    approval.reject(new Error('dialog dismissed while accepting'))
+    await h.waitFor(() => h.controller.getState().workflow?.limitAsk === 'closed')
+    expect(h.controller.getState().workflow?.phase).toBe('transferring')
+
+    pendingFill.resolve({ text: '', cursor: 0, isFilled: false, refusal: 'dialog' })
+    expect((await accepting).ok).toBe(false)
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+    expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow?.roundLimit).toBe(6)
+    expect(h.controller.getState().workflow?.original).toBe(before.original)
+    expect(h.controller.getState().workflow?.draft).toBe(before.draft)
+    expect(h.controller.getState().workflow?.question).toBe(ASK_QUESTION)
+    expect(approval.calls).toHaveLength(1)
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.submit).toBe(0)
+  })
+
+  for (const action of ['cancel', 'session', 'replacement', 'accept', 'newer-round'] as const) {
+    test(`ignores a late extension approval after ${action}`, async () => {
+      const approval = questionDialog()
+      const currentDialog = questionDialog()
+      const debug: string[] = []
+      const config = { ...DEFAULT_CONFIG, maxRounds: 1 }
+      let asks = 0
+      const h = harness({
+        deps: { getConfig: () => config },
+        ui: {
+          ask: (q, o) => (++asks === 1 ? approval : currentDialog).ask(q, o),
+          log: text => { debug.push(text) },
+        },
+        complete: async () => answered('개선안', '', ASK_QUESTION, []),
+      })
+      await startQuestion(h)
+      if (action === 'cancel' || action === 'replacement') await h.controller.cancel(h.ports)
+      if (action === 'session') h.controller.onSessionStart('next-session')
+      if (action === 'replacement') {
+        await h.controller.startExplicit(h.ports, '대체 요청', 'pane')
+        await h.flush()
+      }
+      if (action === 'accept') expect((await h.controller.accept(h.ports)).ok).toBe(true)
+      if (action === 'newer-round') {
+        config.maxRounds = 2
+        await h.controller.retry(h.ports)
+        expect(h.controller.getState().workflow?.rounds).toBe(2)
+      }
+      const completeBefore = h.calls.complete
+      const roundLimitBefore = h.controller.getState().workflow?.roundLimit
+      approval.resolve('추가 5회 허용')
+      await h.waitFor(() => debug.some(line => line.includes('ignored a stale round-extension answer')))
+
+      expect(h.calls.complete).toBe(completeBefore)
+      expect(h.controller.getState().workflow?.roundLimit).toBe(roundLimitBefore)
+      expect(config.maxRounds).toBe(action === 'newer-round' ? 2 : 1)
+    })
+  }
+
+  test('reaching an approved limit asks again and blocks the next completion until another approval', async () => {
+    const first = questionDialog()
+    const second = questionDialog()
+    let asks = 0
+    const h = harness({
+      config: { maxRounds: 1 },
+      ui: { ask: (q, o) => (++asks === 1 ? first : second).ask(q, o) },
+      complete: async () => answered('개선안', '', ASK_QUESTION, []),
+    })
+    await startQuestion(h)
+    first.resolve('추가 5회 허용')
+    await h.waitFor(() => h.controller.getState().workflow?.roundLimit === 6)
+    for (let n = 2; n <= 6; n += 1) await h.controller.refine(h.ports, `보완 ${n}`)
+    expect(h.calls.complete).toBe(6)
+    expect(second.calls).toHaveLength(1)
+    expect(h.controller.getState().workflow?.limitAsk).toBe('pending')
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(6)
+
+    second.resolve('추가 5회 허용')
+    await h.waitFor(() => h.controller.getState().workflow?.roundLimit === 11)
+    expect(h.calls.complete).toBe(6)
+    await h.controller.refine(h.ports, '일곱 번째 보완')
+    expect(h.calls.complete).toBe(7)
+  })
+
+  test('an explicit extension works without dialogs, stays local, and does not carry into a new workflow', async () => {
+    const config = { ...DEFAULT_CONFIG, maxRounds: 1 }
+    const h = harness({
+      deps: { getConfig: () => config },
+      complete: async () => answered('개선안', '', ASK_QUESTION, []),
+    })
+    await startQuestion(h)
+    expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow?.roundLimit).toBe(6)
+    expect(config.maxRounds).toBe(1)
+    expect(h.calls.complete).toBe(1)
+    // The current run is no longer at its limit; duplicate approval adds none.
+    expect((await h.controller.extendRounds(h.ports)).ok).toBe(false)
+    expect(h.controller.getState().workflow?.roundLimit).toBe(6)
+
+    await h.controller.cancel(h.ports)
+    await h.controller.startExplicit(h.ports, '새 요청', 'composer')
+    await h.flush()
+    expect(h.controller.getState().workflow?.original).toBe('새 요청')
+    expect(Math.max(config.maxRounds, h.controller.getState().workflow?.roundLimit ?? 0)).toBe(1)
+    await h.controller.refine(h.ports, '추가 승인 없는 보완')
+    expect(h.calls.complete).toBe(2)
+    expect(config.maxRounds).toBe(1)
+  })
+
+  test('an extension adds five to the effective current limit when configuration grows', async () => {
+    const config = { ...DEFAULT_CONFIG, maxRounds: 1 }
+    const h = harness({
+      deps: { getConfig: () => config },
+      complete: async () => answered('개선안', '', ASK_QUESTION, []),
+    })
+    await startQuestion(h)
+    await h.controller.extendRounds(h.ports)
+    config.maxRounds = 8
+    for (let n = 2; n <= 8; n += 1) await h.controller.refine(h.ports, `보완 ${n}`)
+    expect(h.calls.complete).toBe(8)
+    expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow?.roundLimit).toBe(13)
+    expect(config.maxRounds).toBe(8)
+    expect(h.calls.complete).toBe(8)
+  })
+})
+
 describe('ui.ask — detached questions and pane fallback', () => {
   for (const transition of ['start', 'end'] as const) {
     test(`session ${transition} releases an unsettled ask and ignores its late answer`, async () => {
@@ -2003,10 +2313,10 @@ describe('ui.ask — detached questions and pane fallback', () => {
     })
   }
 
-  test('does not ask without a question or at the round limit', async () => {
+  test('does not ask without a question, including at the round limit', async () => {
     for (const maxRounds of [1, 5]) {
       const dialog = questionDialog()
-      const h = harness({ config: { maxRounds }, ui: { ask: dialog.ask }, complete: async () => answered('개선안', '', maxRounds === 1 ? ASK_QUESTION : null, ASK_OPTIONS) })
+      const h = harness({ config: { maxRounds }, ui: { ask: dialog.ask }, complete: async () => answered('개선안', '', null, ASK_OPTIONS) })
       await startQuestion(h)
       expect(dialog.calls).toHaveLength(0)
     }
@@ -2035,10 +2345,15 @@ describe('ui.ask — detached questions and pane fallback', () => {
   })
 
   for (const action of ['cancel', 'replacement', 'retry', 'pane', 'session', 'accept', 'question-change'] as const) {
-    test(`ignores a late answer after ${action} and never queues another dialog`, async () => {
+    test(`ignores a late answer after ${action} without applying it to the current question`, async () => {
       const dialog = questionDialog()
+      const currentDialog = questionDialog()
       const debug: string[] = []
-      const h = harness({ ui: { ask: dialog.ask, log: text => { debug.push(text) } }, complete: async () => questionReply() })
+      let asks = 0
+      const h = harness({ ui: {
+        ask: (q, o) => (++asks === 1 ? dialog : currentDialog).ask(q, o),
+        log: text => { debug.push(text) },
+      }, complete: async () => questionReply() })
       await startQuestion(h)
       if (action === 'cancel' || action === 'replacement') await h.controller.cancel(h.ports)
       if (action === 'replacement') {

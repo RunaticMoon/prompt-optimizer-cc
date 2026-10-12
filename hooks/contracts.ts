@@ -92,6 +92,10 @@ export interface Workflow {
   dialogue: OptimizerMessage[]
   /** Completions spent on this workflow so far. */
   rounds: number
+  /** Absolute round ceiling approved for this workflow; the configured limit still applies. */
+  roundLimit?: number
+  /** Approval dialog for extending this workflow's round limit. */
+  limitAsk?: 'pending' | 'closed' | 'declined'
   /** Which interface the run is using. */
   ui: 'pane' | 'composer'
   /** Tokens spent on this workflow's completions. */
@@ -307,6 +311,8 @@ export type OptimizerEvent =
       usage: ModelUsage
     }
   | { type: 'failed'; workflowId: string; generation: number; error: string; usage?: ModelUsage }
+  | { type: 'limit-ask'; workflowId: string; round: number; status: 'pending' | 'closed' | 'declined' }
+  | { type: 'limit-extended'; workflowId: string; round: number; maxRounds: number }
   | { type: 'usage'; workflowId: string; generation: number; usage: ModelUsage }
   | { type: 'cancel'; workflowId: string }
   | { type: 'dismiss'; workflowId: string }
