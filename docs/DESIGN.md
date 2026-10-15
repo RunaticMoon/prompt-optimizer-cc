@@ -6,7 +6,7 @@
 
 > 설계 에이전트(📐 A) 산출물 원문. 실험 파일은 /tmp/popt-f94f-mod-probe, /tmp/popt-f94f-runtime (저장소 외부).
 
-> 참고(2026-10-07): 2.1.290의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·classic `SessionStart`/`UserPromptSubmit`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니므로, 실패하면 그 훅만 건너뛰고 나머지 훅과 코어가 그대로 진행(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다. 2.1.292는 `$.model.complete`의 `prompt`/`system`이 텍스트 블록 배열(`ModelTextBlock`, `cache: true`)도 받는 프롬프트 캐시를 추가했고, 이 플러그인은 최소 지원 버전을 2.1.292로 두고 2.1.292 이상에서 이 블록 형태로 요청한다(버전을 확인할 수 없거나 2.1.292 미만이면 기존 string 요청, `hooks/engine-version.ts`). 매니페스트에 최소 버전 필드가 없어 강제할 수는 없다.
+> 참고(2026-10-07): 2.1.290의 `claude plugin validate`는 gating site 훅의 `.catch` 유무를 나열한다(`--json`의 `gatingHooks`). 이 플러그인의 `prompt.submit`·`config.set`·`ui.close`·`command.run`에는 `.catch`가 없다. 이 훅들은 가드가 아니므로, 실패하면 그 훅만 건너뛰고 나머지 훅과 코어가 그대로 진행(fail-open)하는 것이 의도이므로 `.catch`를 추가하지 않는다. 같은 버전에서 `ThemeKey`/`Color` 타입이 추가되었고, UI 색은 테마 키를 쓴다. 2.1.292는 `$.model.complete`의 `prompt`/`system`이 텍스트 블록 배열(`ModelTextBlock`, `cache: true`)도 받는 프롬프트 캐시를 추가했고, 이 플러그인은 최소 지원 버전을 2.1.292로 두고 2.1.292 이상에서 이 블록 형태로 요청한다(버전을 확인할 수 없거나 2.1.292 미만이면 기존 string 요청, `hooks/engine-version.ts`). 매니페스트에 최소 버전 필드가 없어 강제할 수는 없다.
 
 📐[POPT-F94F] A 설계 완료. **제출을 먼저 `drop`하고, 플러그인 자체 상태에서 개선 대화를 진행한 뒤 입력창에 복원하는 구조**를 권장합니다. 제품 저장소는 변경하지 않았습니다.
 
@@ -218,7 +218,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 | 프로젝트 규칙 | 합계 1,200자 | root/cwd의 명시된 `CLAUDE.md` 후보만 읽기 |
 | cwd·repo | 400자 | 프로젝트 내 상대 위치·저장소 이름 |
 | 저장소 근거 | 3,000자 | 원문 관련 소스·문서, 용어집·ADR·패키지 스크립트를 경로와 함께 발췌 |
-| 장기 기억 | 2,000자 | 주입된 참고 데이터, `memoryContext`로 제어 |
+| 장기 기억 | 2,000자 | 대화에서 읽은 훅 주입 참고 데이터, `memoryContext`로 제어 |
 | 도구 정보 | 400자 | 최근 도구 이름 등 최소 메타데이터만 |
 | 전체 문맥 | 6,000자 | 초과 시 오래된 대화부터 제거 |
 

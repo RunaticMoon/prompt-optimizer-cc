@@ -224,7 +224,9 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 
 개선안을 가져와 Enter 하거나, `/optimize send|raw`, 옵티마이저 끔 모드(4.5)로 보내면 최종 텍스트로 UserPromptSubmit이 1회 실행되고, 그때 주입되는 기억도 메인 요청에 정상 포함된다(실측: Claude Code 2.1.286).
 
-옵티마이저는 settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 세션에 주입한 `additionalContext`를 이 플러그인 아래 classic 체인에서 관찰만 하고(수정하지 않음) 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. 세션 시작 때 주입된 기억은 첫 프롬프트부터 쓰인다. UserPromptSubmit 기억은 **직전에 메인으로 간 프롬프트**에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 새 SessionStart(시작·재개·clear·compact)가 오면 직전 기억은 비운다. 기억은 classic 훅이 보고한 세션 id를 따르므로, `/clear`처럼 `session.start` 없이 새 세션 id가 와도 그 SessionStart가 주입한 기억을 다음 요청부터 쓴다. 세션 전환은 SessionStart가 하며(UserPromptSubmit은 이미 저장된 세션을 바꾸지 않고, 저장된 세션이 없을 때만 채운다), 세션 end는 끝나는 세션 id가 저장된 classic 세션과 같을 때만 그 기억을 비우고 아니면 다음 SessionStart가 교체한다. 서브에이전트 안에서 발생한 classic 훅(`agent_id`가 있는 경우)은 무시한다.
+옵티마이저는 플러그인의 classic 훅을 등록하지 않는다. 대신 첫 라운드 스냅샷을 모을 때 `$.session.messages({ as: "api" })`로 메인 대화를 읽어, 엔진이 대화에 넣어 둔 `<system-reminder>` 블록 중 `SessionStart hook additional context: …`와 `UserPromptSubmit hook additional context: …`를 찾아 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)에 넣는다. `memoryContext`가 false면 이 읽기 자체를 하지 않는다. 세션 시작 기억은 대화에 있는 **마지막** SessionStart 블록(시작·재개·clear·compact 중 가장 최근 실행분)을 쓴다. `/clear`·`/compact` 뒤에는 대화가 새로 시작되므로 이전 블록이 자연히 빠진다(2.1.300 실측). 직전 프롬프트 기억은 **마지막으로 메인에 간 사람 프롬프트**에 붙은 UserPromptSubmit 블록이며, 그 프롬프트에 주입이 없었으면 오래된 것을 끌어오지 않고 비운다. 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다). 같은 이벤트의 여러 훅 출력은 엔진이 한 블록으로 합치고 출처(어느 settings 훅·플러그인인지) 정보가 없어, 출처별로 구분하지 않고 함께 넣는다. 대화는 메인 대화만 읽으며 서브에이전트 대화는 읽지 않는다. 세션 id 추적·`session.end` 시 비우기 같은 저장 규칙은 없어졌다(매번 대화에서 읽는다).
+
+조직이 Claude Code를 관리하는 환경에서는 사용자가 설치한 플러그인의 classic 훅이 실행되지 않아(로드 시 `… do not run here` 노트) 이전에는 장기 기억 문맥이 비었지만, 위 읽기 방식은 그 제약을 받지 않는다(2.1.300 기준). 자세한 내용과 남은 제약은 7장을 본다.
 
 옵티마이저 요청에서 문맥(스냅샷) 안의 `<context>` 등 구역 태그는 `‹`(U+2039)로 바꿔, 그 안의 `</context>` 같은 문자열이 구역 경계를 깨지 못하게 한다.
 
@@ -251,7 +253,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 | `contextTurns` | number | `4` | 0–8 | 문맥에 넣을 최근 사용자 턴 수 |
 | `contextMaxChars` | number | `6000` | 0–8000 | 문맥 스냅샷 문자 예산 |
 | `systemPromptFile` | string | `""`(없음) | — | 추가 시스템 지침 파일. 비면 내장 프롬프트 유지 |
-| `memoryContext` | boolean | `true` | — | settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 주입한 장기 기억(`additionalContext`)을 옵티마이저 문맥에 포함 |
+| `memoryContext` | boolean | `true` | — | settings·플러그인 훅(`SessionStart`/`UserPromptSubmit`)이 메인 대화에 주입한 장기 기억(`additionalContext`)을 대화에서 읽어 옵티마이저 문맥에 포함. 끄면 이 읽기 자체를 하지 않는다(4.7) |
 | `pasteBypass` | boolean | `true` | — | 입력창이 비어 있는 상태에서 붙여넣기·외부 앱 입력만으로 채운(키 입력이 없는) 프롬프트를 다듬지 않고 그대로 전송할지 여부(4.5) |
 
 `uiMode`의 `auto`와 `pane`은 같은 동작을 한다: 패널을 먼저 열어 보고 배치에 성공하면 패널, 실패하면 입력창 대화로 폴백한다. 이는 `plugin.json`의 현재 설명과 일치한다(`hooks/register.ts`의 `chooseUi`).
@@ -379,7 +381,7 @@ claude-opus-5-5[1m] · 적용: opus-5-5
   - 최대 24개 디렉터리·18개 파일, 파일당 64 KiB·합계 256 KiB 안에서 읽는다. 숨김·의존성·빌드 디렉터리, 민감한 이름의 파일, 심볼릭 링크와 프로젝트 밖 경로를 제외한다. `contextMaxChars=0`이면 저장소 근거도 수집하지 않는다. 부분 발췌이므로 찾지 못한 기능이 없다고 단정하지 않는다.
 - **도구 결과·이미지 transcript는 보내지 않는다.** 최근 도구는 이름만 포함한다. 선택한 저장소 파일의 내용은 위 근거 예산 안에서 옵티마이저 모델 요청에 포함된다.
 - **문맥을 요약하는 별도 모델 호출은 없다.**
-- **장기 기억 문맥**: `memoryContext`가 켜져 있으면(기본) settings·플러그인 `hooks.json`의 classic 훅(`SessionStart`/`UserPromptSubmit`)이 주입한 장기 기억(`additionalContext`)이 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)으로 옵티마이저 모델(기본 `sonnet`) 요청에 포함된다. 이 섹션은 옵티마이저 모델 요청에만 들어가고 별도 모델 호출을 늘리지 않는다. 끄려면 `memoryContext`를 false로 둔다.
+- **장기 기억 문맥**: `memoryContext`가 켜져 있으면(기본) 옵티마이저가 스냅샷 수집 때 메인 대화를 읽어, 엔진이 넣어 둔 `SessionStart`/`UserPromptSubmit` 훅 문맥 블록을 스냅샷의 "Long-term memory" 섹션(최대 2000자, `CONTEXT_MEMORY_CHARS`)으로 옵티마이저 모델(기본 `sonnet`) 요청에 포함한다(4.7). 이 섹션은 옵티마이저 모델 요청에만 들어가고 별도 모델 호출을 늘리지 않는다. 끄면 이 읽기 자체를 하지 않는다.
 - **디스크 저장 없음(플러그인 상태)**: 프롬프트·문맥·대화·bypass·사용량은 플러그인 메모리에만 있고, 플러그인이 파일이나 `$.store`에 쓰지 않는다.
 - **composer 알림의 transcript 행**: composer(입력창 대화) 모드에서는 개선안·옵티마이저 메시지·오류·알림을 `$.ui.log` 알림으로 내보내므로, 호스트가 이를 세션 transcript 파일에 알림 행으로 기록할 수 있다. 이는 메인 모델 입력으로 전송되는 대화가 아니며, 패널 모드는 `$.ui.log` 대신 `$.ui.invalidate`/`$.ui.toast`만 써서 로컬 상태만 사용한다(`hooks/ui/present.ts`).
 - **금액 표시 없음**: 토큰 사용량만 보여준다(패널 헤더 합계, `/optimize status`의 세션 합계). 가격표는 고정하지 않는다. 취소 응답의 0은 "반환된 사용량"이며 공급자 최종 청구액 0을 보장하지 않는다.
@@ -399,6 +401,7 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 - **bypass 수명**: 복원으로 발급된 bypass는 10분 후 만료되고, 한 번만 소비된다. 사용자가 편집하면 그 편집 텍스트로 따라가고, 입력창을 비우면 무효화된다. 다른 플러그인이 입력창을 채우면 bypass는 그 새 텍스트를 따라가므로(원래 개선안에는 효력이 없어진다) 다음 Enter는 가로채지 않고 그 텍스트를 보낸다.
 - **composer 알림이 transcript에 남을 수 있음**: composer 모드에서는 개선안·메시지가 `$.ui.log` 알림으로 나가므로 호스트가 세션 transcript 파일에 알림 행으로 저장할 수 있다. 이 행은 `type: "system"`, `subtype: "informational"`, `isMeta: false`, role 없음 형태로 기록된다(실측). 사용자 메시지만 고르는 transcript 파서(예: 메모리 플러그인의 Stop 훅)에는 영향이 없지만, `isMeta`만 보고 거르는 파서는 이 행을 포함할 수 있다. 패널 모드의 개선 대화는 transcript에 남지 않는다(실측). 메인 모델 입력으로 전송되지 않으며, 패널 모드는 이 경로를 쓰지 않는다.
 - **옵티마이저는 현재 프롬프트로 기억을 새로 검색하지 않는다**: 장기 기억 문맥(4.7)의 UserPromptSubmit 기억은 직전에 메인으로 간 프롬프트에 대해 검색된 것이며, 지금 다듬는 프롬프트로 새로 검색하지는 않는다(가로채는 시점에는 아직 그 훅이 실행되지 않는다).
+- **관리형 환경에서의 장기 기억 읽기**: 조직이 Claude Code를 관리하는 환경에서는 사용자가 설치한 플러그인의 classic 훅이 실행되지 않아(로드 시 `… do not run here` 노트) 이전 방식으로는 장기 기억 문맥이 비었다. 옵티마이저는 이제 대화에 이미 들어 있는 `SessionStart`/`UserPromptSubmit` 훅 문맥 블록을 `$.session.messages`로 읽으므로 이 제약을 받지 않는다(2.1.300 실측: 관리형 설정을 둔 격리 환경에서 로드 노트·classic 훅 건너뜀을 재현하고, 같은 환경에서 `$.session.messages({ as: "api" })`가 이 블록을 거르지 않고 돌려줌을 확인했다. 실제 조직 계정 환경에서는 확인하지 않았다). 다만 관리 정책이 다른 플러그인의 settings/plugin 훅 자체를 실행하지 않으면(예: `allowManagedHooksOnly`) 주입된 기억이 원래 없어 이 섹션도 빈다.
 - **사용량은 메모리에만**: 이 세션의 사용량은 플러그인 메모리(`RuntimeState.usage`)에만 있고 `$.store`에 저장하지 않는다. 세션이 끝나면 사라진다.
 - **시스템 프롬프트 파일 폴백 알림**: `systemPromptFile`을 읽지 못하면 그 작업에서 한 번 `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: <사유>` 알림을 보여 주고 내장 프롬프트를 쓴다.
 - **모델별 지침의 실제 효과는 미검증**: 지침이 실제 모델 응답의 품질을 높이는지는 모델 응답에 달려 있다. 이 저장소에는 자동 품질 평가가 없고, 테스트는 정규화·선택·조립 계약만 보장한다(5.4).
@@ -455,7 +458,7 @@ hooks/
   config.ts            # 옵션 정규화, systemPromptFile 읽기
   eligibility.ts       # 제출 분류 규칙
   context.ts           # 문맥 스냅샷 수집
-  memory.ts            # 주입된 장기 기억 저장·렌더
+  memory.ts            # 주입된 장기 기억 추출·렌더
   model-guidance.ts    # 공통·모델별 편집 지침 문자열
   system-prompt.ts     # 내장 프롬프트 + 고정 계약
   target-model.ts      # 메인 모델 문자열 → 지침 프로필 정규화
