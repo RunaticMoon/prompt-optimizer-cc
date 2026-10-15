@@ -29,7 +29,6 @@ import { collectContext } from './context'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
-import { readHookMemory } from './memory'
 import { buildModelRequest, completeRewrite } from './model'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
@@ -37,7 +36,6 @@ import { resolveTargetModel } from './resolve-target-model'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import {
-  CONTEXT_MEMORY_CHARS,
   type BypassTicket,
   type ContextSnapshot,
   type EnginePorts,
@@ -657,22 +655,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // The snapshot is read once, on the first round.
       if (workflow.phase === 'idle') {
         apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
-        // The injected memory is pulled from the conversation, only when the
-        // feature is on. The read is kept out of the snapshot's own try: a
-        // refusing/absent port is treated as no memory, so collection still
-        // happens, and a snapshot failure is not a round failure either.
-        let memory = ''
-        if (config.memoryContext) {
-          const read = ports.session.apiMessages
-          try {
-            memory = await readHookMemory(read ? () => read() : async () => [], CONTEXT_MEMORY_CHARS)
-          } catch {
-            memory = ''
-          }
-        }
         let context: ContextSnapshot | null = null
         try {
-          context = await collectContext(ports, config, memory, workflow.original)
+          context = await collectContext(ports, config, workflow.original)
         } catch {
           context = null
         }

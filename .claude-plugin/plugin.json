@@ -115,13 +115,6 @@
       "required": false,
       "default": ""
     },
-    "memoryContext": {
-      "type": "boolean",
-      "title": "Long-term memory context",
-      "description": "Let the optimizer read context that settings or plugin hooks (SessionStart/UserPromptSubmit) injected into the main conversation, such as claude-mem or OpenViking memories. Read from the conversation, so it also works where an organization manages Claude Code. Sent only to the optimizer model.",
-      "required": false,
-      "default": true
-    },
     "pasteBypass": {
       "type": "boolean",
       "title": "Send pastes as-is",

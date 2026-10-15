@@ -117,9 +117,10 @@ interface RenderedPrompt {
 /** Renders the tagged prompt; the selected dialogue stays in time order. */
 function renderPrompt(parts: PromptParts): RenderedPrompt {
   const blocks: string[] = []
-  // Only the context is neutralized: it can carry other sources' memory text.
-  // The original/draft/dialogue/instruction are the user's own text, and changing
-  // their tags could leak the replacement character into an improved draft.
+  // Only the context is neutralized: it can carry text from the conversation or
+  // the repository. The original/draft/dialogue/instruction are the user's own
+  // text, and changing their tags could leak the replacement character into an
+  // improved draft.
   if (parts.context !== '') blocks.push(`<context>\n${neutralizeTags(parts.context)}\n</context>`)
   blocks.push(`<original_prompt>\n${parts.original}\n</original_prompt>`)
   // The prefix is exactly the joined context + original blocks; computing it

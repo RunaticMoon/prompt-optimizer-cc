@@ -285,23 +285,21 @@ describe('resolveConfig — systemPromptFile', () => {
   })
 })
 
-describe('resolveConfig — memoryContext', () => {
-  test('accepts a boolean', () => {
-    expect(resolveConfig({ memoryContext: false }).config.memoryContext).toBe(false)
-    expect(resolveConfig({ memoryContext: true }).config.memoryContext).toBe(true)
-  })
-
-  test('coerces the string spellings the config UI writes', () => {
-    expect(resolveConfig({ memoryContext: 'true' }).config.memoryContext).toBe(true)
-    expect(resolveConfig({ memoryContext: 'false' }).config.memoryContext).toBe(false)
-  })
-
-  test('falls back on any other value with one warning', () => {
-    for (const value of ['yes', 1, 0, null, undefined, ['true']]) {
+describe('resolveConfig — a removed memoryContext key', () => {
+  test('ignores a leftover memoryContext value without a warning', () => {
+    for (const value of [false, true, 'true', 'false', 1, null]) {
       const { config, warnings } = resolveConfig({ memoryContext: value })
-      expect(config.memoryContext).toBe(DEFAULT_CONFIG.memoryContext)
-      expect(warnings).toHaveLength(1)
+      expect(warnings).toHaveLength(0)
+      expect('memoryContext' in config).toBe(false)
     }
+    expect(resolveConfig({ memoryContext: false }).config).toEqual(DEFAULT_CONFIG)
+  })
+
+  test('a runtime change to memoryContext is refused as an unknown key', () => {
+    expect(validateConfigChange('memoryContext', false)).toEqual({
+      ok: false,
+      error: 'unknown config key "memoryContext"',
+    })
   })
 })
 
@@ -338,7 +336,6 @@ describe('validateConfigChange', () => {
     expect(validateConfigChange('enabled', 'false')).toEqual({ ok: true, key: 'enabled', value: false })
     expect(validateConfigChange('modelGuidance', false)).toEqual({ ok: true, key: 'modelGuidance', value: false })
     expect(validateConfigChange('modelGuidance', 'true')).toEqual({ ok: true, key: 'modelGuidance', value: true })
-    expect(validateConfigChange('memoryContext', 'false')).toEqual({ ok: true, key: 'memoryContext', value: false })
     expect(validateConfigChange('pasteBypass', 'false')).toEqual({ ok: true, key: 'pasteBypass', value: false })
     expect(validateConfigChange('pasteBypass', true)).toEqual({ ok: true, key: 'pasteBypass', value: true })
     expect(validateConfigChange('maxTokens', '2048')).toEqual({ ok: true, key: 'maxTokens', value: 2048 })

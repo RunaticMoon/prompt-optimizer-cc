@@ -34,12 +34,6 @@ export interface OptimizerConfig {
   /** File with extra system instructions; empty keeps the built-in prompt. */
   systemPromptFile: string
   /**
-   * Whether context other plugins' settings hooks injected into the main
-   * session (long-term memory: `SessionStart`/`UserPromptSubmit`
-   * `additionalContext`) joins the optimizer's snapshot.
-   */
-  memoryContext: boolean
-  /**
    * Whether a prompt that was only pasted, or injected by another app, and
    * submitted without typing goes to the main session as-is.
    */
@@ -205,64 +199,10 @@ export interface ContextSnapshot {
   tools: string
   /** Bounded, path-labelled repository evidence relevant to the original request. */
   project?: string
-  /** Injected long-term memory text, capped by {@link CONTEXT_MEMORY_CHARS}. */
-  memory: string
   /** The assembled snapshot text under the configured character budget. */
   text: string
   /** Length of {@link text} in characters. */
   chars: number
-}
-
-/**
- * One content block of an {@link ApiMessage}, in the Messages API shape
- * `$.session.messages({ as: "api" })` returns: a `type`, and that kind's own
- * fields (`text` for a text block).
- *
- * The declarations the CLI generates for this build do not export the engine's
- * own `ApiMessage`, so the plugin names the minimal structure it reads here.
- */
-export interface ApiContentBlock {
-  /** The block's kind: `text`, `tool_use`, `tool_result`, `image`, .... */
-  readonly type?: string
-  /** The block's text when it is a `text` block; other kinds leave it unset. */
-  readonly text?: unknown
-  readonly [field: string]: unknown
-}
-
-/**
- * One message of the conversation in Messages API form, as
- * `$.session.messages({ as: "api" })` returns it. `content` is normally an
- * array of blocks; the reader also accepts a bare string.
- */
-export interface ApiMessage {
-  /** Who wrote it. */
-  readonly role?: string
-  /** The message's blocks, or its text as a single block. */
-  readonly content?: string | readonly ApiContentBlock[]
-}
-
-/**
- * Context other plugins' settings hooks injected into the main session, as
- * this plugin read it out of the conversation
- * (`$.session.messages({ as: "api" })`). Loading the plugin in a managed
- * environment skips its own classic hooks, so the conversation is the source
- * of truth. Read-only for the optimizer; never sent back to the main session
- * by this plugin.
- */
-export interface CapturedMemory {
-  /**
-   * The injected body of the LAST `SessionStart` block in the conversation
-   * (startup, resume, clear or compact); `[]` when none. A resume may leave
-   * older blocks, so only the last one counts.
-   */
-  sessionStart: readonly string[]
-  /**
-   * The `UserPromptSubmit` bodies belonging to the LAST person's prompt in the
-   * conversation: the memory retrieved for the PREVIOUS prompt that reached
-   * the main session, not for the prompt being optimized now. `[]` when that
-   * prompt had none.
-   */
-  lastPrompt: readonly string[]
 }
 
 /** Why a submission is left untouched by the optimizer. */
@@ -435,7 +375,6 @@ export const DEFAULT_CONFIG: OptimizerConfig = {
   contextTurns: 4,
   contextMaxChars: 6000,
   systemPromptFile: '',
-  memoryContext: true,
   pasteBypass: true,
 }
 
@@ -472,9 +411,6 @@ export const CONTEXT_TOOLS_CHARS = 400
 /** Cap for task-relevant source and domain-document excerpts in the snapshot. */
 export const CONTEXT_PROJECT_CHARS = 3000
 
-/** Cap for injected long-term memory text inside the snapshot. */
-export const CONTEXT_MEMORY_CHARS = 2000
-
 /** Most conversation messages kept in the snapshot. */
 export const CONTEXT_MESSAGES_MAX = 8
 
@@ -497,15 +433,7 @@ export const SYSTEM_PROMPT_MAX_CHARS = 4000
  */
 export type EnginePorts = {
   session: Pick<EngineInterface['session'], 'messages' | 'cwd' | 'root' | 'repo'> &
-    Partial<Pick<EngineInterface['session'], 'model' | 'version'>> & {
-      /**
-       * The main conversation in Messages API form
-       * (`$.session.messages({ as: 'api' })`), where settings/plugin hooks'
-       * injected `additionalContext` appears as `text` blocks. Optional: a host
-       * that cannot read it leaves the snapshot's memory section empty.
-       */
-      apiMessages?: () => Promise<readonly ApiMessage[]>
-    }
+    Partial<Pick<EngineInterface['session'], 'model' | 'version'>>
   /** Without every, stages still render but elapsed time does not tick between changes. */
   clock?: Pick<EngineInterface['clock'], 'sleep'> & Partial<Pick<EngineInterface['clock'], 'every'>>
   fs: Pick<EngineInterface['fs'], 'stat' | 'read'> &

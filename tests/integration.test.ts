@@ -59,49 +59,6 @@ const DRAFT = '개선된 요청'
 const PASTE_PLACEHOLDER = '다음 내용을 고쳐줘\n[Pasted text #1 +3 lines]'
 const PASTE_EXPANDED = '다음 내용을 고쳐줘\n<pasted_content>\n첫째 줄: 로그인 오류\n둘째 줄: 재현 절차\n셋째 줄: 기대 동작\n</pasted_content>'
 
-/** One text block of an API-form message as this harness builds it. */
-interface ApiBlock {
-  type: string
-  text: string
-}
-
-/** One API-form message; `$.session.messages({ as: 'api' })` answers these. */
-interface ApiMessage {
-  role: 'user' | 'assistant'
-  content: ApiBlock[]
-}
-
-/** The `<system-reminder>` envelope a hook's injected `additionalContext` has. */
-function injectedBlock(kind: 'SessionStart' | 'UserPromptSubmit', body: string): ApiBlock {
-  return {
-    type: 'text',
-    text: `<system-reminder>\n${kind} hook additional context: ${body}\n</system-reminder>`,
-  }
-}
-
-/** An engine `<system-reminder>` block (not injected memory). */
-function engineBlock(text: string): ApiBlock {
-  return { type: 'text', text: `<system-reminder>\n${text}\n</system-reminder>` }
-}
-
-/** A slash-command transcript block (2.1.300 measured shape, verify-E-REPORT). */
-function commandBlock(text: string): ApiBlock {
-  return { type: 'text', text }
-}
-
-/** A person's own prompt text block. */
-function personBlock(text: string): ApiBlock {
-  return { type: 'text', text }
-}
-
-function userApi(...blocks: ApiBlock[]): ApiMessage {
-  return { role: 'user', content: blocks }
-}
-
-function assistantApi(text: string): ApiMessage {
-  return { role: 'assistant', content: [personBlock(text)] }
-}
-
 /** The fixed JSON contract the optimizer's one completion returns. */
 function answered(draft: string, message = '다듬었습니다', question: string | null = null): ModelCompleteResult {
   return { isAnswered: true, text: JSON.stringify({ draft, message, question }), usage: USAGE }
@@ -194,8 +151,6 @@ interface World {
   /** The simulated composer's current text. */
   box(): string
   setBox(text: string): void
-  /** Sets the API-form conversation the plugin's memory pull reads. */
-  setApiMessages(messages: readonly ApiMessage[]): void
   /** Starts the session (the plugin wires itself on this). */
   start(): Promise<void>
   /** A composer submission, with the emulated engine starting a turn on a pass. */
@@ -241,7 +196,6 @@ function setup($: Engine, on: On, input: {
   let boxText = ''
   /** Whether the test drove the draft's own edit chain for the next submit. */
   let droveDraft = false
-  let apiMessages: readonly ApiMessage[] = []
   let behavior: ModelBehavior = () => answered(DRAFT)
   let fillFn: ((input: PromptFillInput) => { isFilled: boolean; refusal?: 'no_composer' | 'dialog' }) | null = null
   // The main session's model as the bottom `session.model` hook answers it. The
@@ -254,16 +208,7 @@ function setup($: Engine, on: On, input: {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: sessionId }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
-  // The plugin's memory pull asks for the API form (`{ as: 'api' }`); the
-  // transcript rows answer the plain call the context collector makes.
-  on('session.messages', (_$, e) => ({
-    value: e.as === 'api'
-      ? apiMessages.map(message => ({
-          role: message.role,
-          content: message.content.map(block => ({ type: block.type, text: block.text })),
-        }))
-      : [...(input.messages ?? [])],
-  }))
+  on('session.messages', () => ({ value: [...(input.messages ?? [])] }))
   on('session.cwd', () => ({ value: '/repo/sub' }))
   on('session.root', () => ({ value: '/repo' }))
   on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false, name: 'owner/repo' } }))
@@ -383,12 +328,6 @@ function setup($: Engine, on: On, input: {
     box: () => boxText,
     setBox: text => {
       boxText = text
-    },
-    setApiMessages(messages) {
-      apiMessages = messages.map(message => ({
-        role: message.role,
-        content: message.content.map(block => ({ ...block })),
-      }))
     },
     async start() {
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
@@ -1362,148 +1301,26 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(request?.model).toBe('sonnet')
   })
 
-  // Long-term memory pull: an organization-managed Claude Code skips the
-  // plugin's own classic hooks, so the plugin reads the injected context out of
-  // the main conversation's API form (`$.session.messages({ as: 'api' })`)
-  // instead. The blocks other hooks left there are `<system-reminder>` text
-  // blocks; a fresh SessionStart conversation replaces the previous ones.
-  test('MEM · 대화에서 읽은 주입 컨텍스트가 옵티마이저 스냅샷에 실린다', { options: { uiMode: 'composer' } }, async ($, on) => {
-    const w = setup($, on)
+  // The optimizer no longer reads the injected hook context: a `SessionStart`
+  // block that happens to sit in the transcript text stays ordinary
+  // conversation, with no long-term memory section of its own.
+  test('MEM · 대화에 SessionStart 주입 컨텍스트가 있어도 장기 기억 섹션을 만들지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on, {
+      messages: [
+        {
+          role: 'user',
+          text: '<system-reminder>\nSessionStart hook additional context: MEM-SS-1\n</system-reminder>',
+          toolUses: [],
+        },
+      ],
+    })
     await w.start()
-
-    // 1. A SessionStart block lands in the first request's snapshot.
-    w.setApiMessages([
-      userApi(
-        injectedBlock('SessionStart', 'MEM-SS-1'),
-        engineBlock('# Environment\ncwd: /repo'),
-        personBlock('첫 프롬프트'),
-      ),
-    ])
-    await w.submit(ORIGINAL)
-    await w.advance(1)
-    const first = w.completes[0]?.prompt ?? ''
-    expect(first).toContain('## Long-term memory')
-    expect(first).toContain('### Injected at session start')
-    expect(first).toContain('MEM-SS-1')
-
-    // 2. The previous prompt's UserPromptSubmit block joins the next run,
-    //    beside the session-start one.
-    await w.run('cancel')
-    w.setApiMessages([
-      userApi(
-        injectedBlock('SessionStart', 'MEM-SS-1'),
-        engineBlock('# Environment\ncwd: /repo'),
-        injectedBlock('UserPromptSubmit', 'MEM-UPS-1'),
-        personBlock('이전 프롬프트'),
-      ),
-    ])
-    await w.run('두번째 원문')
-    await w.advance(1)
-    const second = w.completes[1]?.prompt ?? ''
-    expect(second).toContain('MEM-SS-1')
-    expect(second).toContain('### Injected for the previous prompt')
-    expect(second).toContain('MEM-UPS-1')
-
-    // 3. A /clear conversation holds only the new SessionStart block.
-    await w.run('cancel')
-    w.setApiMessages([
-      userApi(injectedBlock('SessionStart', 'MEM-SS-2'), personBlock('세번째 프롬프트')),
-    ])
-    await w.run('세번째 원문')
-    await w.advance(1)
-    const third = w.completes[2]?.prompt ?? ''
-    expect(third).toContain('MEM-SS-2')
-    expect(third).not.toContain('MEM-UPS-1')
-    expect(third).not.toContain('### Injected for the previous prompt')
-  })
-
-  // A resume may leave older SessionStart blocks in the conversation; only the
-  // last one describes the current session.
-  test('MEM · SessionStart 블록이 여러 개면 마지막 것만 쓴다', { options: { uiMode: 'composer' } }, async ($, on) => {
-    const w = setup($, on)
-    await w.start()
-
-    w.setApiMessages([
-      userApi(injectedBlock('SessionStart', 'MEM-OLD'), personBlock('예전 프롬프트')),
-      assistantApi('답변'),
-      userApi(injectedBlock('SessionStart', 'MEM-NEW'), personBlock('지금 프롬프트')),
-    ])
     await w.submit(ORIGINAL)
     await w.advance(1)
 
     const first = w.completes[0]?.prompt ?? ''
-    expect(first).toContain('MEM-NEW')
-    expect(first).not.toContain('MEM-OLD')
-  })
-
-  // A prompt's UserPromptSubmit blocks are the memory retrieved for it; they
-  // are used only for the LAST prompt in the conversation, not pulled forward
-  // when the last prompt had none.
-  test('MEM · 마지막 프롬프트에 컨텍스트가 없으면 이전 프롬프트 기억을 쓰지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
-    const w = setup($, on)
-    await w.start()
-
-    w.setApiMessages([
-      userApi(injectedBlock('UserPromptSubmit', 'MEM-UPS-OLD'), personBlock('첫 프롬프트')),
-      assistantApi('답변'),
-      userApi(personBlock('두번째 프롬프트')),
-    ])
-    await w.submit(ORIGINAL)
-    await w.advance(1)
-
-    const first = w.completes[0]?.prompt ?? ''
-    expect(first).not.toContain('MEM-UPS-OLD')
-    expect(first).not.toContain('### Injected for the previous prompt')
-  })
-
-  // The 2.1.300 slash-command shape (verify-E-REPORT.md): running a command
-  // between two prompts leaves the engine's command transcript
-  // (`<local-command-caveat>`, `<command-name>`, `<local-command-stdout>`)
-  // beside the first prompt and alone in the last user message. Neither may
-  // pass for a person's prompt and blank the previous prompt's memory.
-  test('MEM · 슬래시 명령 블록이 사람 프롬프트로 오인되지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
-    const w = setup($, on)
-    await w.start()
-
-    w.setApiMessages([
-      userApi(
-        injectedBlock('SessionStart', 'MEM-SS-CMD'),
-        engineBlock('# Environment\ncwd: /repo'),
-        injectedBlock('UserPromptSubmit', 'MEM-UPS-CMD'),
-        commandBlock('<local-command-caveat>The command below was run directly in Claude Code, ...</local-command-caveat>'),
-        commandBlock('<command-name>/optimize</command-name>'),
-        commandBlock('<local-command-stdout>설정에 저장했습니다.</local-command-stdout>'),
-        personBlock('첫 프롬프트'),
-      ),
-      assistantApi('답변'),
-      userApi(
-        commandBlock('<command-name>/optimize</command-name>'),
-        commandBlock('<local-command-stdout>설정에 저장했습니다.</local-command-stdout>'),
-      ),
-    ])
-    await w.submit(ORIGINAL)
-    await w.advance(1)
-
-    const first = w.completes[0]?.prompt ?? ''
-    expect(first).toContain('MEM-SS-CMD')
-    expect(first).toContain('### Injected for the previous prompt')
-    expect(first).toContain('MEM-UPS-CMD')
-  })
-
-  // The conversation is the whole source of truth for the pull, so a new
-  // session (or a conversation with no injected blocks) simply shows none.
-  test('MEM · 주입 블록이 없는 대화에는 메모리 섹션이 없다', { options: { uiMode: 'composer' } }, async ($, on) => {
-    const w = setup($, on)
-    await w.start()
-
-    w.setApiMessages([
-      userApi(engineBlock('# Environment\ncwd: /repo'), personBlock('일반 프롬프트')),
-      assistantApi('답변'),
-    ])
-    await w.submit(ORIGINAL)
-    await w.advance(1)
-
-    expect(w.completes[0]?.prompt ?? '').not.toContain('## Long-term memory')
+    expect(first).toContain('SessionStart hook additional context: MEM-SS-1')
+    expect(first).not.toContain('## Long-term memory')
   })
 
   // The plugin must not register any classic event: a managed environment

@@ -22,11 +22,9 @@
  * `session.end`, `prompt.submit`, `prompt.edit`, `prompt.autocomplete`, `prompt.fill`, `config.set`.
  * The `prompt.edit` hook feeds the optimizer-off mode to the controller: a
  * consumed edit (the marker typed, or ctrl+u) becomes the box the hook returns,
- * and a state flip repaints the `PromptHint` tail `registerUi` draws.
- * Long-term memory is not observed here: an organization-managed Claude Code
- * skips this plugin's own `classic.*` hooks (and says so at load), so the
- * controller pulls the injected `SessionStart`/`UserPromptSubmit` context out
- * of the main conversation through the `session.apiMessages` port instead.
+ * and a state flip repaints the `PromptHint` tail `registerUi` draws. The
+ * plugin registers no `classic.*` hook: an organization-managed Claude Code
+ * skips them (and says so at load).
  * `registerUi`/`registerCommands` own `ui.render`/`ui.press`/`ui.input`/
  * `ui.close` and `command.run`, each under its matcher.
  */
@@ -72,9 +70,6 @@ function portsOf($: EngineInterface): EnginePorts {
       // The helpers only call `messages()` with no argument; the widening cast
       // keeps the overloaded call type without reading the method as a value.
       messages: (() => $.session.messages()) as unknown as EnginePorts['session']['messages'],
-      // The Messages API form, where the injected hook context appears: the
-      // snapshot reads it directly (the managed environment skips classic hooks).
-      apiMessages: () => $.session.messages({ as: 'api' }),
       cwd: () => $.session.cwd(),
       root: () => $.session.root(),
       repo: () => $.session.repo(),

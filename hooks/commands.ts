@@ -233,7 +233,6 @@ export function formatStatus(
     config.rawPrefix !== ''
       ? `그대로 보내기: 맨 앞에 "${config.rawPrefix}" 입력(ctrl+u로 해제)`
       : '그대로 보내기: 꺼짐',
-    `장기 기억 문맥: ${config.memoryContext ? '켬' : '끔'}`,
     `붙여넣기 그대로 보내기: ${config.pasteBypass ? '켬 (붙여넣기·외부 앱 입력만으로 채운 프롬프트는 다듬지 않음)' : '끔'}`,
   ]
   if (state.rawMode !== null) {
@@ -333,9 +332,6 @@ function portsOf($: EngineInterface): EnginePorts {
       // The controller only calls `messages()` with no argument; the cast keeps
       // the overloaded call type without reading the method as a value.
       messages: (() => $.session.messages()) as unknown as EnginePorts['session']['messages'],
-      // The Messages API form, where the injected hook context appears; the
-      // first round of an explicit `/optimize` run reads it for the snapshot.
-      apiMessages: () => $.session.messages({ as: 'api' }),
       cwd: () => $.session.cwd(),
       root: () => $.session.root(),
       repo: () => $.session.repo(),
