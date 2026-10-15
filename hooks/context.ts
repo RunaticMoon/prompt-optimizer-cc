@@ -66,7 +66,7 @@ export interface SnapshotInput {
  * to two latest rows (500 chars each) by trimming the fixed-section tail when
  * the budget permits. Otherwise, with no conversation left the final
  * {@link truncateHead} cut the tail of the whole text, which may trim the
- * fixed sections too (tools, then location, rules in turn). Single
+ * fixed sections too (tools, then project, location, rules in turn). Single
  * sections and single messages are trimmed with a marker, never mid-surrogate.
  */
 export function buildSnapshot(input: SnapshotInput): ContextSnapshot {

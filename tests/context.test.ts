@@ -60,6 +60,8 @@ interface Calls {
   stat: number
   read: number
   forbidden: string[]
+  /** Every argument `$.session.messages()` was called with (`undefined` for none). */
+  messageCalls: unknown[]
 }
 
 interface FakeOptions {
@@ -91,6 +93,7 @@ function fakeEngine(options: FakeOptions = {}): {
     stat: 0,
     read: 0,
     forbidden: [],
+    messageCalls: [],
   }
   const reads: string[] = []
   const files = options.files ?? {}
@@ -104,8 +107,9 @@ function fakeEngine(options: FakeOptions = {}): {
 
   const engine = {
     session: {
-      messages: async () => {
+      messages: async (args?: { as?: 'api' }) => {
         calls.messages += 1
+        calls.messageCalls.push(args)
         if (options.failMessages === true) throw new Error('transcript unavailable')
         return [...(options.messages ?? [])]
       },
@@ -452,8 +456,8 @@ describe('collectContext', () => {
     expect(snapshot.rules).toContain('rules')
   })
 
-  test('never emits a long-term memory section from the conversation', async () => {
-    const { engine } = fakeEngine({
+  test('never emits a long-term memory section and never reads the API-form transcript', async () => {
+    const { engine, calls } = fakeEngine({
       cwd: '/repo',
       root: '/repo',
       messages: [
@@ -466,7 +470,11 @@ describe('collectContext', () => {
 
     const snapshot = await collectContext(engine, DEFAULT_CONFIG)
 
-    expect(snapshot.text).toContain('SessionStart hook additional context: MEM-SS-1')
+    const apiCalls = calls.messageCalls.filter(
+      call => (call as { as?: string } | undefined)?.as === 'api',
+    )
+    expect(apiCalls).toHaveLength(0)
+    expect('memory' in snapshot).toBe(false)
     expect(snapshot.text).not.toContain('## Long-term memory')
   })
 })

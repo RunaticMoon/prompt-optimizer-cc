@@ -179,6 +179,11 @@ interface World {
 function setup($: Engine, on: On, input: {
   messages?: readonly SessionMessage[]
   projectEvidence?: boolean
+  /**
+   * When given, every argument the plugin hands `$.session.messages()` is
+   * pushed here, so a test can tell the row form from `{ as: 'api' }`.
+   */
+  messageCalls?: unknown[]
 } = {}): World {
   const clock = mock.clock(on)
 
@@ -208,7 +213,10 @@ function setup($: Engine, on: On, input: {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: sessionId }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
-  on('session.messages', () => ({ value: [...(input.messages ?? [])] }))
+  on('session.messages', (_$, e) => {
+    input.messageCalls?.push(e)
+    return { value: [...(input.messages ?? [])] }
+  })
   on('session.cwd', () => ({ value: '/repo/sub' }))
   on('session.root', () => ({ value: '/repo' }))
   on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false, name: 'owner/repo' } }))
@@ -1301,11 +1309,13 @@ describe('integration — session isolation and delivery accuracy', () => {
     expect(request?.model).toBe('sonnet')
   })
 
-  // The optimizer no longer reads the injected hook context: a `SessionStart`
-  // block that happens to sit in the transcript text stays ordinary
-  // conversation, with no long-term memory section of its own.
-  test('MEM · 대화에 SessionStart 주입 컨텍스트가 있어도 장기 기억 섹션을 만들지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+  // The optimizer never asks for the API-form transcript, so the hook context
+  // the engine injects (which only lives in that form) cannot reach it: the
+  // request carries no long-term memory section.
+  test('MEM · 옵티마이저는 api 형태 대화(주입 훅 문맥)를 읽지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const messageCalls: unknown[] = []
     const w = setup($, on, {
+      messageCalls,
       messages: [
         {
           role: 'user',
@@ -1318,8 +1328,9 @@ describe('integration — session isolation and delivery accuracy', () => {
     await w.submit(ORIGINAL)
     await w.advance(1)
 
+    const apiCalls = messageCalls.filter(call => (call as { as?: string } | undefined)?.as === 'api')
+    expect(apiCalls).toHaveLength(0)
     const first = w.completes[0]?.prompt ?? ''
-    expect(first).toContain('SessionStart hook additional context: MEM-SS-1')
     expect(first).not.toContain('## Long-term memory')
   })
 

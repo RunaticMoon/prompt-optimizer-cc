@@ -433,6 +433,8 @@ C의 probe는 getter 형식/타이밍을 확인했으며, 변경된 plugin의 �
 | `tests/model.test.ts`, commands/config/controller/integration 테스트 | 공통 fixture와 assertion 인접 | 추가 사례를 유지하고 메모리 fixture 필드를 삭제하지 않음. 파일별 소유권 직렬화 |
 | `README.md`, `README.en.md` | 설정 표·명령 설명 | 마지막 P에서 통합 상태 기준 갱신, send/raw와 memory 설명 유지 |
 
+> 이후 결정(ORGH-B689, v0.13.0 예정)으로 `memoryContext` 설정과 장기 기억 문맥은 제거됐다.
+
 새 파일 3개(target-model, resolve-target-model, model-guidance)에 선택/감지/문구를 모은다. PMEM이 먼저 main에 병합되면 지휘자가 OMFC 작업 브랜치에 반영한 후 **한 번에 한 통합자**가 위 영역을 병합하고 전체 검증을 다시 수행한다. 반대 순서도 같은 원칙이다. main 머지를 중간 단계의 선행 조건으로 두지 않는다.
 
 ## 10. 위임 가능한 작업 분해
@@ -484,6 +486,8 @@ C의 probe는 getter 형식/타이밍을 확인했으며, 변경된 plugin의 �
 - 방향/예외: 기본 true, boolean과 문자열 true/false 허용, 잘못된 값은 기존 warning/default 규칙. D 타입·상수 영역과 PMEM memoryContext 보존. 새 slash 명령 없음.
 - 선행: D(contracts 소유권 인계 후). 완료: 기본/false/문자열/invalid/validateConfigChange/manifest 일치 검증.
 - 검증: `npm test`, `npm run typecheck`, `npm run validate`. 보고: 공통 형식 + 설정 입력별 결과.
+
+> 이후 결정(ORGH-B689, v0.13.0 예정)으로 `memoryContext` 설정과 장기 기억 문맥은 제거됐다.
 
 ### I — 시스템 프롬프트 조립과 예산 검증
 
