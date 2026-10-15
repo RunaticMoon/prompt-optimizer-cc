@@ -34,12 +34,6 @@ export interface OptimizerConfig {
   /** File with extra system instructions; empty keeps the built-in prompt. */
   systemPromptFile: string
   /**
-   * Whether context other plugins' settings hooks injected into the main
-   * session (long-term memory: `SessionStart`/`UserPromptSubmit`
-   * `additionalContext`) joins the optimizer's snapshot.
-   */
-  memoryContext: boolean
-  /**
    * Whether a prompt that was only pasted, or injected by another app, and
    * submitted without typing goes to the main session as-is.
    */
@@ -205,31 +199,10 @@ export interface ContextSnapshot {
   tools: string
   /** Bounded, path-labelled repository evidence relevant to the original request. */
   project?: string
-  /** Injected long-term memory text, capped by {@link CONTEXT_MEMORY_CHARS}. */
-  memory: string
   /** The assembled snapshot text under the configured character budget. */
   text: string
   /** Length of {@link text} in characters. */
   chars: number
-}
-
-/**
- * Context other plugins' settings hooks injected into the main session, as
- * this plugin observed it through `classic.*` results. Read-only for the
- * optimizer; never sent back to the main session by this plugin.
- */
-export interface CapturedMemory {
-  /**
-   * `additionalContext` entries from the latest `SessionStart` run (startup,
-   * resume, clear or compact), replacing the previous run's.
-   */
-  sessionStart: readonly string[]
-  /**
-   * `additionalContext` entries from the latest `UserPromptSubmit` run: the
-   * memory retrieved for the PREVIOUS prompt that reached the main session,
-   * not for the prompt being optimized now.
-   */
-  lastPrompt: readonly string[]
 }
 
 /** Why a submission is left untouched by the optimizer. */
@@ -402,7 +375,6 @@ export const DEFAULT_CONFIG: OptimizerConfig = {
   contextTurns: 4,
   contextMaxChars: 6000,
   systemPromptFile: '',
-  memoryContext: true,
   pasteBypass: true,
 }
 
@@ -438,9 +410,6 @@ export const CONTEXT_TOOLS_CHARS = 400
 
 /** Cap for task-relevant source and domain-document excerpts in the snapshot. */
 export const CONTEXT_PROJECT_CHARS = 3000
-
-/** Cap for injected long-term memory text inside the snapshot. */
-export const CONTEXT_MEMORY_CHARS = 2000
 
 /** Most conversation messages kept in the snapshot. */
 export const CONTEXT_MESSAGES_MAX = 8

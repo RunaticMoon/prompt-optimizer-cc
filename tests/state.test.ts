@@ -77,7 +77,6 @@ const CONTEXT: ContextSnapshot = {
   rules: 'rules',
   location: 'loc',
   tools: 'tools',
-  memory: 'mem',
   text: 'text',
   chars: 4,
 }

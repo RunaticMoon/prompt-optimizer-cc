@@ -115,13 +115,6 @@
       "required": false,
       "default": ""
     },
-    "memoryContext": {
-      "type": "boolean",
-      "title": "Long-term memory context",
-      "description": "Let the optimizer read context that settings or plugin hooks (SessionStart/UserPromptSubmit) injected into the session, such as claude-mem or OpenViking memories. Sent only to the optimizer model.",
-      "required": false,
-      "default": true
-    },
     "pasteBypass": {
       "type": "boolean",
       "title": "Send pastes as-is",

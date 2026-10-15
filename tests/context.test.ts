@@ -1,7 +1,7 @@
 import type { EngineInterface, SessionMessage, SessionRepo, ToolUseSummary } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import { CONTEXT_MEMORY_CHARS, CONTEXT_RULES_CHARS, DEFAULT_CONFIG } from '../hooks/contracts'
+import { CONTEXT_RULES_CHARS, DEFAULT_CONFIG } from '../hooks/contracts'
 import {
   CONTEXT_MAX_RULE_BYTES,
   CONTEXT_MESSAGE_CHARS,
@@ -33,7 +33,6 @@ function baseInput(overrides: Partial<SnapshotInput> = {}): SnapshotInput {
     repoName: null,
     contextTurns: 4,
     contextMaxChars: 6000,
-    memory: '',
     ...overrides,
   }
 }
@@ -61,6 +60,8 @@ interface Calls {
   stat: number
   read: number
   forbidden: string[]
+  /** Every argument `$.session.messages()` was called with (`undefined` for none). */
+  messageCalls: unknown[]
 }
 
 interface FakeOptions {
@@ -92,6 +93,7 @@ function fakeEngine(options: FakeOptions = {}): {
     stat: 0,
     read: 0,
     forbidden: [],
+    messageCalls: [],
   }
   const reads: string[] = []
   const files = options.files ?? {}
@@ -105,8 +107,9 @@ function fakeEngine(options: FakeOptions = {}): {
 
   const engine = {
     session: {
-      messages: async () => {
+      messages: async (args?: { as?: 'api' }) => {
         calls.messages += 1
+        calls.messageCalls.push(args)
         if (options.failMessages === true) throw new Error('transcript unavailable')
         return [...(options.messages ?? [])]
       },
@@ -302,64 +305,9 @@ describe('buildSnapshot', () => {
     expect(snapshot.chars).toBe(0)
   })
 
-  test('places the memory section between location and recent conversation', () => {
-    const messages = [message('user', 'hello')]
-    const snapshot = buildSnapshot(baseInput({ messages, memory: 'injected fact' }))
-
-    const memoryAt = snapshot.text.indexOf('## Long-term memory (injected by other plugins)')
-    const locationAt = snapshot.text.indexOf('## Location')
-    const conversationAt = snapshot.text.indexOf('## Recent conversation')
-
-    expect(snapshot.memory).toBe('injected fact')
-    expect(memoryAt).toBeGreaterThan(locationAt)
-    expect(memoryAt).toBeLessThan(conversationAt)
-    expect(snapshot.text).toContain('## Long-term memory (injected by other plugins)\ninjected fact')
-  })
-
-  test('omits the memory section when there is no memory', () => {
-    const snapshot = buildSnapshot(baseInput({ memory: '' }))
-
-    expect(snapshot.memory).toBe('')
-    expect(snapshot.text).not.toContain('## Long-term memory')
-  })
-
-  test('caps memory and appends the truncation marker', () => {
-    const snapshot = buildSnapshot(baseInput({ memory: 'M'.repeat(CONTEXT_MEMORY_CHARS + 500) }))
-
-    expect(snapshot.memory.length).toBeLessThanOrEqual(CONTEXT_MEMORY_CHARS)
-    expect(snapshot.memory.endsWith(CONTEXT_TRUNCATION_MARK)).toBe(true)
-  })
-
-  test('never splits a surrogate pair in truncated memory', () => {
-    const snapshot = buildSnapshot(baseInput({ memory: '😀'.repeat(CONTEXT_MEMORY_CHARS) }))
-
-    expect(hasLoneSurrogate(snapshot.memory)).toBe(false)
-    expect(snapshot.memory.length).toBeLessThanOrEqual(CONTEXT_MEMORY_CHARS)
-  })
-
-  test('keeps memory while dropping conversation when the budget is exceeded', () => {
-    const messages = Array.from({ length: 8 }, (_, i) =>
-      message('user', `[[${i}]]${'x'.repeat(295)}`),
-    )
-    const snapshot = buildSnapshot(
-      baseInput({
-        messages,
-        memory: 'M'.repeat(500),
-        contextTurns: 50,
-        contextMaxChars: 700,
-      }),
-    )
-
-    expect(snapshot.text.length).toBeLessThanOrEqual(700)
-    expect(snapshot.text).toContain('## Long-term memory')
-    expect(snapshot.text).toContain('M'.repeat(100))
-    expect(snapshot.text).not.toContain('[[0]]')
-  })
-
-  test('preserves repository evidence before memory and conversation within the total budget', () => {
+  test('preserves repository evidence and the latest conversation within the total budget', () => {
     const snapshot = buildSnapshot(baseInput({
       project: 'src/images.ts:12 baseline = previousImage',
-      memory: 'M'.repeat(2000),
       messages: [message('user', 'old conversation')],
       contextMaxChars: 500,
     }))
@@ -429,14 +377,14 @@ describe('collectContext', () => {
 
   test('surfaces unavailable repository evidence for the original request', async () => {
     const { engine } = fakeEngine()
-    const snapshot = await collectContext(engine, DEFAULT_CONFIG, '', 'node image API')
+    const snapshot = await collectContext(engine, DEFAULT_CONFIG, 'node image API')
     expect(snapshot.project).toContain('repository inspection unavailable')
     expect(snapshot.text).toContain('Repository evidence (partial, read-only)')
   })
 
   test('does not collect repository evidence with a zero context budget', async () => {
     const { engine, calls } = fakeEngine()
-    const snapshot = await collectContext(engine, { ...DEFAULT_CONFIG, contextMaxChars: 0 }, '', 'node image API')
+    const snapshot = await collectContext(engine, { ...DEFAULT_CONFIG, contextMaxChars: 0 }, 'node image API')
     expect(snapshot.project).toBe('')
     expect(snapshot.text).toBe('')
     expect(calls.stat).toBe(3)
@@ -508,33 +456,26 @@ describe('collectContext', () => {
     expect(snapshot.rules).toContain('rules')
   })
 
-  test('folds the given memory into the snapshot by default', async () => {
-    const { engine } = fakeEngine({ cwd: '/repo', root: '/repo' })
-
-    const snapshot = await collectContext(engine, DEFAULT_CONFIG, '## Injected\nremembered fact')
-
-    expect(snapshot.memory).toBe('## Injected\nremembered fact')
-    expect(snapshot.text).toContain('## Long-term memory (injected by other plugins)')
-    expect(snapshot.text).toContain('remembered fact')
-  })
-
-  test('ignores the given memory when memoryContext is off', async () => {
-    const { engine } = fakeEngine({ cwd: '/repo', root: '/repo' })
-    const config = { ...DEFAULT_CONFIG, memoryContext: false }
-
-    const snapshot = await collectContext(engine, config, 'remembered fact')
-
-    expect(snapshot.memory).toBe('')
-    expect(snapshot.text).not.toContain('## Long-term memory')
-    expect(snapshot.text).not.toContain('remembered fact')
-  })
-
-  test('leaves the memory section out when no memory is given', async () => {
-    const { engine } = fakeEngine({ cwd: '/repo', root: '/repo' })
+  test('never emits a long-term memory section and never reads the API-form transcript', async () => {
+    const { engine, calls } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      messages: [
+        message(
+          'user',
+          '<system-reminder>\nSessionStart hook additional context: MEM-SS-1\n</system-reminder>',
+        ),
+      ],
+    })
 
     const snapshot = await collectContext(engine, DEFAULT_CONFIG)
 
-    expect(snapshot.memory).toBe('')
+    const apiCalls = calls.messageCalls.filter(
+      call => (call as { as?: string } | undefined)?.as === 'api',
+    )
+    expect(calls.messageCalls.length).toBeGreaterThan(0)
+    expect(apiCalls).toHaveLength(0)
+    expect('memory' in snapshot).toBe(false)
     expect(snapshot.text).not.toContain('## Long-term memory')
   })
 })

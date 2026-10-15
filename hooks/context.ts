@@ -14,7 +14,6 @@ import type { SessionMessage } from 'claude-code'
 import {
   CONTEXT_CONVERSATION_CHARS,
   CONTEXT_LOCATION_CHARS,
-  CONTEXT_MEMORY_CHARS,
   CONTEXT_MESSAGES_MAX,
   CONTEXT_PROJECT_CHARS,
   CONTEXT_RULES_CHARS,
@@ -54,8 +53,6 @@ export interface SnapshotInput {
   contextTurns: number
   /** Character budget for the assembled text. */
   contextMaxChars: number
-  /** Injected long-term memory text, already rendered; empty injects nothing. */
-  memory: string
   /** Bounded repository excerpts collected for the current request. */
   project?: string
 }
@@ -69,7 +66,7 @@ export interface SnapshotInput {
  * to two latest rows (500 chars each) by trimming the fixed-section tail when
  * the budget permits. Otherwise, with no conversation left the final
  * {@link truncateHead} cut the tail of the whole text, which may trim the
- * fixed sections too (tools, then memory, location, rules in turn). Single
+ * fixed sections too (tools, then project, location, rules in turn). Single
  * sections and single messages are trimmed with a marker, never mid-surrogate.
  */
 export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
@@ -86,7 +83,6 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
     describeLocation(input.root, input.cwd, input.repoName),
     CONTEXT_LOCATION_CHARS,
   )
-  const memory = truncateHead(input.memory, CONTEXT_MEMORY_CHARS)
   const project = truncateHead(input.project ?? '', CONTEXT_PROJECT_CHARS)
   const tools = truncateHead(collectTools(window), CONTEXT_TOOLS_CHARS)
 
@@ -95,9 +91,6 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
     if (rules.length > 0) parts.push(`## Project rules\n${rules}`)
     if (location.length > 0) parts.push(`## Location\n${location}`)
     if (project.length > 0) parts.push(`## Repository evidence (partial, read-only)\n${project}`)
-    if (memory.length > 0) {
-      parts.push(`## Long-term memory (injected by other plugins)\n${memory}`)
-    }
     if (conversationLines.length > 0) {
       parts.push(`## Recent conversation\n${conversationLines.join('\n')}`)
     }
@@ -131,7 +124,6 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
     conversation: lines.join('\n'),
     rules,
     location,
-    memory,
     project,
     tools,
     text,
@@ -143,13 +135,11 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
  * Reads the session's own read-only facts and builds a snapshot. Every I/O
  * failure empties only the section it feeds and the read goes on.
  *
- * `memory` is the already-rendered injected-memory text; it joins the snapshot
- * only when `config.memoryContext` is on, so the read itself never changes.
+ * `request` is the original prompt, used only to pick repository evidence.
  */
 export async function collectContext(
   $: EnginePorts,
   config: OptimizerConfig,
-  memory = '',
   request = '',
 ): Promise<ContextSnapshot> {
   const messages = await readMessages($)
@@ -169,7 +159,6 @@ export async function collectContext(
     repoName,
     contextTurns: config.contextTurns,
     contextMaxChars: config.contextMaxChars,
-    memory: config.memoryContext ? memory : '',
     project,
   })
 }

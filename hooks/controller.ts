@@ -35,20 +35,20 @@ import type { RawEditFacts } from './raw-mode'
 import { resolveTargetModel } from './resolve-target-model'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
-import type {
-  BypassTicket,
-  ContextSnapshot,
-  EnginePorts,
-  GuidanceStatus,
-  ModelUsage,
-  OptimizerConfig,
-  OptimizerEvent,
-  RewriteResult,
-  RuntimeState,
-  SubmissionDecision,
-  SubmissionFacts,
-  TransferRefusal,
-  Workflow,
+import {
+  type BypassTicket,
+  type ContextSnapshot,
+  type EnginePorts,
+  type GuidanceStatus,
+  type ModelUsage,
+  type OptimizerConfig,
+  type OptimizerEvent,
+  type RewriteResult,
+  type RuntimeState,
+  type SubmissionDecision,
+  type SubmissionFacts,
+  type TransferRefusal,
+  type Workflow,
 } from './contracts'
 
 /** Pane id the UI opens the dialogue under (task K); a restore closes it. */
@@ -103,8 +103,6 @@ export interface ControllerDeps {
   getConfig(): OptimizerConfig
   /** A state change or notification; the UI (K) subscribes. */
   onChange(state: Readonly<RuntimeState>, notice?: string): void
-  /** Rendered long-term memory for the snapshot; absent reads none. */
-  readMemory?(): string
   /** Reopens an already placed pane with focus; the host tracks placement. */
   refocusPane?(): Promise<void>
 }
@@ -657,18 +655,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // The snapshot is read once, on the first round.
       if (workflow.phase === 'idle') {
         apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
-        // The memory read is kept out of the snapshot's own try: a throwing
-        // reader is treated as no memory, so collection still happens. A snapshot
-        // failure is not a round failure either: continue without it.
-        let memory = ''
-        try {
-          memory = deps.readMemory?.() ?? ''
-        } catch {
-          memory = ''
-        }
         let context: ContextSnapshot | null = null
         try {
-          context = await collectContext(ports, config, memory, workflow.original)
+          context = await collectContext(ports, config, workflow.original)
         } catch {
           context = null
         }

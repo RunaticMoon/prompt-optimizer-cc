@@ -158,7 +158,7 @@ describe('formatStatus', () => {
     expect(text).toContain('옵티마이저 모델: sonnet')
     expect(text).toContain('시스템 프롬프트 파일: ~/p.md')
     expect(text).toContain('그대로 보내기: 맨 앞에 ">> " 입력(ctrl+u로 해제)')
-    expect(text).toContain('장기 기억 문맥: 켬')
+    expect(text).not.toContain('장기 기억 문맥')
     expect(text).toContain('진행 중인 개선 작업: wf-1')
     expect(text).toContain('단계 reviewing')
     expect(text).toContain('1/5회')
@@ -196,10 +196,10 @@ describe('formatStatus', () => {
     expect(idle).not.toContain('옵티마이저 끔 모드')
   })
 
-  test('reports paste bypass with its explanation, after the memory-context line', () => {
+  test('reports paste bypass with its explanation, and no removed line', () => {
     const on = formatStatus(config(), liveState())
     expect(on).toContain('붙여넣기 그대로 보내기: 켬 (붙여넣기·외부 앱 입력만으로 채운 프롬프트는 다듬지 않음)')
-    expect(on.indexOf('장기 기억 문맥')).toBeLessThan(on.indexOf('붙여넣기 그대로 보내기'))
+    expect(on).not.toContain('장기 기억 문맥')
     expect(on.indexOf('붙여넣기 그대로 보내기')).toBeLessThan(on.indexOf('이 세션 사용량'))
 
     const off = formatStatus(config({ pasteBypass: false }), liveState())
@@ -218,7 +218,6 @@ describe('formatStatus', () => {
     const text = formatStatus(config(), liveState({ workflow: null }))
     expect(text).toContain('트리거: 항상')
     expect(text).not.toContain('시스템 프롬프트 파일')
-    expect(formatStatus(config({ memoryContext: false }), liveState({ workflow: null }))).toContain('장기 기억 문맥: 끔')
   })
 
   test('separates the optimizer model from the model-guidance toggle', () => {
