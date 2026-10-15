@@ -39,6 +39,11 @@ export interface OptimizerConfig {
    * `additionalContext`) joins the optimizer's snapshot.
    */
   memoryContext: boolean
+  /**
+   * Whether a prompt that was only pasted, or injected by another app, and
+   * submitted without typing goes to the main session as-is.
+   */
+  pasteBypass: boolean
 }
 
 /** A key of {@link OptimizerConfig}, as `config.set` reports it. */
@@ -239,6 +244,17 @@ export type PassReason =
   | 'shell'
   | 'over-limit'
   | 'no-trigger'
+  | 'pasted'
+
+/**
+ * What the plugin saw build the submitted draft since the box was last empty
+ * (`hooks/composition.ts`). Optional: a caller that saw no edit or autocomplete
+ * events for the draft passes nothing and keeps the older rules only.
+ */
+export interface SubmissionFacts {
+  /** The draft was only pasted, or injected by another app, and never typed in. */
+  pasted: boolean
+}
 
 /** What the classifier decides for one submission. */
 export type SubmissionDecision =
@@ -387,6 +403,7 @@ export const DEFAULT_CONFIG: OptimizerConfig = {
   contextMaxChars: 6000,
   systemPromptFile: '',
   memoryContext: true,
+  pasteBypass: true,
 }
 
 /** Effort sent with every optimizer completion. */

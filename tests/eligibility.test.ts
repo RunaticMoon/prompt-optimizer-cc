@@ -533,7 +533,95 @@ describe('classifySubmission — rule 11: prefix mode', () => {
   })
 })
 
-describe('classifySubmission — rule 12: always mode', () => {
+describe('classifySubmission — rule 12: pasted draft', () => {
+  test('a pasted-only draft in always mode passes as pasted', () => {
+    expect(classifySubmission(submit(), config(), state(), 0, { pasted: true })).toEqual({
+      kind: 'pass',
+      reason: 'pasted',
+    })
+  })
+
+  test('facts.pasted false keeps the ordinary optimize', () => {
+    expect(classifySubmission(submit(), config(), state(), 0, { pasted: false })).toEqual({
+      kind: 'optimize',
+      text: '로그인 오류를 고쳐줘',
+      trigger: 'auto',
+    })
+  })
+
+  test('an absent facts argument keeps the older behavior', () => {
+    expect(classifySubmission(submit(), config(), state(), 0)).toEqual({
+      kind: 'optimize',
+      text: '로그인 오류를 고쳐줘',
+      trigger: 'auto',
+    })
+    expect(classifySubmission(submit({ text: 'a'.repeat(6001) }), config(), state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'over-limit',
+    })
+  })
+
+  test('turning pasteBypass off optimizes the pasted draft', () => {
+    expect(
+      classifySubmission(submit(), config({ pasteBypass: false }), state(), 0, { pasted: true }),
+    ).toEqual({ kind: 'optimize', text: '로그인 오류를 고쳐줘', trigger: 'auto' })
+  })
+
+  test('the prefix trigger outranks a pasted draft', () => {
+    expect(
+      classifySubmission(
+        submit({ text: '?? 붙여넣은 텍스트' }),
+        config({ triggerMode: 'prefix' }),
+        state(),
+        0,
+        { pasted: true },
+      ),
+    ).toEqual({ kind: 'optimize', text: '붙여넣은 텍스트', trigger: 'prefix' })
+  })
+
+  test('an untriggered pasted draft in prefix mode still passes as no-trigger', () => {
+    expect(
+      classifySubmission(submit(), config({ triggerMode: 'prefix' }), state(), 0, { pasted: true }),
+    ).toEqual({ kind: 'pass', reason: 'no-trigger' })
+  })
+
+  test('an active composer dialogue takes a pasted draft as a reply', () => {
+    expect(
+      classifySubmission(
+        submit({ text: '반복 지시' }),
+        config(),
+        state({ workflow: workflow({ ui: 'composer', phase: 'reviewing' }) }),
+        0,
+        { pasted: true },
+      ),
+    ).toEqual({ kind: 'reply', workflowId: 'wf-1', text: '반복 지시' })
+  })
+
+  test('a matching bypass ticket outranks a pasted draft', () => {
+    const ticket = bypass()
+    expect(
+      classifySubmission(submit({ text: ticket.text }), config(), state({ bypass: ticket }), 0, {
+        pasted: true,
+      }),
+    ).toEqual({ kind: 'bypass', text: '초안', ticket })
+  })
+
+  test('an armed raw mode outranks a pasted draft', () => {
+    expect(
+      classifySubmission(submit({ text: '>> 그대로' }), config(), state({ rawMode: { sessionId: SESSION, draft: '>> 그대로' } }), 0, {
+        pasted: true,
+      }),
+    ).toEqual({ kind: 'raw', text: '>> 그대로' })
+  })
+
+  test('a disabled optimizer outranks a pasted draft', () => {
+    expect(
+      classifySubmission(submit(), config({ enabled: false }), state(), 0, { pasted: true }),
+    ).toEqual({ kind: 'pass', reason: 'disabled' })
+  })
+})
+
+describe('classifySubmission — rule 13: always mode', () => {
   test('ordinary text optimizes on the text as typed', () => {
     expect(classifySubmission(submit({ text: '  로그인 오류를 고쳐줘  ' }), config(), state(), 0)).toEqual({
       kind: 'optimize',
