@@ -66,6 +66,9 @@ const ACCEPT_NOTICE = '개선안을 입력창에 넣었습니다. Enter 로 전�
 /** Result reason for an action refused while its run is mid-flight. */
 export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
 
+/** How many composer submissions' paste verdicts the controller keeps. */
+const RECALLED_MAX = 100
+
 /** A token count with every field at zero, for arms that spent nothing. */
 const ZERO_USAGE: ModelUsage = {
   input_tokens: 0,
@@ -140,10 +143,10 @@ export interface OptimizerController {
   onPromptEdit(text: string): void
   /**
    * Notes one `prompt.edit` as it arrives, before the box changes: a key-less
-   * insertion of {@link PASTE_MIN_CHARS} or more marks the draft as pasted, a
-   * carried key as typed (PSTB-2735). The edit hook must call this on entry,
-   * before `next`, because a paste and its Enter can arrive in one write and the
-   * edit chain can finish after the submit hook (A-REPORT §7).
+   * insertion of 8 characters (`PASTE_MIN_CHARS`) or more marks the draft as
+   * pasted, a carried key as typed (PSTB-2735). The edit hook must call this on
+   * entry, before `next`, because a paste and its Enter can arrive in one write
+   * and the edit chain can finish after the submit hook (A-REPORT §7).
    */
   observeEditInput(e: { key?: unknown; inputText: string }): void
   /** Observes display text on paths such as long paste that emit no edit. */
@@ -152,8 +155,13 @@ export interface OptimizerController {
    * What the plugin saw build the composer draft, for the submit classifier: a
    * draft that was only pasted (or injected by another app) is passed through
    * unchanged when `pasteBypass` is on.
+   *
+   * `text` is the submitted text. A draft with no observed event at all is
+   * pasted, but a prompt recalled from the engine's history also arrives that
+   * way and is not a paste; when nothing was observed and `text` was submitted
+   * earlier in this controller's life, its remembered verdict is used instead.
    */
-  submissionFacts(): SubmissionFacts
+  submissionFacts(text: string): SubmissionFacts
   /** A fill invalidates the last user-edit snapshot, but keeps accepted text. */
   clearComposerSnapshot(): void
   /**
@@ -235,6 +243,16 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * when the box is emptied or a submission is consumed.
    */
   let composition: Composition = EMPTY_COMPOSITION
+  /**
+   * The paste verdict each composer submission's text got in this controller's
+   * life, keyed by `text.trim()` (PSTB-2735, review M1). ↑ history recall
+   * submits a previous prompt with no edit or autocomplete event, so an
+   * unobserved draft looks pasted; a remembered verdict keeps the judgment the
+   * text got when it was first sent. Oldest entries are dropped past
+   * {@link RECALLED_MAX}, and a session change keeps the map: the engine's
+   * input history survives `/clear`.
+   */
+  const recalled = new Map<string, boolean>()
 
   function sameQuestion(asked: Workflow): boolean {
     const current = state.workflow
@@ -843,8 +861,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
     let decision: SubmissionDecision
     // What the plugin saw build this draft, read before the classifier (and
     // before the draft's composition is consumed below), so this pass and the
-    // pre-classification in `register` see the same facts.
-    const facts = e.origin.kind === 'composer' ? submissionFacts() : undefined
+    // pre-classification in `register` see the same facts. Record the verdict
+    // right here, including on the classify-failure path below, so a later
+    // no-event submission of the same text (↑ recall) can reuse it.
+    const facts = e.origin.kind === 'composer' ? submissionFacts(e.text) : undefined
+    if (facts !== undefined) remember(e.text, facts.pasted)
     try {
       decision = classifySubmission(e, deps.getConfig(), state, deps.now(), facts)
     } catch {
@@ -1184,8 +1205,27 @@ export function createController(deps: ControllerDeps): OptimizerController {
     composition = noteEditInput(composition, e)
   }
 
-  function submissionFacts(): SubmissionFacts {
+  function submissionFacts(text: string): SubmissionFacts {
+    // A recalled history entry emits no edit or autocomplete event, so an
+    // unobserved draft would look pasted. A remembered verdict for the same
+    // text stands instead; anything observed keeps the composition's judgment.
+    if (!composition.observed) {
+      const remembered = recalled.get(text.trim())
+      if (remembered !== undefined) return { pasted: remembered }
+    }
     return { pasted: isPasteOnly(composition) }
+  }
+
+  /** Records one composer submission's pasted verdict, evicting the oldest. */
+  function remember(text: string, pasted: boolean): void {
+    const key = text.trim()
+    if (key === '') return
+    recalled.delete(key)
+    recalled.set(key, pasted)
+    if (recalled.size > RECALLED_MAX) {
+      const oldest = recalled.keys().next().value
+      if (oldest !== undefined) recalled.delete(oldest)
+    }
   }
 
   function onFill(emptied: boolean): void {

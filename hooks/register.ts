@@ -296,7 +296,7 @@ export function register(on: On, options: PluginOptions): void {
         getConfig(),
         controller.getState(),
         Date.now(),
-        controller.submissionFacts(),
+        controller.submissionFacts(e.text),
       )
       if (decision.kind === 'optimize' && currentUi !== null) {
         ui = await chooseUi(currentUi)

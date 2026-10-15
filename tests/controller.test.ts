@@ -940,7 +940,7 @@ describe('composition — a paste-only draft reaches the classifier', () => {
     h.controller.onSessionStart('sess-1')
     h.controller.observeEditInput({ inputText: '붙여넣은 여러 줄 텍스트' })
 
-    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
+    expect(h.controller.submissionFacts('붙여넣은 여러 줄 텍스트')).toEqual({ pasted: true })
     expect(await h.controller.onSubmit(h.ports, submit('붙여넣은 여러 줄 텍스트'), 'pane')).toEqual({
       action: 'next',
       text: '붙여넣은 여러 줄 텍스트',
@@ -979,7 +979,7 @@ describe('composition — a paste-only draft reaches the classifier', () => {
     h.controller.observeEditInput({ inputText: '붙여넣은 여러 줄 텍스트' })
     h.controller.observeEditInput({ key: { key: 'x' }, inputText: 'x' })
 
-    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+    expect(h.controller.submissionFacts('붙여넣은 여러 줄 텍스트x')).toEqual({ pasted: false })
     const outcome = await h.controller.onSubmit(h.ports, submit('붙여넣은 여러 줄 텍스트x'), 'pane')
     expect(outcome.action).toBe('drop')
     expect(h.controller.getState().workflow?.original).toBe('붙여넣은 여러 줄 텍스트x')
@@ -999,7 +999,7 @@ describe('composition — a paste-only draft reaches the classifier', () => {
     const h = harness({ simulateTyping: false })
     h.controller.onSessionStart('sess-1')
     h.controller.observeEditInput({ key: { key: 'a' }, inputText: '타이핑한 초안' })
-    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+    expect(h.controller.submissionFacts('타이핑한 초안')).toEqual({ pasted: false })
 
     // Arm the optimizer-off mode so the submission passes without a run.
     h.controller.onComposerEdit(edit({ inputText: '>> ' }))
@@ -1007,8 +1007,9 @@ describe('composition — a paste-only draft reaches the classifier', () => {
       action: 'next',
       text: '타이핑한 초안',
     })
-    // The typed draft left with the submission; the next one is fresh.
-    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
+    // The typed draft left with the submission; the next one is fresh, so a
+    // text this session never submitted is pasted again.
+    expect(h.controller.submissionFacts('새 초안')).toEqual({ pasted: true })
 
     h.controller.observeEditInput({ key: { key: 'b' }, inputText: '다음 타이핑 초안' })
     expect((await h.controller.onSubmit(h.ports, submit('다음 타이핑 초안'), 'pane')).action).toBe('drop')
@@ -1019,7 +1020,7 @@ describe('composition — a paste-only draft reaches the classifier', () => {
     const h = harness({ simulateTyping: false })
     h.controller.onSessionStart('sess-1')
     h.controller.onFill(false)
-    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+    expect(h.controller.submissionFacts('플러그인이 넣은 초안')).toEqual({ pasted: false })
 
     const outcome = await h.controller.onSubmit(h.ports, submit('플러그인이 넣은 초안'), 'pane')
     expect(outcome.action).toBe('drop')
@@ -1032,10 +1033,10 @@ describe('composition — a paste-only draft reaches the classifier', () => {
     h.controller.observeEditInput({ key: { key: 'a' }, inputText: '타이핑한 초안' })
 
     h.controller.onFill(true)
-    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
+    expect(h.controller.submissionFacts('타이핑한 초안')).toEqual({ pasted: true })
 
     h.controller.onFill(false)
-    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+    expect(h.controller.submissionFacts('타이핑한 초안')).toEqual({ pasted: false })
   })
 
   test('a paste while a composer dialogue is reviewing is still a reply', async () => {
@@ -1075,10 +1076,94 @@ describe('composition — a paste-only draft reaches the classifier', () => {
     const h = harness({ simulateTyping: false })
     h.controller.onSessionStart('sess-1')
     h.controller.observeEditInput({ key: { key: 'a' }, inputText: '타이핑한 초안' })
-    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+    expect(h.controller.submissionFacts('타이핑한 초안')).toEqual({ pasted: false })
 
     h.controller.onSessionEnd()
-    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
+    expect(h.controller.submissionFacts('타이핑한 초안')).toEqual({ pasted: true })
+  })
+})
+
+describe('composition — a recalled prompt keeps its verdict', () => {
+  test('a recalled typed prompt is still optimized', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '직접 쓴 프롬프트' })
+
+    expect((await h.controller.onSubmit(h.ports, submit('직접 쓴 프롬프트'), 'pane')).action).toBe('drop')
+
+    // ↑ recall re-submits the same text with no edit or autocomplete event; the
+    // remembered typed verdict keeps it optimizable.
+    h.controller.onSessionStart('sess-2')
+    expect(await h.controller.onSubmit(h.ports, submit('직접 쓴 프롬프트'), 'pane')).toEqual({
+      action: 'drop',
+      reason: '프롬프트를 다듬는 중입니다.',
+    })
+    expect(h.controller.getState().workflow?.original).toBe('직접 쓴 프롬프트')
+  })
+
+  test('a recalled pasted prompt passes through again', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ inputText: '붙여넣기만 한 프롬프트' })
+
+    expect(await h.controller.onSubmit(h.ports, submit('붙여넣기만 한 프롬프트'), 'pane')).toEqual({
+      action: 'next',
+      text: '붙여넣기만 한 프롬프트',
+    })
+
+    expect(await h.controller.onSubmit(h.ports, submit('붙여넣기만 한 프롬프트'), 'pane')).toEqual({
+      action: 'next',
+      text: '붙여넣기만 한 프롬프트',
+    })
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.calls.complete).toBe(0)
+  })
+
+  test('an observed edit still follows the composition over the memory', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '관찰이 기억보다 먼저다' })
+    await h.controller.onSubmit(h.ports, submit('관찰이 기억보다 먼저다'), 'pane')
+
+    // The same text was remembered as typed, but this draft was pasted: the
+    // observed composition wins over the memory.
+    h.controller.onSessionStart('sess-2')
+    h.controller.observeEditInput({ inputText: '관찰이 기억보다 먼저다' })
+    expect(h.controller.submissionFacts('관찰이 기억보다 먼저다')).toEqual({ pasted: true })
+
+    // And the reverse: a text remembered as pasted is typed over, so it is
+    // optimizable even though the memory says otherwise.
+    h.controller.onSessionStart('sess-3')
+    h.controller.observeEditInput({ inputText: '붙여넣었다가 고친 원문' })
+    await h.controller.onSubmit(h.ports, submit('붙여넣었다가 고친 원문'), 'pane')
+    h.controller.onSessionStart('sess-4')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '붙여넣었다가 고친 원문' })
+    expect(h.controller.submissionFacts('붙여넣었다가 고친 원문')).toEqual({ pasted: false })
+  })
+
+  test('a text this session never saw with no event is still pasted', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+
+    expect(h.controller.submissionFacts('한 번도 보내지 않은 원문')).toEqual({ pasted: true })
+    expect(await h.controller.onSubmit(h.ports, submit('한 번도 보내지 않은 원문'), 'pane')).toEqual({
+      action: 'next',
+      text: '한 번도 보내지 않은 원문',
+    })
+  })
+
+  test('the hundred most recent texts are kept, oldest dropped', async () => {
+    const h = harness({ simulateTyping: false, config: { enabled: false } })
+    h.controller.onSessionStart('sess-1')
+    for (let i = 1; i <= 101; i += 1) {
+      const text = `타이핑한 초안 ${i}`
+      h.controller.observeEditInput({ key: { key: 'a' }, inputText: text })
+      await h.controller.onSubmit(h.ports, submit(text), 'pane')
+    }
+
+    expect(h.controller.submissionFacts('타이핑한 초안 101')).toEqual({ pasted: false })
+    // The oldest entry fell out, so its no-event draft is pasted again.
+    expect(h.controller.submissionFacts('타이핑한 초안 1')).toEqual({ pasted: true })
   })
 })
 

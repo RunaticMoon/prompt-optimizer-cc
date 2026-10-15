@@ -107,7 +107,8 @@ export function noteAutocomplete(c: Composition, text: string): Composition {
  * True when the person typed nothing and either a large key-less insertion was
  * seen, a paste placeholder was seen, or nothing at all was observed (a paste
  * followed by an immediate Enter can submit with no event). A typed draft is
- * never paste-only.
+ * never paste-only. A ↑ history recall also submits with no event; the
+ * controller hands that case its remembered verdict instead of calling this.
  *
  * @param c the draft's composition
  * @returns whether the draft is paste-only
