@@ -291,7 +291,13 @@ export function register(on: On, options: PluginOptions): void {
       // The classifier decides the shape first; only an optimization needs a UI
       // chosen (and a pane opened) here. The controller re-reads the same state.
       let ui: 'pane' | 'composer' = 'composer'
-      const decision = classifySubmission(e, getConfig(), controller.getState(), Date.now())
+      const decision = classifySubmission(
+        e,
+        getConfig(),
+        controller.getState(),
+        Date.now(),
+        controller.submissionFacts(e.text),
+      )
       if (decision.kind === 'optimize' && currentUi !== null) {
         ui = await chooseUi(currentUi)
       }
@@ -313,6 +319,14 @@ export function register(on: On, options: PluginOptions): void {
     currentUi = uiPortsOf($)
     currentSchedule = fn => {
       $.clock.after(1, fn)
+    }
+    // Record the edit's facts on entry, before `next` (and before the optimizer-
+    // off mode consumes it): a paste and its Enter can arrive in one write, and
+    // the edit chain can finish after the submit hook classifies (A-REPORT §7).
+    try {
+      controller.observeEditInput(e)
+    } catch {
+      // Recording the draft's composition must not break the edit path.
     }
     // The optimizer-off mode reads the edit before the box changes; a consumed
     // edit (the marker typed, or ctrl+u) returns the box the controller built
@@ -357,6 +371,10 @@ export function register(on: On, options: PluginOptions): void {
     // Any landed fill changed the box, so the armed mode no longer describes
     // what the person is about to send, whichever plugin made the fill.
     if (r.isFilled) {
+      // The plugin wrote the box: an emptied replacement starts the draft over,
+      // any other text is the plugin's own and is improved as usual once the
+      // restore's bypass ticket is gone.
+      controller.onFill(e.mode === 'replace' && e.text.trim() === '')
       controller.clearComposerSnapshot()
       const wasArmed = controller.getState().rawMode !== null
       controller.clearRawMode()

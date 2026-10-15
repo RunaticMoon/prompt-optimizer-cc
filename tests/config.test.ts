@@ -305,6 +305,33 @@ describe('resolveConfig — memoryContext', () => {
   })
 })
 
+describe('resolveConfig — pasteBypass', () => {
+  test('defaults to true (matching the manifest default)', () => {
+    expect(DEFAULT_CONFIG.pasteBypass).toBe(true)
+    expect(resolveConfig({}).config.pasteBypass).toBe(true)
+    expect(resolveConfig(undefined).config.pasteBypass).toBe(true)
+  })
+
+  test('accepts a boolean', () => {
+    expect(resolveConfig({ pasteBypass: false }).config.pasteBypass).toBe(false)
+    expect(resolveConfig({ pasteBypass: true }).config.pasteBypass).toBe(true)
+  })
+
+  test('coerces the string spellings the config UI writes', () => {
+    expect(resolveConfig({ pasteBypass: 'true' }).config.pasteBypass).toBe(true)
+    expect(resolveConfig({ pasteBypass: 'false' }).config.pasteBypass).toBe(false)
+  })
+
+  test('falls back on any other value with one warning', () => {
+    for (const value of ['yes', 1, 0, null, undefined, ['true']]) {
+      const { config, warnings } = resolveConfig({ pasteBypass: value })
+      expect(config.pasteBypass).toBe(DEFAULT_CONFIG.pasteBypass)
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('"pasteBypass" must be a boolean')
+    }
+  })
+})
+
 describe('validateConfigChange', () => {
   test('returns the coerced value for a valid single change', () => {
     expect(validateConfigChange('model', '  opus  ')).toEqual({ ok: true, key: 'model', value: 'opus' })
@@ -312,6 +339,8 @@ describe('validateConfigChange', () => {
     expect(validateConfigChange('modelGuidance', false)).toEqual({ ok: true, key: 'modelGuidance', value: false })
     expect(validateConfigChange('modelGuidance', 'true')).toEqual({ ok: true, key: 'modelGuidance', value: true })
     expect(validateConfigChange('memoryContext', 'false')).toEqual({ ok: true, key: 'memoryContext', value: false })
+    expect(validateConfigChange('pasteBypass', 'false')).toEqual({ ok: true, key: 'pasteBypass', value: false })
+    expect(validateConfigChange('pasteBypass', true)).toEqual({ ok: true, key: 'pasteBypass', value: true })
     expect(validateConfigChange('maxTokens', '2048')).toEqual({ ok: true, key: 'maxTokens', value: 2048 })
     expect(validateConfigChange('maxTokens', 128)).toEqual({ ok: true, key: 'maxTokens', value: 128 })
   })
@@ -327,6 +356,8 @@ describe('validateConfigChange', () => {
       ['enabled', 'maybe'],
       ['modelGuidance', 'maybe'],
       ['modelGuidance', 3],
+      ['pasteBypass', 'maybe'],
+      ['pasteBypass', 2],
       ['triggerMode', 'sometimes'],
       ['triggerPrefix', '/x'],
       ['rawPrefix', '!x'],

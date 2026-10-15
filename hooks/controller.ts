@@ -22,9 +22,11 @@
 
 import type { PromptSubmitInput, Timer } from 'claude-code'
 
+import { EMPTY_COMPOSITION, isPasteOnly, noteAutocomplete, noteBox, noteEditInput } from './composition'
+import type { Composition } from './composition'
 import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
-import { sendApproved, transferDraft } from './delivery'
+import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
 import { buildModelRequest, completeRewrite } from './model'
@@ -34,6 +36,7 @@ import { resolveTargetModel } from './resolve-target-model'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import type {
+  BypassTicket,
   ContextSnapshot,
   EnginePorts,
   GuidanceStatus,
@@ -43,6 +46,7 @@ import type {
   RewriteResult,
   RuntimeState,
   SubmissionDecision,
+  SubmissionFacts,
   TransferRefusal,
   Workflow,
 } from './contracts'
@@ -61,6 +65,9 @@ const EXTEND_GUIDE = '미해결 질문이 남아 있습니다. 5회를 더 허�
 const ACCEPT_NOTICE = '개선안을 입력창에 넣었습니다. Enter 로 전송하세요.'
 /** Result reason for an action refused while its run is mid-flight. */
 export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
+
+/** How many composer submissions' paste verdicts the controller keeps. */
+const RECALLED_MAX = 100
 
 /** A token count with every field at zero, for arms that spent nothing. */
 const ZERO_USAGE: ModelUsage = {
@@ -134,10 +141,35 @@ export interface OptimizerController {
   sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   cancel(ports: EnginePorts): Promise<ActionResult>
   onPromptEdit(text: string): void
+  /**
+   * Notes one `prompt.edit` as it arrives, before the box changes: a key-less
+   * insertion of 8 characters (`PASTE_MIN_CHARS`) or more marks the draft as
+   * pasted, a carried key as typed (PSTB-2735). The edit hook must call this on
+   * entry, before `next`, because a paste and its Enter can arrive in one write
+   * and the edit chain can finish after the submit hook (A-REPORT §7).
+   */
+  observeEditInput(e: { key?: unknown; inputText: string }): void
   /** Observes display text on paths such as long paste that emit no edit. */
   observeComposer(text: string): void
+  /**
+   * What the plugin saw build the composer draft, for the submit classifier: a
+   * draft that was only pasted (or injected by another app) is passed through
+   * unchanged when `pasteBypass` is on.
+   *
+   * `text` is the submitted text. A draft with no observed event at all is
+   * pasted, but a prompt recalled from the engine's history also arrives that
+   * way and is not a paste; when nothing was observed and `text` was submitted
+   * earlier in this controller's life, its remembered verdict is used instead.
+   */
+  submissionFacts(text: string): SubmissionFacts
   /** A fill invalidates the last user-edit snapshot, but keeps accepted text. */
   clearComposerSnapshot(): void
+  /**
+   * Notes a landed `prompt.fill` by the plugin. An `emptied` box starts the
+   * draft over; otherwise the text is the plugin's own, not a paste, so a later
+   * Enter (after any bypass expires) still improves it.
+   */
+  onFill(emptied: boolean): void
   /**
    * Applies one prompt-box edit to the optimizer-off mode. Returns the box the
    * edit should be replaced with when the edit is consumed (arming or
@@ -205,6 +237,22 @@ export function createController(deps: ControllerDeps): OptimizerController {
   let consumedPrompt: { workflowId: string; texts: readonly string[] } | null = null
   /** Raw display text before submission expands pasted-content placeholders. */
   let composerSnapshot: string | undefined
+  /**
+   * What the plugin saw build the current draft since the box was last empty
+   * (`hooks/composition.ts`). Read by `submissionFacts` at submit time; reset
+   * when the box is emptied or a submission is consumed.
+   */
+  let composition: Composition = EMPTY_COMPOSITION
+  /**
+   * The paste verdict each composer submission's text got in this controller's
+   * life, keyed by `text.trim()` (PSTB-2735, review M1). ↑ history recall
+   * submits a previous prompt with no edit or autocomplete event, so an
+   * unobserved draft looks pasted; a remembered verdict keeps the judgment the
+   * text got when it was first sent. Oldest entries are dropped past
+   * {@link RECALLED_MAX}, and a session change keeps the map: the engine's
+   * input history survives `/clear`.
+   */
+  const recalled = new Map<string, boolean>()
 
   function sameQuestion(asked: Workflow): boolean {
     const current = state.workflow
@@ -509,29 +557,64 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
   }
 
-  /** Closes the run's pane (when any) then fills the given text back in. */
+  /**
+   * Closes the run's pane (when any) then fills the given text back in.
+   *
+   * A tentative permit is placed before the box read/fill so a submission that
+   * races the restore already sees the draft's text as its own and bypasses
+   * interception instead of starting a second optimization. The fill's own text
+   * confirms the permit, or a refusal (or a throw) revokes it. Adopting the fill's
+   * ticket is skipped once the tentative one has been consumed, revoked or edited,
+   * so a spent permit cannot come back to life and a person's correction is never
+   * overwritten.
+   */
   async function restore(
     ports: EnginePorts,
     workflow: Workflow,
     text: string,
   ): Promise<Awaited<ReturnType<typeof transferDraft>>> {
-    return transferDraft(
-      ports,
-      {
-        sessionId: workflow.sessionId,
-        workflowId: workflow.id,
-        text,
-        mode: 'replace',
-      },
-      {
-        now: deps.now(),
-        paneId: workflow.ui === 'pane' ? PANE_ID : undefined,
-        // A fill can be refused, or another submit hook can delay the host's
-        // handback until after our scheduled clear. Only the already accepted
-        // text may be replaced in either case; fresh user input stays protected.
-        expectedDraft: consumedPrompt?.workflowId === workflow.id ? consumedPrompt.texts : undefined,
-      },
-    )
+    const provisional: BypassTicket = {
+      sessionId: workflow.sessionId,
+      workflowId: workflow.id,
+      text,
+      expiresAt: deps.now() + BYPASS_TTL_MS,
+    }
+    apply({ type: 'bypass-issued', ticket: provisional })
+
+    let result: Awaited<ReturnType<typeof transferDraft>>
+    try {
+      result = await transferDraft(
+        ports,
+        {
+          sessionId: workflow.sessionId,
+          workflowId: workflow.id,
+          text,
+          mode: 'replace',
+        },
+        {
+          now: deps.now(),
+          paneId: workflow.ui === 'pane' ? PANE_ID : undefined,
+          // A fill can be refused, or another submit hook can delay the host's
+          // handback until after our scheduled clear. Only the already accepted
+          // text may be replaced in either case; fresh user input stays protected.
+          expectedDraft: consumedPrompt?.workflowId === workflow.id ? consumedPrompt.texts : undefined,
+        },
+      )
+    } catch (cause) {
+      if (state.bypass === provisional) {
+        apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
+      }
+      throw cause
+    }
+
+    // Only this restore's own tentative permit may be replaced or revoked: a
+    // consumed, revoked or edited permit is a new (or missing) object and must
+    // be left alone.
+    if (state.bypass === provisional) {
+      if (result.kind === 'filled') apply({ type: 'bypass-issued', ticket: result.ticket })
+      else apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
+    }
+    return result
   }
 
   /**
@@ -547,7 +630,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return
     }
     if (result.kind === 'filled') {
-      apply({ type: 'bypass-issued', ticket: result.ticket })
+      // `restore` already confirmed the permit with the fill's own text.
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify(notice)
       return
@@ -776,14 +859,28 @@ export function createController(deps: ControllerDeps): OptimizerController {
       ? [e.text] : [e.text, composerSnapshot]
     if (e.origin.kind === 'composer') composerSnapshot = undefined
     let decision: SubmissionDecision
+    // What the plugin saw build this draft, read before the classifier (and
+    // before the draft's composition is consumed below), so this pass and the
+    // pre-classification in `register` see the same facts. Record the verdict
+    // right here, including on the classify-failure path below, so a later
+    // no-event submission of the same text (↑ recall) can reuse it.
+    const facts = e.origin.kind === 'composer' ? submissionFacts(e.text) : undefined
+    if (facts !== undefined) remember(e.text, facts.pasted)
     try {
-      decision = classifySubmission(e, deps.getConfig(), state, deps.now())
+      decision = classifySubmission(e, deps.getConfig(), state, deps.now(), facts)
     } catch {
       // Classification itself failing must not trap the person: pass through.
-      // The mode is still one-shot, so clear it before returning.
+      // The mode is still one-shot, so clear it before returning, and a composer
+      // draft is consumed for the same reason.
+      if (e.origin.kind === 'composer') composition = EMPTY_COMPOSITION
       if (state.rawMode !== null) apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
       return { action: 'next', text: e.text }
     }
+
+    // A composer submission is one-shot for the draft's composition, whatever
+    // the classifier decided: the engine clears the box, and a dropped
+    // submission is handed back (the restore fill re-observes it).
+    if (e.origin.kind === 'composer') composition = EMPTY_COMPOSITION
 
     // The optimizer-off mode is one-shot: whatever the classifier decided, a
     // mode armed at classification time is cleared by this submission.
@@ -964,7 +1061,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
 
     if (result.kind === 'filled') {
-      apply({ type: 'bypass-issued', ticket: result.ticket })
+      // `restore` already confirmed the permit with the fill's own text.
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify(ACCEPT_NOTICE)
       return { ok: true }
@@ -1076,7 +1173,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
 
     if (result.kind === 'filled') {
-      apply({ type: 'bypass-issued', ticket: result.ticket })
+      // `restore` already confirmed the permit with the fill's own text.
       notify('개선을 취소하고 원문을 입력창에 복원했습니다.')
       return { ok: true }
     }
@@ -1086,6 +1183,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
   }
 
   function onPromptEdit(text: string): void {
+    // The box's text is the running draft's anchor: an emptied box (the
+    // engine's own clear, or a person deleting everything) starts a fresh draft.
+    composition = noteBox(composition, text)
     composerSnapshot = text
     // Once the person edits again, an old paste placeholder no longer proves
     // ownership of the box. Keep only the actual submitted text as a fallback.
@@ -1099,6 +1199,40 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return
     }
     apply({ type: 'bypass-edited', sessionId: state.sessionId, text })
+  }
+
+  function observeEditInput(e: { key?: unknown; inputText: string }): void {
+    composition = noteEditInput(composition, e)
+  }
+
+  function submissionFacts(text: string): SubmissionFacts {
+    // A recalled history entry emits no edit or autocomplete event, so an
+    // unobserved draft would look pasted. A remembered verdict for the same
+    // text stands instead; anything observed keeps the composition's judgment.
+    if (!composition.observed) {
+      const remembered = recalled.get(text.trim())
+      if (remembered !== undefined) return { pasted: remembered }
+    }
+    return { pasted: isPasteOnly(composition) }
+  }
+
+  /** Records one composer submission's pasted verdict, evicting the oldest. */
+  function remember(text: string, pasted: boolean): void {
+    const key = text.trim()
+    if (key === '') return
+    recalled.delete(key)
+    recalled.set(key, pasted)
+    if (recalled.size > RECALLED_MAX) {
+      const oldest = recalled.keys().next().value
+      if (oldest !== undefined) recalled.delete(oldest)
+    }
+  }
+
+  function onFill(emptied: boolean): void {
+    // The plugin wrote the box, not the person: an empty replacement starts the
+    // draft over, any other text is the plugin's own (not a paste), so a later
+    // Enter still improves it once the restore's bypass ticket is gone.
+    composition = emptied ? EMPTY_COMPOSITION : { ...EMPTY_COMPOSITION, observed: true }
   }
 
   function onComposerEdit(e: RawEditFacts): { text: string; cursor: number } | null {
@@ -1136,6 +1270,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     abortAll()
     pendingAsk = null
     resetGuidance()
+    composition = EMPTY_COMPOSITION
     apply({ type: 'reset', sessionId })
   }
 
@@ -1143,6 +1278,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     abortAll()
     pendingAsk = null
     resetGuidance()
+    composition = EMPTY_COMPOSITION
     apply({ type: 'reset', sessionId: state.sessionId })
   }
 
@@ -1159,15 +1295,21 @@ export function createController(deps: ControllerDeps): OptimizerController {
     sendOriginal: (ports, workflowId) => send(ports, 'original', workflowId),
     cancel,
     onPromptEdit,
+    observeEditInput,
     observeComposer: text => {
-      // Autocomplete also observes the host's handback. Do not treat it as a
-      // user edit or repopulate a snapshot consumed by a still-running submit.
+      // Autocomplete sees a long paste's placeholder even though no edit
+      // arrived for it, so the draft's composition follows it whichever branch
+      // below handles the host's handback. Do not treat it as a user edit or
+      // repopulate a snapshot consumed by a still-running submit.
+      composition = noteAutocomplete(composition, text)
       const workflow = state.workflow
       if (workflow === null || workflow.phase === 'reviewing' || workflow.phase === 'failed') {
         composerSnapshot = text
       }
     },
+    submissionFacts,
     clearComposerSnapshot: () => { composerSnapshot = undefined },
+    onFill,
     onComposerEdit,
     clearRawMode,
     onSessionStart,

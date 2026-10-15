@@ -16,6 +16,7 @@ import type {
   PassReason,
   RuntimeState,
   SubmissionDecision,
+  SubmissionFacts,
 } from './contracts'
 
 /**
@@ -25,6 +26,7 @@ import type {
  * @param config resolved user settings
  * @param state the session's current optimizer state
  * @param now epoch milliseconds, for bypass expiry
+ * @param facts what the plugin saw build this draft, when it kept a tracker
  * @returns what the caller should do with this submission
  */
 export function classifySubmission(
@@ -32,6 +34,7 @@ export function classifySubmission(
   config: OptimizerConfig,
   state: Readonly<RuntimeState>,
   now: number,
+  facts?: SubmissionFacts,
 ): SubmissionDecision {
   // 1. Only the user's own terminal Enter is a candidate.
   if (e.origin.kind !== 'composer') return pass('not-composer')
@@ -115,7 +118,13 @@ export function classifySubmission(
     return pass('no-trigger')
   }
 
-  // 12. `always` mode improves everything left, on the text as typed.
+  // 12. A draft the person never typed — only pasted, or put in by another app
+  //     such as Orca — is not their own prompt, so it goes to the main session
+  //     as-is. The reply (8), raw (5), bypass (6) and prefix trigger (11) rules
+  //     above still win.
+  if (config.pasteBypass && facts?.pasted === true) return pass('pasted')
+
+  // 13. `always` mode improves everything left, on the text as typed.
   return { kind: 'optimize', text: e.text, trigger: 'auto' }
 }
 

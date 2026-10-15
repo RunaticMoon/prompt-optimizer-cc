@@ -196,6 +196,17 @@ describe('formatStatus', () => {
     expect(idle).not.toContain('옵티마이저 끔 모드')
   })
 
+  test('reports paste bypass with its explanation, after the memory-context line', () => {
+    const on = formatStatus(config(), liveState())
+    expect(on).toContain('붙여넣기 그대로 보내기: 켬 (붙여넣기·외부 앱 입력만으로 채운 프롬프트는 다듬지 않음)')
+    expect(on.indexOf('장기 기억 문맥')).toBeLessThan(on.indexOf('붙여넣기 그대로 보내기'))
+    expect(on.indexOf('붙여넣기 그대로 보내기')).toBeLessThan(on.indexOf('이 세션 사용량'))
+
+    const off = formatStatus(config({ pasteBypass: false }), liveState())
+    expect(off).toContain('붙여넣기 그대로 보내기: 끔')
+    expect(off).not.toContain('다듬지 않음')
+  })
+
   test('says so when no run is active and names the last error when failed', () => {
     expect(formatStatus(config(), liveState({ workflow: null }))).toContain('진행 중인 개선 작업: 없음')
     const failed = formatStatus(config(), liveState({ workflow: workflow({ phase: 'failed', lastError: '타임아웃' }) }))

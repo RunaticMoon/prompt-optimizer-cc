@@ -170,6 +170,13 @@ function validateKey(key: ConfigKey, raw: unknown): KeyResult {
       }
       return { value: parsed }
     }
+    case 'pasteBypass': {
+      const parsed = toBoolean(raw)
+      if (parsed === undefined) {
+        return { value: DEFAULT_CONFIG.pasteBypass, warning: `"pasteBypass" must be a boolean; using default ${DEFAULT_CONFIG.pasteBypass}` }
+      }
+      return { value: parsed }
+    }
   }
 }
 
