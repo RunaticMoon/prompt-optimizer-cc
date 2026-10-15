@@ -2498,3 +2498,157 @@ describe('ui.ask — detached questions and pane fallback', () => {
     })
   }
 })
+
+describe('restore — a submission racing the fill', () => {
+  /** A controller whose every fill stays pending until the test resolves it. */
+  function heldFill(): {
+    h: Harness
+    pending: { promise: Promise<PromptFilled>; resolve: (value: PromptFilled) => void }
+  } {
+    const pending = deferred<PromptFilled>()
+    return { h: harness({ fill: () => pending.promise }), pending }
+  }
+
+  test('a submission racing a cancel restore bypasses the original instead of optimizing it again', async () => {
+    const { h, pending } = heldFill()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    expect(h.calls.complete).toBe(1)
+
+    const cancelling = h.controller.cancel(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    // The tentative permit is already live, before the fill settles and long
+    // before the old code issued its ticket.
+    expect(h.controller.getState().bypass?.text).toBe('원문 요청')
+
+    const raced = await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    expect(raced).toEqual({ action: 'next', text: '원문 요청' })
+    expect(h.controller.getState().bypass).toBeNull()
+    // No second optimization ran: the text was released, not re-improved.
+    expect(h.calls.complete).toBe(1)
+
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+    expect(await cancelling).toEqual({ ok: true })
+    // The consumed permit must not be resurrected by the late fill.
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('a submission racing a cancel restore with other text is still classified normally', async () => {
+    const { h, pending } = heldFill()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+
+    const cancelling = h.controller.cancel(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    expect(h.controller.getState().bypass?.text).toBe('원문 요청')
+
+    const raced = await h.controller.onSubmit(h.ports, submit('다른 요청'), 'pane')
+    expect(raced).toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+    expect(h.controller.getState().workflow?.original).toBe('다른 요청')
+
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+    expect(await cancelling).toEqual({ ok: true })
+    await h.flush()
+    expect(h.calls.complete).toBe(2)
+  })
+
+  test('a refused restore revokes the tentative permit', async () => {
+    const { h, pending } = heldFill()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+
+    const cancelling = h.controller.cancel(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    expect(h.controller.getState().bypass?.text).toBe('원문 요청')
+
+    pending.resolve({ isFilled: false, refusal: 'dialog', text: '', cursor: 0 })
+    expect((await cancelling).ok).toBe(false)
+    expect(h.controller.getState().bypass).toBeNull()
+  })
+
+  test('a person edit during the restore keeps the edited permit', async () => {
+    const { h, pending } = heldFill()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+
+    const cancelling = h.controller.cancel(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+
+    // A real edit moves the live permit onto the person's own correction.
+    h.controller.onPromptEdit('사람이 고친 원문')
+    expect(h.controller.getState().bypass?.text).toBe('사람이 고친 원문')
+
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+    await cancelling
+    // The fill's own text must not overwrite the person's edit.
+    expect(h.controller.getState().bypass?.text).toBe('사람이 고친 원문')
+  })
+
+  test('an uncontested restore adopts the fill’s own text as the permit', async () => {
+    const h = harness({
+      fill: input => ({ isFilled: true, text: `${input.text} (엔진 정리)`, cursor: 0 }),
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+
+    await h.controller.cancel(h.ports)
+
+    expect(h.controller.getState().bypass?.text).toBe('원문 요청 (엔진 정리)')
+  })
+
+  test('a submission racing an accept transfer bypasses the draft and the run still dismisses', async () => {
+    const { h, pending } = heldFill()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    expect(h.controller.getState().workflow?.phase).toBe('transferring')
+    expect(h.controller.getState().bypass?.text).toBe('개선된 요청')
+
+    expect(await h.controller.onSubmit(h.ports, submit('개선된 요청'), 'pane')).toEqual({
+      action: 'next',
+      text: '개선된 요청',
+    })
+    // The running workflow stays transferring; only the permit was spent.
+    expect(h.controller.getState().workflow?.phase).toBe('transferring')
+    expect(h.controller.getState().bypass).toBeNull()
+
+    pending.resolve({ isFilled: true, text: '개선된 요청', cursor: 6 })
+    expect(await accepting).toEqual({ ok: true })
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.calls.submit).toBe(0)
+  })
+
+  test('a submission racing a failed-round restore bypasses the original', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ complete: async () => apiError(), fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+
+    const running = h.flush()
+    await h.waitFor(() => h.calls.fill === 1)
+    expect(h.controller.getState().workflow?.phase).toBe('failed')
+    expect(h.controller.getState().bypass?.text).toBe('원문 요청')
+
+    expect(await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')).toEqual({
+      action: 'next',
+      text: '원문 요청',
+    })
+    expect(h.controller.getState().bypass).toBeNull()
+
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+    await running
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.calls.complete).toBe(1)
+  })
+})

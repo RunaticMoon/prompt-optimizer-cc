@@ -24,7 +24,7 @@ import type { PromptSubmitInput, Timer } from 'claude-code'
 
 import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
-import { sendApproved, transferDraft } from './delivery'
+import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
 import { buildModelRequest, completeRewrite } from './model'
@@ -34,6 +34,7 @@ import { resolveTargetModel } from './resolve-target-model'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import type {
+  BypassTicket,
   ContextSnapshot,
   EnginePorts,
   GuidanceStatus,
@@ -509,29 +510,64 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
   }
 
-  /** Closes the run's pane (when any) then fills the given text back in. */
+  /**
+   * Closes the run's pane (when any) then fills the given text back in.
+   *
+   * A tentative permit is placed before the box read/fill so a submission that
+   * races the restore already sees the draft's text as its own and bypasses
+   * interception instead of starting a second optimization. The fill's own text
+   * confirms the permit, or a refusal (or a throw) revokes it. Adopting the fill's
+   * ticket is skipped once the tentative one has been consumed, revoked or edited,
+   * so a spent permit cannot come back to life and a person's correction is never
+   * overwritten.
+   */
   async function restore(
     ports: EnginePorts,
     workflow: Workflow,
     text: string,
   ): Promise<Awaited<ReturnType<typeof transferDraft>>> {
-    return transferDraft(
-      ports,
-      {
-        sessionId: workflow.sessionId,
-        workflowId: workflow.id,
-        text,
-        mode: 'replace',
-      },
-      {
-        now: deps.now(),
-        paneId: workflow.ui === 'pane' ? PANE_ID : undefined,
-        // A fill can be refused, or another submit hook can delay the host's
-        // handback until after our scheduled clear. Only the already accepted
-        // text may be replaced in either case; fresh user input stays protected.
-        expectedDraft: consumedPrompt?.workflowId === workflow.id ? consumedPrompt.texts : undefined,
-      },
-    )
+    const provisional: BypassTicket = {
+      sessionId: workflow.sessionId,
+      workflowId: workflow.id,
+      text,
+      expiresAt: deps.now() + BYPASS_TTL_MS,
+    }
+    apply({ type: 'bypass-issued', ticket: provisional })
+
+    let result: Awaited<ReturnType<typeof transferDraft>>
+    try {
+      result = await transferDraft(
+        ports,
+        {
+          sessionId: workflow.sessionId,
+          workflowId: workflow.id,
+          text,
+          mode: 'replace',
+        },
+        {
+          now: deps.now(),
+          paneId: workflow.ui === 'pane' ? PANE_ID : undefined,
+          // A fill can be refused, or another submit hook can delay the host's
+          // handback until after our scheduled clear. Only the already accepted
+          // text may be replaced in either case; fresh user input stays protected.
+          expectedDraft: consumedPrompt?.workflowId === workflow.id ? consumedPrompt.texts : undefined,
+        },
+      )
+    } catch (cause) {
+      if (state.bypass === provisional) {
+        apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
+      }
+      throw cause
+    }
+
+    // Only this restore's own tentative permit may be replaced or revoked: a
+    // consumed, revoked or edited permit is a new (or missing) object and must
+    // be left alone.
+    if (state.bypass === provisional) {
+      if (result.kind === 'filled') apply({ type: 'bypass-issued', ticket: result.ticket })
+      else apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
+    }
+    return result
   }
 
   /**
@@ -547,7 +583,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return
     }
     if (result.kind === 'filled') {
-      apply({ type: 'bypass-issued', ticket: result.ticket })
+      // `restore` already confirmed the permit with the fill's own text.
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify(notice)
       return
@@ -964,7 +1000,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
 
     if (result.kind === 'filled') {
-      apply({ type: 'bypass-issued', ticket: result.ticket })
+      // `restore` already confirmed the permit with the fill's own text.
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify(ACCEPT_NOTICE)
       return { ok: true }
@@ -1076,7 +1112,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
 
     if (result.kind === 'filled') {
-      apply({ type: 'bypass-issued', ticket: result.ticket })
+      // `restore` already confirmed the permit with the fill's own text.
       notify('개선을 취소하고 원문을 입력창에 복원했습니다.')
       return { ok: true }
     }
