@@ -1329,6 +1329,7 @@ describe('integration — session isolation and delivery accuracy', () => {
     await w.advance(1)
 
     const apiCalls = messageCalls.filter(call => (call as { as?: string } | undefined)?.as === 'api')
+    expect(messageCalls.length).toBeGreaterThan(0)
     expect(apiCalls).toHaveLength(0)
     const first = w.completes[0]?.prompt ?? ''
     expect(first).not.toContain('## Long-term memory')

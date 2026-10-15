@@ -473,6 +473,7 @@ describe('collectContext', () => {
     const apiCalls = calls.messageCalls.filter(
       call => (call as { as?: string } | undefined)?.as === 'api',
     )
+    expect(calls.messageCalls.length).toBeGreaterThan(0)
     expect(apiCalls).toHaveLength(0)
     expect('memory' in snapshot).toBe(false)
     expect(snapshot.text).not.toContain('## Long-term memory')
