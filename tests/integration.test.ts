@@ -107,6 +107,12 @@ interface SubmitOver {
   turnId?: string
   wait?: boolean
   attachments?: PromptSubmitInput['attachments']
+  /**
+   * When false, `submit` does not first model the person's typing as a
+   * `prompt.edit`, so a draft the test filled by a key-less paste stays
+   * paste-only (PSTB-2735 §7). Defaults to true.
+   */
+  typed?: boolean
 }
 
 /** The harness a single test builds: observers, controls and actions. */
@@ -153,8 +159,8 @@ interface World {
   submit(text: string, over?: SubmitOver): Promise<PromptSubmitResult>
   /** Runs `/optimize <args>` and returns the command's line. */
   run(args: string): Promise<string>
-  /** A user edit of the composer; returns the box after it. */
-  edit(inputText: string): Promise<PromptBox>
+  /** A user edit of the composer; returns the box after it. `{ key: false }` models a key-less paste. */
+  edit(inputText: string, options?: { key?: false }): Promise<PromptBox>
   /** Advances the mock clock (running any scheduled round). */
   advance(ms?: number): Promise<void>
   /** Lets in-flight work progress without moving the clock. */
@@ -190,6 +196,8 @@ function setup($: Engine, on: On, input: {
   let sectionHooks = 0
   let sessionId = 'sess-1'
   let boxText = ''
+  /** Whether the test drove the draft's own edit chain for the next submit. */
+  let droveDraft = false
   let ssContext: readonly string[] | undefined
   let upsContext: readonly string[] | undefined
   let behavior: ModelBehavior = () => answered(DRAFT)
@@ -344,6 +352,31 @@ function setup($: Engine, on: On, input: {
       await $.session.start({ cwd: '/repo/sub', surface: 'terminal', isInteractive: true })
     },
     async submit(text, over = {}) {
+      // The engine reports the person's typing as `prompt.edit` before Enter.
+      // Model that here so an ordinary `submit` is a typed prompt (PSTB-2735
+      // §7); a test that drove its own edit chain, or passes `typed: false` for
+      // a paste, keeps its own facts. The engine clears the box before the
+      // submit hook, so the harness's own box is restored afterwards.
+      if (
+        (over.origin ?? { kind: 'composer' }).kind === 'composer' &&
+        over.typed !== false &&
+        !droveDraft
+      ) {
+        const before = boxText
+        await ($.prompt as unknown as {
+          edit: (e: PromptEditInput) => Promise<PromptBox>
+        }).edit({
+          origin: { kind: 'composer' },
+          key: { key: 'a' },
+          text: '',
+          cursor: 0,
+          start: 0,
+          end: 0,
+          inputText: text,
+        })
+        boxText = before
+      }
+      droveDraft = false
       const result = await $.prompt.submit({
         text,
         origin: over.origin ?? { kind: 'composer' },
@@ -359,9 +392,13 @@ function setup($: Engine, on: On, input: {
       const result = await $.command.run({ ...RUN, args })
       return result.text ?? ''
     },
-    async edit(inputText) {
+    async edit(inputText, options = {}) {
+      // A key makes this a person's own edit; `key: false` models a paste (no
+      // key) for the paste-only path (PSTB-2735 §7).
+      droveDraft = true
       const input: PromptEditInput = {
         origin: { kind: 'composer' },
+        ...(options.key === false ? {} : { key: { key: 'a' } }),
         text: boxText,
         cursor: boxText.length,
         start: boxText.length,
@@ -641,6 +678,10 @@ describe('integration — session isolation and delivery accuracy', () => {
         token: PASTE_PLACEHOLDER.slice(start),
       })).toEqual({ suggestions })
 
+      // A single typed key after the paste keeps the draft optimizable without
+      // changing the placeholder snapshot (PSTB-2735: a paste-only draft would
+      // otherwise pass straight through).
+      await w.edit('')
       w.setBox('')
       expect(await w.submit(PASTE_EXPANDED)).toEqual({ drop: DROP_OPTIMIZING })
       if (timing === 'before') w.setBox(PASTE_PLACEHOLDER)
@@ -825,6 +866,36 @@ describe('integration — session isolation and delivery accuracy', () => {
       expect(w.forks).toBe(0)
     })
   }
+
+  // PSTB-2735: a draft the person only pasted (or had injected by another app)
+  // goes to the main session as-is; one typed character brings it back under
+  // the optimizer.
+  test('PTB · 붙여넣기만 한 초안은 원문 그대로 메인으로 간다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    await w.edit(ORIGINAL, { key: false })
+    const passed = await w.submit(ORIGINAL, { typed: false })
+
+    expect(passed).toEqual({ text: ORIGINAL })
+    expect(w.submits.map(s => s.text)).toEqual([ORIGINAL])
+    expect(w.completes).toHaveLength(0)
+  })
+
+  test('PTB · 붙여넣기 뒤 한 글자라도 타이핑하면 다시 다듬는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    await w.edit(ORIGINAL, { key: false })
+    await w.edit('!')
+    const dropped = await w.submit(w.box(), { typed: false })
+
+    expect(dropped).toEqual({ drop: DROP_OPTIMIZING })
+    expect(w.submits).toHaveLength(0)
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+    expect(w.completes[0]?.prompt).toContain(ORIGINAL)
+  })
 
   // Invariant 1: a plain composer submission is dropped; nothing reaches main.
   test('INV1 · 일반 composer 제출은 drop되고 하위 submit·turn·completion이 없다', { options: { uiMode: 'composer' } }, async ($, on) => {
@@ -1034,6 +1105,13 @@ describe('integration — session isolation and delivery accuracy', () => {
     ]
 
     for (const [index, behavior] of behaviors.entries()) {
+      if (index > 0) {
+        // A failed round restores the original with a bypass permit. A fresh
+        // session clears it, so each failure is measured on its own rather than
+        // the permit following the next typed prompt.
+        await w.endSession()
+        await w.start()
+      }
       w.setBox('')
       w.setModel(behavior)
       await w.submit(`요청${index}`)
@@ -1106,6 +1184,11 @@ describe('integration — session isolation and delivery accuracy', () => {
     const w = setup($, on)
     await w.start()
 
+    // A prefix typed as ordinary text would arm the optimizer-off marker mid-
+    // typing; this test is about a submission that arrives with the mode off,
+    // so mark the draft typed without typing the marker itself.
+    await w.edit('x')
+    w.setBox('')
     const dropped = await w.submit('>> hello world')
     expect(dropped).toEqual({ drop: DROP_OPTIMIZING })
     expect(w.submits).toHaveLength(0)

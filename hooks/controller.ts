@@ -22,6 +22,8 @@
 
 import type { PromptSubmitInput, Timer } from 'claude-code'
 
+import { EMPTY_COMPOSITION, isPasteOnly, noteAutocomplete, noteBox, noteEditInput } from './composition'
+import type { Composition } from './composition'
 import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
@@ -44,6 +46,7 @@ import type {
   RewriteResult,
   RuntimeState,
   SubmissionDecision,
+  SubmissionFacts,
   TransferRefusal,
   Workflow,
 } from './contracts'
@@ -135,10 +138,30 @@ export interface OptimizerController {
   sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   cancel(ports: EnginePorts): Promise<ActionResult>
   onPromptEdit(text: string): void
+  /**
+   * Notes one `prompt.edit` as it arrives, before the box changes: a key-less
+   * insertion of {@link PASTE_MIN_CHARS} or more marks the draft as pasted, a
+   * carried key as typed (PSTB-2735). The edit hook must call this on entry,
+   * before `next`, because a paste and its Enter can arrive in one write and the
+   * edit chain can finish after the submit hook (A-REPORT §7).
+   */
+  observeEditInput(e: { key?: unknown; inputText: string }): void
   /** Observes display text on paths such as long paste that emit no edit. */
   observeComposer(text: string): void
+  /**
+   * What the plugin saw build the composer draft, for the submit classifier: a
+   * draft that was only pasted (or injected by another app) is passed through
+   * unchanged when `pasteBypass` is on.
+   */
+  submissionFacts(): SubmissionFacts
   /** A fill invalidates the last user-edit snapshot, but keeps accepted text. */
   clearComposerSnapshot(): void
+  /**
+   * Notes a landed `prompt.fill` by the plugin. An `emptied` box starts the
+   * draft over; otherwise the text is the plugin's own, not a paste, so a later
+   * Enter (after any bypass expires) still improves it.
+   */
+  onFill(emptied: boolean): void
   /**
    * Applies one prompt-box edit to the optimizer-off mode. Returns the box the
    * edit should be replaced with when the edit is consumed (arming or
@@ -206,6 +229,12 @@ export function createController(deps: ControllerDeps): OptimizerController {
   let consumedPrompt: { workflowId: string; texts: readonly string[] } | null = null
   /** Raw display text before submission expands pasted-content placeholders. */
   let composerSnapshot: string | undefined
+  /**
+   * What the plugin saw build the current draft since the box was last empty
+   * (`hooks/composition.ts`). Read by `submissionFacts` at submit time; reset
+   * when the box is emptied or a submission is consumed.
+   */
+  let composition: Composition = EMPTY_COMPOSITION
 
   function sameQuestion(asked: Workflow): boolean {
     const current = state.workflow
@@ -812,14 +841,25 @@ export function createController(deps: ControllerDeps): OptimizerController {
       ? [e.text] : [e.text, composerSnapshot]
     if (e.origin.kind === 'composer') composerSnapshot = undefined
     let decision: SubmissionDecision
+    // What the plugin saw build this draft, read before the classifier (and
+    // before the draft's composition is consumed below), so this pass and the
+    // pre-classification in `register` see the same facts.
+    const facts = e.origin.kind === 'composer' ? submissionFacts() : undefined
     try {
-      decision = classifySubmission(e, deps.getConfig(), state, deps.now())
+      decision = classifySubmission(e, deps.getConfig(), state, deps.now(), facts)
     } catch {
       // Classification itself failing must not trap the person: pass through.
-      // The mode is still one-shot, so clear it before returning.
+      // The mode is still one-shot, so clear it before returning, and a composer
+      // draft is consumed for the same reason.
+      if (e.origin.kind === 'composer') composition = EMPTY_COMPOSITION
       if (state.rawMode !== null) apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
       return { action: 'next', text: e.text }
     }
+
+    // A composer submission is one-shot for the draft's composition, whatever
+    // the classifier decided: the engine clears the box, and a dropped
+    // submission is handed back (the restore fill re-observes it).
+    if (e.origin.kind === 'composer') composition = EMPTY_COMPOSITION
 
     // The optimizer-off mode is one-shot: whatever the classifier decided, a
     // mode armed at classification time is cleared by this submission.
@@ -1122,6 +1162,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
   }
 
   function onPromptEdit(text: string): void {
+    // The box's text is the running draft's anchor: an emptied box (the
+    // engine's own clear, or a person deleting everything) starts a fresh draft.
+    composition = noteBox(composition, text)
     composerSnapshot = text
     // Once the person edits again, an old paste placeholder no longer proves
     // ownership of the box. Keep only the actual submitted text as a fallback.
@@ -1135,6 +1178,21 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return
     }
     apply({ type: 'bypass-edited', sessionId: state.sessionId, text })
+  }
+
+  function observeEditInput(e: { key?: unknown; inputText: string }): void {
+    composition = noteEditInput(composition, e)
+  }
+
+  function submissionFacts(): SubmissionFacts {
+    return { pasted: isPasteOnly(composition) }
+  }
+
+  function onFill(emptied: boolean): void {
+    // The plugin wrote the box, not the person: an empty replacement starts the
+    // draft over, any other text is the plugin's own (not a paste), so a later
+    // Enter still improves it once the restore's bypass ticket is gone.
+    composition = emptied ? EMPTY_COMPOSITION : { ...EMPTY_COMPOSITION, observed: true }
   }
 
   function onComposerEdit(e: RawEditFacts): { text: string; cursor: number } | null {
@@ -1172,6 +1230,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     abortAll()
     pendingAsk = null
     resetGuidance()
+    composition = EMPTY_COMPOSITION
     apply({ type: 'reset', sessionId })
   }
 
@@ -1179,6 +1238,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     abortAll()
     pendingAsk = null
     resetGuidance()
+    composition = EMPTY_COMPOSITION
     apply({ type: 'reset', sessionId: state.sessionId })
   }
 
@@ -1195,15 +1255,21 @@ export function createController(deps: ControllerDeps): OptimizerController {
     sendOriginal: (ports, workflowId) => send(ports, 'original', workflowId),
     cancel,
     onPromptEdit,
+    observeEditInput,
     observeComposer: text => {
-      // Autocomplete also observes the host's handback. Do not treat it as a
-      // user edit or repopulate a snapshot consumed by a still-running submit.
+      // Autocomplete sees a long paste's placeholder even though no edit
+      // arrived for it, so the draft's composition follows it whichever branch
+      // below handles the host's handback. Do not treat it as a user edit or
+      // repopulate a snapshot consumed by a still-running submit.
+      composition = noteAutocomplete(composition, text)
       const workflow = state.workflow
       if (workflow === null || workflow.phase === 'reviewing' || workflow.phase === 'failed') {
         composerSnapshot = text
       }
     },
+    submissionFacts,
     clearComposerSnapshot: () => { composerSnapshot = undefined },
+    onFill,
     onComposerEdit,
     clearRawMode,
     onSessionStart,

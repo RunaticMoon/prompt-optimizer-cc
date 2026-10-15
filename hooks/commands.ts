@@ -234,6 +234,7 @@ export function formatStatus(
       ? `그대로 보내기: 맨 앞에 "${config.rawPrefix}" 입력(ctrl+u로 해제)`
       : '그대로 보내기: 꺼짐',
     `장기 기억 문맥: ${config.memoryContext ? '켬' : '끔'}`,
+    `붙여넣기 그대로 보내기: ${config.pasteBypass ? '켬 (붙여넣기·외부 앱 입력만으로 채운 프롬프트는 다듬지 않음)' : '끔'}`,
   ]
   if (state.rawMode !== null) {
     lines.push('옵티마이저 끔 모드: 켜짐 (다음 제출은 그대로 전송)')

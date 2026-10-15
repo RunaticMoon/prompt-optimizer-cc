@@ -6,6 +6,7 @@ import type {
   PromptFillInput,
   PromptSubmitInput,
 } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 import { describe, expect, mock, test, type Plugin } from 'claude-code/testing'
 
 const USAGE: ModelUsage = {
@@ -100,6 +101,24 @@ const FOREIGN_APPEND_RUN = {
   presentation: { isFullscreen: false, columns: 80 },
 }
 
+/**
+ * The engine's typed `prompt.edit` before a person's Enter: a key press that
+ * leaves the draft where it is. Without it the plugin never saw the draft, and
+ * an unobserved draft reads as pasted and passes straight through (PSTB-2735
+ * §7). The test must have registered a bottom `prompt.edit` hook first.
+ */
+async function typedEdit($: Engine, draft: string): Promise<void> {
+  await ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptBox> }).edit({
+    origin: { kind: 'composer' },
+    key: { key: 'a' },
+    text: draft,
+    cursor: draft.length,
+    start: draft.length,
+    end: draft.length,
+    inputText: '',
+  })
+}
+
 describe('register — the wired module', () => {
   test(
     'intercepts, runs one completion, restores and bypasses, and leaves foreign input alone',
@@ -129,6 +148,10 @@ describe('register — the wired module', () => {
         return { deny: 'fork is never used' }
       })
       on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        return { text, cursor: e.start + e.inputText.length }
+      })
       on('prompt.fill', (_$, e) => {
         fills.push(e)
         return { isFilled: true }
@@ -141,6 +164,7 @@ describe('register — the wired module', () => {
       await $.session.start(SESSION_START)
 
       // 1. An eligible composer submission is dropped before any lower hook.
+      await typedEdit($, '로그인 버그 고쳐줘')
       const dropped = await $.prompt.submit({
         text: '로그인 버그 고쳐줘',
         origin: { kind: 'composer' },
@@ -346,6 +370,7 @@ describe('register — the wired module', () => {
       await $.session.start(SESSION_START)
 
       // A run, then accept: the restored draft `hello` gets a bypass permit.
+      await typedEdit($, '원문 요청')
       await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
       await clock.advance(1)
       const accepted = await $.command.run({ ...COMMAND_RUN, args: 'accept' })
@@ -459,6 +484,7 @@ describe('register — the wired module', () => {
       on('session.start', (_$, e) => ({ cwd: e.cwd }))
       on('model.complete', () => ({ value: answered(DRAFT) }))
       on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+      on('prompt.edit', (_$, e) => ({ text: e.text, cursor: e.cursor }))
       on('prompt.fill', (_$, e) => {
         if (
           refuseForeign &&
@@ -475,6 +501,7 @@ describe('register — the wired module', () => {
       })
 
       await $.session.start(SESSION_START)
+      await typedEdit($, '원문 요청')
       await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
       await clock.advance(1)
       const accepted = await $.command.run({ ...COMMAND_RUN, args: 'accept' })
@@ -503,6 +530,7 @@ describe('register — the wired module', () => {
       on('session.start', (_$, e) => ({ cwd: e.cwd }))
       on('model.complete', () => ({ value: answered(DRAFT) }))
       on('prompt.read', () => ({ value: { text: boxText, cursor: boxText.length } }))
+      on('prompt.edit', (_$, e) => ({ text: e.text, cursor: e.cursor }))
       on('prompt.fill', (_$, e) => {
         boxText = e.text
         return { isFilled: true, text: boxText }
@@ -513,6 +541,7 @@ describe('register — the wired module', () => {
       })
 
       await $.session.start(SESSION_START)
+      await typedEdit($, '원문 요청')
       await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
       await clock.advance(1)
       await $.command.run({ ...COMMAND_RUN, args: 'accept' })
@@ -542,6 +571,7 @@ describe('register — the wired module', () => {
       on('session.start', (_$, e) => ({ cwd: e.cwd }))
       on('model.complete', () => ({ value: answered(DRAFT) }))
       on('prompt.read', () => ({ value: { text: boxText, cursor: boxText.length } }))
+      on('prompt.edit', (_$, e) => ({ text: e.text, cursor: e.cursor }))
       on('prompt.fill', (_$, e) => {
         // Emulate the box: `replace` sets it, `append` keeps it and adds the
         // fragment, so the fill's own `text` is not the whole box.
@@ -554,6 +584,7 @@ describe('register — the wired module', () => {
       })
 
       await $.session.start(SESSION_START)
+      await typedEdit($, '원문 요청')
       await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
       await clock.advance(1)
       await $.command.run({ ...COMMAND_RUN, args: 'accept' })
@@ -594,9 +625,11 @@ describe('register — the wired module', () => {
         return { value: answered(DRAFT) }
       })
       on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+      on('prompt.edit', (_$, e) => ({ text: e.text, cursor: e.cursor }))
 
       await $.session.start(SESSION_START)
 
+      await typedEdit($, '로그인 버그 고쳐줘')
       await $.prompt.submit({ text: '로그인 버그 고쳐줘', origin: { kind: 'composer' }, wait: false })
       await clock.advance(1)
       expect(modelCalls).toHaveLength(1)
@@ -615,6 +648,97 @@ describe('register — the wired module', () => {
       expect(modelReads).toBe(2)
     },
   )
+
+  // PSTB-2735: the `prompt.edit` hook must record the edit's facts on entry, so
+  // a key-less paste is known before the submit hook classifies it. The paste
+  // then passes straight through to the main session, unchanged.
+  test(
+    'a key-less paste edit is recorded on entry, so its submission passes through',
+    { options: { uiMode: 'composer' } },
+    async ($, on) => {
+      const submits: PromptSubmitInput[] = []
+      let box = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.submit', (_$, e) => {
+        submits.push(e)
+        return { text: e.text }
+      })
+
+      await $.session.start(SESSION_START)
+
+      // One bracketed paste: no key, and the whole text in one edit.
+      const paste = '붙여넣은 여러 줄 내용'
+      await ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptBox> }).edit({
+        origin: { kind: 'composer' },
+        text: '',
+        cursor: 0,
+        start: 0,
+        end: 0,
+        inputText: paste,
+      })
+
+      const passed = await $.prompt.submit({ text: paste, origin: { kind: 'composer' }, wait: false })
+      expect(passed).toEqual({ text: paste })
+      expect(submits.map(s => s.text)).toEqual([paste])
+    },
+  )
+
+  // The submit hook classifies with the same facts the controller will use, so
+  // a paste never reaches `chooseUi`: no pane opens for it. A typed prompt still
+  // does.
+  test(
+    'a paste submission never opens the pane; a typed one still does',
+    { options: {} },
+    async ($, on) => {
+      const opens: string[] = []
+      let box = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('ui.open', (_$, e) => {
+        opens.push(e.id)
+        return { value: { isPlaced: true } }
+      })
+      on('ui.close', () => ({ value: undefined }))
+      on('ui.status', () => ({ value: undefined }))
+      on('ui.invalidate', () => ({ value: undefined }))
+      on('ui.log', () => ({ value: undefined }))
+      on('ui.toast', () => ({ value: undefined }))
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.submit', (_$, e) => ({ text: e.text }))
+
+      await $.session.start(SESSION_START)
+
+      const paste = '붙여넣은 여러 줄 내용'
+      await ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptBox> }).edit({
+        origin: { kind: 'composer' },
+        text: '',
+        cursor: 0,
+        start: 0,
+        end: 0,
+        inputText: paste,
+      })
+      expect(await $.prompt.submit({ text: paste, origin: { kind: 'composer' }, wait: false }))
+        .toEqual({ text: paste })
+      expect(opens).toEqual([])
+
+      await typedEdit($, '타이핑한 요청')
+      expect(await $.prompt.submit({ text: '타이핑한 요청', origin: { kind: 'composer' }, wait: false }))
+        .toEqual({ drop: '프롬프트를 다듬는 중입니다.' })
+      expect(opens).toHaveLength(1)
+    },
+  )
 })
 
 describe('wired ui.ask questions', () => {
@@ -625,6 +749,7 @@ describe('wired ui.ask questions', () => {
     let resolve!: (result: { result: { questions: unknown[]; answers: Record<string, string> } }) => void
     on('session.start', (_$, e) => ({ cwd: e.cwd }))
     on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+    on('prompt.edit', (_$, e) => ({ text: e.text, cursor: e.cursor }))
     on('model.complete', (_$, e) => {
       requests.push(e)
       return { value: requests.length === 1
@@ -636,6 +761,7 @@ describe('wired ui.ask questions', () => {
       return new Promise(done => { resolve = done })
     })
     await $.session.start(SESSION_START)
+    await typedEdit($, '요청을 다듬어 주세요')
     await $.prompt.submit({ text: '요청을 다듬어 주세요', origin: { kind: 'composer' }, wait: false })
     await clock.advance(1)
     for (let i = 0; i < 100 && questions.length === 0; i++) await Promise.resolve()

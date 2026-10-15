@@ -94,6 +94,13 @@ interface HarnessOptions {
   fill?: (input: PromptFillArgs) => PromptFilled | Promise<PromptFilled>
   submit?: (input: PromptSubmitArgs) => PromptSubmitResult | Promise<PromptSubmitResult>
   now?: number
+  /**
+   * When false, `onSubmit` reaches the controller exactly as called, with no
+   * simulated typing. The default (true) models the engine's `prompt.edit` for
+   * the person's typing before a composer Enter, so `onSubmit(submit(text))`
+   * alone is an ordinary typed prompt rather than a paste (PSTB-2735 §7).
+   */
+  simulateTyping?: boolean
 }
 
 interface Harness {
@@ -311,8 +318,35 @@ function harness(options: HarnessOptions = {}): Harness {
     throw new Error('waitFor: condition never held')
   }
 
+  // The engine reports the person's typing as a `prompt.edit` before Enter. A
+  // test that drives no edit chain still means "the person typed this draft", so
+  // the harness records one typed edit before a composer submission unless the
+  // test observed the draft itself (`observeEditInput`/`onFill`) or asked for
+  // the raw controller (`simulateTyping: false`). PSTB-2735 turns an unobserved
+  // draft into a pasted one, so this keeps the older tests on typed prompts.
+  const rawController = createController(deps)
+  let observedDraft = false
+  const markObserved = <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A): R => {
+    observedDraft = true
+    return fn(...args)
+  }
+  const controller: OptimizerController = options.simulateTyping === false
+    ? rawController
+    : {
+        ...rawController,
+        observeEditInput: markObserved(rawController.observeEditInput),
+        onFill: markObserved(rawController.onFill),
+        onSubmit: (ports, e, ui) => {
+          if (e.origin.kind === 'composer' && !observedDraft) {
+            rawController.observeEditInput({ key: { key: 'a' }, inputText: '' })
+          }
+          observedDraft = false
+          return rawController.onSubmit(ports, e, ui)
+        },
+      }
+
   return {
-    controller: createController(deps),
+    controller,
     ports: engine as unknown as EnginePorts,
     queue,
     notices,
@@ -887,6 +921,164 @@ describe('onPromptEdit — the optimizer-off mode', () => {
 
     expect(h.controller.getState().rawMode).toBeNull()
     expect(h.controller.getState().bypass).toBeNull()
+  })
+})
+
+describe('composition — a paste-only draft reaches the classifier', () => {
+  test('an ordinary typed submission is still optimized', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    const outcome = await h.controller.onSubmit(h.ports, submit('로그인 오류를 고쳐줘'), 'pane')
+
+    expect(outcome).toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+    expect(h.controller.getState().workflow?.original).toBe('로그인 오류를 고쳐줘')
+  })
+
+  test('a key-less paste of eight or more characters passes the original through', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ inputText: '붙여넣은 여러 줄 텍스트' })
+
+    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
+    expect(await h.controller.onSubmit(h.ports, submit('붙여넣은 여러 줄 텍스트'), 'pane')).toEqual({
+      action: 'next',
+      text: '붙여넣은 여러 줄 텍스트',
+    })
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.calls.complete).toBe(0)
+  })
+
+  test('a placeholder seen only by autocomplete passes the expanded original through', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeComposer('[Pasted text #1 +3 lines]')
+
+    expect(await h.controller.onSubmit(h.ports, submit('펼쳐진 붙여넣기 원문'), 'pane')).toEqual({
+      action: 'next',
+      text: '펼쳐진 붙여넣기 원문',
+    })
+    expect(h.calls.complete).toBe(0)
+  })
+
+  test('a submission with no observed event passes as pasted', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+
+    expect(await h.controller.onSubmit(h.ports, submit('이벤트 없이 도착한 원문'), 'pane')).toEqual({
+      action: 'next',
+      text: '이벤트 없이 도착한 원문',
+    })
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.calls.complete).toBe(0)
+  })
+
+  test('one typed key mixed into a paste keeps the draft optimizable', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ inputText: '붙여넣은 여러 줄 텍스트' })
+    h.controller.observeEditInput({ key: { key: 'x' }, inputText: 'x' })
+
+    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+    const outcome = await h.controller.onSubmit(h.ports, submit('붙여넣은 여러 줄 텍스트x'), 'pane')
+    expect(outcome.action).toBe('drop')
+    expect(h.controller.getState().workflow?.original).toBe('붙여넣은 여러 줄 텍스트x')
+  })
+
+  test('pasteBypass off optimizes a paste-only draft', async () => {
+    const h = harness({ simulateTyping: false, config: { pasteBypass: false } })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ inputText: '붙여넣은 여러 줄 텍스트' })
+
+    const outcome = await h.controller.onSubmit(h.ports, submit('붙여넣은 여러 줄 텍스트'), 'pane')
+    expect(outcome.action).toBe('drop')
+    expect(h.controller.getState().workflow?.original).toBe('붙여넣은 여러 줄 텍스트')
+  })
+
+  test('a submission consumes the draft composition it classified', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '타이핑한 초안' })
+    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+
+    // Arm the optimizer-off mode so the submission passes without a run.
+    h.controller.onComposerEdit(edit({ inputText: '>> ' }))
+    expect(await h.controller.onSubmit(h.ports, submit('타이핑한 초안'), 'pane')).toEqual({
+      action: 'next',
+      text: '타이핑한 초안',
+    })
+    // The typed draft left with the submission; the next one is fresh.
+    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
+
+    h.controller.observeEditInput({ key: { key: 'b' }, inputText: '다음 타이핑 초안' })
+    expect((await h.controller.onSubmit(h.ports, submit('다음 타이핑 초안'), 'pane')).action).toBe('drop')
+    expect(h.controller.getState().workflow?.original).toBe('다음 타이핑 초안')
+  })
+
+  test('a plugin fill of non-empty text is optimized on a later Enter', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.onFill(false)
+    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+
+    const outcome = await h.controller.onSubmit(h.ports, submit('플러그인이 넣은 초안'), 'pane')
+    expect(outcome.action).toBe('drop')
+    expect(h.controller.getState().workflow?.original).toBe('플러그인이 넣은 초안')
+  })
+
+  test('an emptied plugin fill starts the draft over', () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '타이핑한 초안' })
+
+    h.controller.onFill(true)
+    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
+
+    h.controller.onFill(false)
+    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+  })
+
+  test('a paste while a composer dialogue is reviewing is still a reply', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('첫 원문'), 'composer')
+    await h.flush()
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+
+    h.controller.observeEditInput({ inputText: '도중에 붙여넣은 보완 내용' })
+    const outcome = await h.controller.onSubmit(h.ports, submit('도중에 붙여넣은 보완 내용'), 'composer')
+
+    expect(outcome).toEqual({ action: 'drop', reason: '보완 요청을 옵티마이저에 전달했습니다.' })
+    expect(h.controller.getState().workflow?.original).toBe('첫 원문')
+  })
+
+  test('a restored draft’s bypass ticket still outranks a paste fact', async () => {
+    const original = '처음 작성한 원문 요청'
+    const h = harness({ box: original })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'pane')
+    await h.flush()
+    await h.controller.cancel(h.ports)
+    expect(h.controller.getState().bypass?.text).toBe(original)
+
+    h.controller.observeEditInput({ inputText: '전혀 다른 붙여넣기 내용' })
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane')).toEqual({
+      action: 'next',
+      text: original,
+    })
+    // The ticket, not rule 12, was the reason: a pass never consumes it.
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.calls.complete).toBe(1)
+  })
+
+  test('onSessionEnd starts the next draft over', () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '타이핑한 초안' })
+    expect(h.controller.submissionFacts()).toEqual({ pasted: false })
+
+    h.controller.onSessionEnd()
+    expect(h.controller.submissionFacts()).toEqual({ pasted: true })
   })
 })
 
