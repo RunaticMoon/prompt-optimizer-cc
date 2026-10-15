@@ -84,6 +84,11 @@ function engineBlock(text: string): ApiBlock {
   return { type: 'text', text: `<system-reminder>\n${text}\n</system-reminder>` }
 }
 
+/** A slash-command transcript block (2.1.300 measured shape, verify-E-REPORT). */
+function commandBlock(text: string): ApiBlock {
+  return { type: 'text', text }
+}
+
 /** A person's own prompt text block. */
 function personBlock(text: string): ApiBlock {
   return { type: 'text', text }
@@ -1449,6 +1454,40 @@ describe('integration — session isolation and delivery accuracy', () => {
     const first = w.completes[0]?.prompt ?? ''
     expect(first).not.toContain('MEM-UPS-OLD')
     expect(first).not.toContain('### Injected for the previous prompt')
+  })
+
+  // The 2.1.300 slash-command shape (verify-E-REPORT.md): running a command
+  // between two prompts leaves the engine's command transcript
+  // (`<local-command-caveat>`, `<command-name>`, `<local-command-stdout>`)
+  // beside the first prompt and alone in the last user message. Neither may
+  // pass for a person's prompt and blank the previous prompt's memory.
+  test('MEM · 슬래시 명령 블록이 사람 프롬프트로 오인되지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+
+    w.setApiMessages([
+      userApi(
+        injectedBlock('SessionStart', 'MEM-SS-CMD'),
+        engineBlock('# Environment\ncwd: /repo'),
+        injectedBlock('UserPromptSubmit', 'MEM-UPS-CMD'),
+        commandBlock('<local-command-caveat>The command below was run directly in Claude Code, ...</local-command-caveat>'),
+        commandBlock('<command-name>/optimize</command-name>'),
+        commandBlock('<local-command-stdout>설정에 저장했습니다.</local-command-stdout>'),
+        personBlock('첫 프롬프트'),
+      ),
+      assistantApi('답변'),
+      userApi(
+        commandBlock('<command-name>/optimize</command-name>'),
+        commandBlock('<local-command-stdout>설정에 저장했습니다.</local-command-stdout>'),
+      ),
+    ])
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+
+    const first = w.completes[0]?.prompt ?? ''
+    expect(first).toContain('MEM-SS-CMD')
+    expect(first).toContain('### Injected for the previous prompt')
+    expect(first).toContain('MEM-UPS-CMD')
   })
 
   // The conversation is the whole source of truth for the pull, so a new

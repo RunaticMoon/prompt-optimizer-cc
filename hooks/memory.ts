@@ -15,8 +15,10 @@
  * Extraction is stateless and re-run per snapshot: the conversation already
  * holds the authoritative latest blocks, so `/clear`, `/compact` and resume
  * need no bookkeeping here. Only the LAST `SessionStart` block is kept (a
- * resume may leave older ones), and only the `UserPromptSubmit` blocks that
- * precede the LAST person's prompt (the memory retrieved for the previous
+ * resume may leave older ones; an empty last body clears the field). The
+ * `UserPromptSubmit` blocks are attributed per user message rather than per
+ * position in the block order, and only the ones belonging to the LAST message
+ * that holds a person's prompt are kept (the memory retrieved for the previous
  * prompt, not for the prompt being optimized now).
  */
 
@@ -30,6 +32,38 @@ import type { ApiMessage, CapturedMemory } from './contracts'
  */
 const INJECTED_CONTEXT =
   /^\s*<system-reminder>\s*\n(SessionStart|UserPromptSubmit) hook additional context: ([\s\S]*?)\s*<\/system-reminder>\s*$/
+
+/**
+ * Text blocks the engine wraps around its own output: its reminders, the
+ * transcript of a slash command, a bash tool's input and output, and its notice
+ * that a person interrupted the turn. Such a block is never a person's own
+ * prompt and never injected long-term memory, so it must not confirm or clear a
+ * `UserPromptSubmit` group. Matched as a whole-block prefix after trimming.
+ *
+ * The reminder opener and the command wrappers are the 2.1.300 measured shapes
+ * (verify-E-REPORT.md: running `/optimize` adds `<local-command-caveat>`,
+ * `<command-name>`, `<local-command-stdout>` blocks beside the prompt); the
+ * bash wrappers and the interrupt notice are engine notations.
+ */
+const ENGINE_WRAPPER_PREFIXES: readonly string[] = [
+  '<system-reminder>',
+  '<local-command-caveat>',
+  '<local-command-stdout>',
+  '<local-command-stderr>',
+  '<command-name>',
+  '<command-message>',
+  '<command-args>',
+  '<bash-input>',
+  '<bash-stdout>',
+  '<bash-stderr>',
+  '[Request interrupted by user',
+]
+
+/** True when a text block is entirely the engine's own output, not a prompt. */
+function isEngineWrapper(text: string): boolean {
+  const trimmed = text.trim()
+  return ENGINE_WRAPPER_PREFIXES.some(prefix => trimmed.startsWith(prefix))
+}
 
 /** The text blocks of one API message, in order; a string content is one block. */
 function textBlocks(message: ApiMessage): string[] {
@@ -51,18 +85,25 @@ function textBlocks(message: ApiMessage): string[] {
 /**
  * Pulls the settings/plugin-injected memory out of the main conversation.
  *
- * User-message text blocks are scanned in order:
+ * User messages are read one at a time, and each text block is classified:
  *
  * - A whole-block `SessionStart`/`UserPromptSubmit` envelope is captured; its
  *   body is trimmed and an empty body is dropped. The LAST `SessionStart` body
- *   wins (a resume may leave older ones).
- * - A block that starts with `<system-reminder>` is an engine reminder and
- *   neither a person's prompt nor injected memory.
- * - Any other non-empty block is the person's own prompt: the
- *   `UserPromptSubmit` bodies collected since the previous prompt are confirmed
- *   as that prompt's memory. The LAST confirmed group is the result, so
- *   `UserPromptSubmit` blocks left after the last prompt are not used and a
- *   last prompt with none yields `[]`.
+ *   wins (a resume may leave older ones), and an empty last body yields `[]`
+ *   instead of falling back to an older block.
+ * - A block the engine wrapped (`<system-reminder>`, the local-command/bash
+ *   wrappers, an interrupt notice — {@link ENGINE_WRAPPER_PREFIXES}) is neither
+ *   a person's prompt nor injected memory, so a slash command run between two
+ *   prompts cannot pass for a prompt.
+ * - Any other non-empty block is the person's own prompt.
+ *
+ * Attribution is per message, so the order of the blocks inside one message
+ * does not matter: the bodies a message carries belong to that message. Bodies
+ * seen in a message without a person's prompt (commands only, tool results
+ * only) are held pending and belong to the next message that does hold a
+ * prompt, which confirms them. The LAST confirmed group is the result, so a
+ * last person-prompt message with no memory (its own or still pending) yields
+ * `[]` rather than an older group.
  */
 export function extractHookMemory(messages: readonly ApiMessage[]): CapturedMemory {
   let sessionStart: string[] = []
@@ -72,21 +113,35 @@ export function extractHookMemory(messages: readonly ApiMessage[]): CapturedMemo
   for (const message of messages) {
     if (message === null || typeof message !== 'object') continue
     if (message.role !== 'user') continue
+
+    const bodies: string[] = []
+    let hasPersonPrompt = false
+
     for (const text of textBlocks(message)) {
       const match = INJECTED_CONTEXT.exec(text)
       if (match !== null) {
         const body = (match[2] ?? '').trim()
-        if (body === '') continue
-        if (match[1] === 'SessionStart') sessionStart = [body]
-        else pending.push(body)
+        if (match[1] === 'SessionStart') {
+          // The last SessionStart block is authoritative even when its body is
+          // empty: a resume's older block must not stand in for it.
+          sessionStart = body === '' ? [] : [body]
+        } else if (body !== '') {
+          bodies.push(body)
+        }
         continue
       }
-      if (text.trim().startsWith('<system-reminder>')) continue
+      if (isEngineWrapper(text)) continue
       if (text.trim() === '') continue
-      // The person's own prompt: the collected UserPromptSubmit bodies belong
-      // to it and the ones after the last prompt stay unconfirmed.
-      confirmed = pending
+      hasPersonPrompt = true
+    }
+
+    if (hasPersonPrompt) {
+      // This message's own bodies plus whatever earlier prompt-less messages
+      // left pending belong to it; the ones after the last prompt stay unused.
+      confirmed = [...pending, ...bodies]
       pending = []
+    } else {
+      pending.push(...bodies)
     }
   }
 

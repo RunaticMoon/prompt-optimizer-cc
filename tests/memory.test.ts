@@ -56,6 +56,97 @@ describe('extractHookMemory', () => {
     })
   })
 
+  test('keeps the previous prompt memory when a slash command sits beside the prompt', () => {
+    // verify-E-REPORT.md: with a command run between two prompts, the first
+    // user message holds the engine's command transcript
+    // (`<local-command-caveat>`, `<command-name>`, `<local-command-stdout>`)
+    // beside the injected blocks and the person's own text. Those blocks must
+    // not confirm an empty group before the prompt is reached.
+    const messages: ApiMessage[] = [
+      userMessage(
+        injected('SessionStart', 'SS'),
+        reminder('# Environment'),
+        injected('UserPromptSubmit', 'UPS-FIRST'),
+        '<local-command-caveat>The command below was run directly in Claude Code, ...</local-command-caveat>',
+        '<command-name>/optimize</command-name>\n<command-message>optimize</command-message>\n<command-args></command-args>',
+        '<local-command-stdout>설정에 저장했습니다.</local-command-stdout>',
+        'managed-first',
+      ),
+      assistantMessage('ok'),
+      userMessage(
+        '<command-name>/optimize</command-name>',
+        '<local-command-stdout>설정에 저장했습니다.</local-command-stdout>',
+      ),
+    ]
+
+    expect(extractHookMemory(messages)).toEqual({
+      sessionStart: ['SS'],
+      lastPrompt: ['UPS-FIRST'],
+    })
+  })
+
+  test('gives the same memory whichever order the prompt and its block arrive in', () => {
+    const blockBefore = [userMessage(injected('UserPromptSubmit', 'UPS-BEFORE'), 'prompt')]
+    const blockAfter = [userMessage('prompt', injected('UserPromptSubmit', 'UPS-AFTER'))]
+
+    expect(extractHookMemory(blockBefore).lastPrompt).toEqual(['UPS-BEFORE'])
+    expect(extractHookMemory(blockAfter).lastPrompt).toEqual(['UPS-AFTER'])
+  })
+
+  test('keeps the previous prompt memory when the last message is only a command', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('UserPromptSubmit', 'UPS-KEPT'), 'first'),
+      assistantMessage('ok'),
+      userMessage(
+        '<command-name>/optimize</command-name>',
+        '<local-command-stdout>done</local-command-stdout>',
+      ),
+    ]
+
+    expect(extractHookMemory(messages).lastPrompt).toEqual(['UPS-KEPT'])
+  })
+
+  test('does not treat an interrupt notice as a person prompt', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('UserPromptSubmit', 'UPS-KEPT'), 'first'),
+      assistantMessage('partial'),
+      userMessage('[Request interrupted by user]'),
+    ]
+
+    expect(extractHookMemory(messages).lastPrompt).toEqual(['UPS-KEPT'])
+  })
+
+  test('clears the session-start memory when the last SessionStart body is empty', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('SessionStart', 'OLD-SS'), 'first'),
+      assistantMessage('ok'),
+      userMessage(injected('SessionStart', '   '), 'second'),
+    ]
+
+    expect(extractHookMemory(messages).sessionStart).toEqual([])
+  })
+
+  test('treats every engine wrapper as a block that is not a person prompt', () => {
+    const wrappers = [
+      '<system-reminder>engine note</system-reminder>',
+      '<local-command-caveat>caveat</local-command-caveat>',
+      '<local-command-stdout>out</local-command-stdout>',
+      '<local-command-stderr>err</local-command-stderr>',
+      '<command-name>/optimize</command-name>',
+      '<command-message>optimize</command-message>',
+      '<command-args>--help</command-args>',
+      '<bash-input>ls</bash-input>',
+      '<bash-stdout>file.txt</bash-stdout>',
+      '<bash-stderr>not found</bash-stderr>',
+      '[Request interrupted by user]',
+    ]
+
+    for (const wrapper of wrappers) {
+      const messages = [userMessage(injected('UserPromptSubmit', 'UPS'), wrapper, 'real prompt')]
+      expect(extractHookMemory(messages).lastPrompt).toEqual(['UPS'])
+    }
+  })
+
   test('keeps only the last SessionStart block (a resume may leave older ones)', () => {
     const messages: ApiMessage[] = [
       userMessage(injected('SessionStart', 'OLD-SS'), 'first'),
