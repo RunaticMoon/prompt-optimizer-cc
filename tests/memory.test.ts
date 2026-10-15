@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { CONTEXT_TRUNCATION_MARK } from '../hooks/context'
-import type { CapturedMemory } from '../hooks/contracts'
-import { createMemoryStore, renderMemory } from '../hooks/memory'
+import type { ApiMessage, CapturedMemory } from '../hooks/contracts'
+import { extractHookMemory, readHookMemory, renderMemory } from '../hooks/memory'
 
 const SESSION_HEADING = '### Injected at session start'
 const PROMPT_HEADING = '### Injected for the previous prompt (not retrieved for this prompt)'
@@ -11,183 +11,181 @@ function memory(over: Partial<CapturedMemory> = {}): CapturedMemory {
   return { sessionStart: [], lastPrompt: [], ...over }
 }
 
-/** The body under `heading`, up to the next blank-line separator. */
-function sectionBody(text: string, heading: string): string {
-  const start = text.indexOf(heading)
-  if (start < 0) return ''
-  const bodyStart = start + heading.length + 1
-  const next = text.indexOf('\n\n', bodyStart)
-  return next < 0 ? text.slice(bodyStart) : text.slice(bodyStart, next)
+/** The `<system-reminder>` envelope an injected hook-context block has. */
+function injected(kind: 'SessionStart' | 'UserPromptSubmit', body: string): string {
+  return `<system-reminder>\n${kind} hook additional context: ${body}\n</system-reminder>`
 }
 
-describe('createMemoryStore', () => {
-  test('starts empty for any id, including the empty one', () => {
-    const store = createMemoryStore()
+/** An engine reminder block: a `<system-reminder>` with other content. */
+function reminder(text: string): string {
+  return `<system-reminder>\n${text}\n</system-reminder>`
+}
 
-    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
-    expect(store.current('')).toEqual({ sessionStart: [], lastPrompt: [] })
+function textBlock(text: string) {
+  return { type: 'text', text }
+}
+
+/** One user message holding the given text blocks, in order. */
+function userMessage(...blocks: string[]): ApiMessage {
+  return { role: 'user', content: blocks.map(textBlock) }
+}
+
+/** One assistant message holding the given text. */
+function assistantMessage(text: string): ApiMessage {
+  return { role: 'assistant', content: [textBlock(text)] }
+}
+
+describe('extractHookMemory', () => {
+  test('reads the measured block shape: session start plus the previous prompt', () => {
+    // The 2.1.300 shape (A-REPORT §2): every injected block is a separate text
+    // block of the first user message, the engine's own reminders between them,
+    // and the person's own prompt text last, unwrapped.
+    const messages: ApiMessage[] = [
+      userMessage(
+        injected('SessionStart', 'SS1\nSS2\nPLUGIN_SS'),
+        reminder('# Environment\ncwd: /repo'),
+        injected('UserPromptSubmit', 'UPS1'),
+        reminder('other engine reminder'),
+        'managed-first',
+      ),
+    ]
+
+    expect(extractHookMemory(messages)).toEqual({
+      sessionStart: ['SS1\nSS2\nPLUGIN_SS'],
+      lastPrompt: ['UPS1'],
+    })
   })
 
-  test('records each field independently and replaces on every call, within one session', () => {
-    const store = createMemoryStore()
+  test('keeps only the last SessionStart block (a resume may leave older ones)', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('SessionStart', 'OLD-SS'), 'first'),
+      assistantMessage('ok'),
+      userMessage(injected('SessionStart', 'NEW-SS'), 'second'),
+    ]
 
-    store.recordSessionStart('sess-a', ['s1', 's2'])
-    store.recordPromptSubmit('sess-a', ['p1'])
-    expect(store.current('sess-a')).toEqual({ sessionStart: ['s1', 's2'], lastPrompt: ['p1'] })
-
-    store.recordSessionStart('sess-a', ['s3'])
-    expect(store.current('sess-a')).toEqual({ sessionStart: ['s3'], lastPrompt: ['p1'] })
-
-    store.recordPromptSubmit('sess-a', ['p2', 'p3'])
-    expect(store.current('sess-a')).toEqual({ sessionStart: ['s3'], lastPrompt: ['p2', 'p3'] })
+    expect(extractHookMemory(messages)).toEqual({ sessionStart: ['NEW-SS'], lastPrompt: [] })
   })
 
-  test('clears a field when recorded undefined', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-    store.recordPromptSubmit('sess-a', ['p1'])
+  test('keeps the UserPromptSubmit blocks of the last person prompt only', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('UserPromptSubmit', 'UPS-1'), 'first'),
+      assistantMessage('ok'),
+      userMessage(injected('UserPromptSubmit', 'UPS-2'), 'second'),
+    ]
 
-    store.recordSessionStart('sess-a', undefined)
-    store.recordPromptSubmit('sess-a', undefined)
-
-    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(extractHookMemory(messages).lastPrompt).toEqual(['UPS-2'])
   })
 
-  test('trims entries and drops empty or whitespace-only ones', () => {
-    const store = createMemoryStore()
+  test('yields no previous-prompt memory when the last prompt had none', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('UserPromptSubmit', 'UPS-1'), 'first'),
+      assistantMessage('ok'),
+      userMessage('second'),
+    ]
 
-    store.recordSessionStart('sess-a', ['  keep  ', '', '   ', '\n', 'also'])
-    store.recordPromptSubmit('sess-a', ['\t\n  '])
-
-    expect(store.current('sess-a')).toEqual({ sessionStart: ['keep', 'also'], lastPrompt: [] })
+    expect(extractHookMemory(messages).lastPrompt).toEqual([])
   })
 
-  test('resetSession clears both fields only for the stored session', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-    store.recordPromptSubmit('sess-a', ['p1'])
+  test('ignores UserPromptSubmit blocks left after the last person prompt', () => {
+    // The block is not confirmed by a following prompt: it is a retrieval for
+    // the prompt being optimized now, not for the previous one.
+    const messages: ApiMessage[] = [
+      userMessage('first'),
+      userMessage(injected('UserPromptSubmit', 'LATE-UPS')),
+    ]
 
-    store.resetSession('sess-a')
-
-    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(extractHookMemory(messages).lastPrompt).toEqual([])
   })
 
-  test('resetSession leaves a different or empty id\'s memory untouched', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-b', ['s2'])
-    store.recordPromptSubmit('sess-b', ['p2'])
+  test('carries a UserPromptSubmit across tool_result blocks up to the prompt', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('UserPromptSubmit', 'UPS-TOOL')),
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 't1', text: 'file contents' }],
+      },
+      userMessage('do it'),
+    ]
 
-    store.resetSession('sess-a')
-    store.resetSession('')
-
-    expect(store.current('sess-b')).toEqual({ sessionStart: ['s2'], lastPrompt: ['p2'] })
+    expect(extractHookMemory(messages).lastPrompt).toEqual(['UPS-TOOL'])
   })
 
-  test('hands out a copy, so later records do not mutate an earlier read', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
+  test('treats a string content as a single text block', () => {
+    const messages: ApiMessage[] = [
+      { role: 'user', content: injected('SessionStart', 'STR-SS') },
+      { role: 'user', content: 'string prompt' },
+    ]
 
-    const read = store.current('sess-a')
-    store.recordSessionStart('sess-a', ['s2'])
-
-    expect(read.sessionStart).toEqual(['s1'])
-    expect(store.current('sess-a').sessionStart).toEqual(['s2'])
+    expect(extractHookMemory(messages)).toEqual({ sessionStart: ['STR-SS'], lastPrompt: [] })
   })
 
-  test('reads nothing for a different or empty id', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-    store.recordPromptSubmit('sess-a', ['p1'])
+  test('treats a string content as a person prompt that confirms a UserPromptSubmit', () => {
+    const messages: ApiMessage[] = [
+      userMessage(injected('UserPromptSubmit', 'UPS-STR')),
+      { role: 'user', content: 'string prompt' },
+    ]
 
-    expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: [] })
-    expect(store.current('')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(extractHookMemory(messages).lastPrompt).toEqual(['UPS-STR'])
   })
 
-  test('a new session id drops the previous session\'s memory on the next record', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-    store.recordPromptSubmit('sess-a', ['p1'])
+  test('ignores a block that only quotes the marker inside other text', () => {
+    const messages: ApiMessage[] = [
+      userMessage(reminder('Example: SessionStart hook additional context: NOT-MEMORY'), 'hi'),
+    ]
 
-    // The new session records only a SessionStart: the previous session's
-    // previous-prompt entries are gone, not carried over.
-    store.recordSessionStart('sess-b', ['s2'])
-
-    expect(store.current('sess-b')).toEqual({ sessionStart: ['s2'], lastPrompt: [] })
-    expect(store.current('sess-a')).toEqual({ sessionStart: [], lastPrompt: [] })
+    expect(extractHookMemory(messages)).toEqual({ sessionStart: [], lastPrompt: [] })
   })
 
-  test('a prompt record for a different session does not steal the stored slot', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
+  test('drops an injected block whose body is empty or whitespace only', () => {
+    const messages: ApiMessage[] = [
+      userMessage(
+        injected('SessionStart', '   '),
+        injected('UserPromptSubmit', ''),
+        'hello',
+      ),
+    ]
 
-    // A UserPromptSubmit from another session must not adopt: only
-    // `SessionStart` changes the stored session.
-    store.recordPromptSubmit('sess-b', ['p1'])
-
-    expect(store.storedSessionId()).toBe('sess-a')
-    expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: [] })
-    expect(store.latest()).toEqual({ sessionStart: ['s1'], lastPrompt: [] })
+    expect(extractHookMemory(messages)).toEqual({ sessionStart: [], lastPrompt: [] })
   })
 
-  test('a prompt record adopts when the store is still empty', () => {
-    const store = createMemoryStore()
+  test('ignores injected blocks carried on non-user messages', () => {
+    const messages: ApiMessage[] = [assistantMessage(injected('SessionStart', 'FROM-ASSISTANT'))]
 
-    store.recordPromptSubmit('sess-b', ['p1'])
-
-    expect(store.storedSessionId()).toBe('sess-b')
-    expect(store.current('sess-b')).toEqual({ sessionStart: [], lastPrompt: ['p1'] })
-    expect(store.latest()).toEqual({ sessionStart: [], lastPrompt: ['p1'] })
+    expect(extractHookMemory(messages)).toEqual({ sessionStart: [], lastPrompt: [] })
   })
 
-  test('latest() and storedSessionId() start empty', () => {
-    const store = createMemoryStore()
+  test('reads nothing from an empty conversation', () => {
+    expect(extractHookMemory([])).toEqual({ sessionStart: [], lastPrompt: [] })
+  })
+})
 
-    expect(store.latest()).toEqual({ sessionStart: [], lastPrompt: [] })
-    expect(store.storedSessionId()).toBe('')
+describe('readHookMemory', () => {
+  test('renders the memory found in the conversation', async () => {
+    const text = await readHookMemory(
+      async () => [userMessage(injected('SessionStart', '세션 기억'), '원문')],
+      400,
+    )
+
+    expect(text).toContain(SESSION_HEADING)
+    expect(text).toContain('세션 기억')
   })
 
-  test('latest() returns the adopted session\'s memory and storedSessionId() names it', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-    store.recordPromptSubmit('sess-a', ['p1'])
+  test('treats a refusing read as no memory', async () => {
+    const text = await readHookMemory(async () => {
+      throw new Error('unavailable')
+    }, 400)
 
-    expect(store.latest()).toEqual({ sessionStart: ['s1'], lastPrompt: ['p1'] })
-    expect(store.storedSessionId()).toBe('sess-a')
+    expect(text).toBe('')
   })
 
-  test('latest() follows a newly adopted id and drops the previous session', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-    store.recordPromptSubmit('sess-a', ['p1'])
+  test('treats a non-array value as no memory', async () => {
+    const text = await readHookMemory(async () => ({ deny: 'nope' }), 400)
 
-    // No `session.start` for `sess-b` (the `/clear` case): the classic hook
-    // alone adopts it, and the previous session's memory does not survive.
-    store.recordSessionStart('sess-b', ['s2'])
-
-    expect(store.storedSessionId()).toBe('sess-b')
-    expect(store.latest()).toEqual({ sessionStart: ['s2'], lastPrompt: [] })
-  })
-
-  test('latest() is empty again after resetSession clears the stored session', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-    store.recordPromptSubmit('sess-a', ['p1'])
-
-    store.resetSession('sess-a')
-
-    expect(store.storedSessionId()).toBe('')
-    expect(store.latest()).toEqual({ sessionStart: [], lastPrompt: [] })
-  })
-
-  test('latest() hands out a copy, so later records do not mutate an earlier read', () => {
-    const store = createMemoryStore()
-    store.recordSessionStart('sess-a', ['s1'])
-
-    const read = store.latest()
-    store.recordSessionStart('sess-a', ['s2'])
-
-    expect(read.sessionStart).toEqual(['s1'])
-    expect(store.latest().sessionStart).toEqual(['s2'])
+    expect(text).toBe('')
   })
 })
 
@@ -277,6 +275,15 @@ describe('renderMemory', () => {
     expect(hasLoneSurrogate(text)).toBe(false)
   })
 })
+
+/** The body under `heading`, up to the next blank-line separator. */
+function sectionBody(text: string, heading: string): string {
+  const start = text.indexOf(heading)
+  if (start < 0) return ''
+  const bodyStart = start + heading.length + 1
+  const next = text.indexOf('\n\n', bodyStart)
+  return next < 0 ? text.slice(bodyStart) : text.slice(bodyStart, next)
+}
 
 /** True when the text holds a half of a surrogate pair with no partner. */
 function hasLoneSurrogate(text: string): boolean {

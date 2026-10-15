@@ -29,26 +29,28 @@ import { collectContext } from './context'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
+import { readHookMemory } from './memory'
 import { buildModelRequest, completeRewrite } from './model'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
 import { resolveTargetModel } from './resolve-target-model'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
-import type {
-  BypassTicket,
-  ContextSnapshot,
-  EnginePorts,
-  GuidanceStatus,
-  ModelUsage,
-  OptimizerConfig,
-  OptimizerEvent,
-  RewriteResult,
-  RuntimeState,
-  SubmissionDecision,
-  SubmissionFacts,
-  TransferRefusal,
-  Workflow,
+import {
+  CONTEXT_MEMORY_CHARS,
+  type BypassTicket,
+  type ContextSnapshot,
+  type EnginePorts,
+  type GuidanceStatus,
+  type ModelUsage,
+  type OptimizerConfig,
+  type OptimizerEvent,
+  type RewriteResult,
+  type RuntimeState,
+  type SubmissionDecision,
+  type SubmissionFacts,
+  type TransferRefusal,
+  type Workflow,
 } from './contracts'
 
 /** Pane id the UI opens the dialogue under (task K); a restore closes it. */
@@ -103,8 +105,6 @@ export interface ControllerDeps {
   getConfig(): OptimizerConfig
   /** A state change or notification; the UI (K) subscribes. */
   onChange(state: Readonly<RuntimeState>, notice?: string): void
-  /** Rendered long-term memory for the snapshot; absent reads none. */
-  readMemory?(): string
   /** Reopens an already placed pane with focus; the host tracks placement. */
   refocusPane?(): Promise<void>
 }
@@ -657,14 +657,18 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // The snapshot is read once, on the first round.
       if (workflow.phase === 'idle') {
         apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
-        // The memory read is kept out of the snapshot's own try: a throwing
-        // reader is treated as no memory, so collection still happens. A snapshot
-        // failure is not a round failure either: continue without it.
+        // The injected memory is pulled from the conversation, only when the
+        // feature is on. The read is kept out of the snapshot's own try: a
+        // refusing/absent port is treated as no memory, so collection still
+        // happens, and a snapshot failure is not a round failure either.
         let memory = ''
-        try {
-          memory = deps.readMemory?.() ?? ''
-        } catch {
-          memory = ''
+        if (config.memoryContext) {
+          const read = ports.session.apiMessages
+          try {
+            memory = await readHookMemory(read ? () => read() : async () => [], CONTEXT_MEMORY_CHARS)
+          } catch {
+            memory = ''
+          }
         }
         let context: ContextSnapshot | null = null
         try {

@@ -2261,17 +2261,21 @@ describe('model-aware guidance', () => {
   })
 })
 
-describe('readMemory — long-term memory folded into the snapshot', () => {
-  test('reads the rendered memory once per run and folds it into the first snapshot', async () => {
+describe('memoryContext — the injected memory pulled from the conversation', () => {
+  /** The `<system-reminder>` envelope an injected hook-context block has. */
+  const injected = (kind: 'SessionStart' | 'UserPromptSubmit', body: string) => ({
+    type: 'text',
+    text: `<system-reminder>\n${kind} hook additional context: ${body}\n</system-reminder>`,
+  })
+  const prompt = (text: string) => ({ type: 'text', text })
+
+  test('reads the conversation once per run and folds the memory into the first snapshot', async () => {
     let reads = 0
-    const h = harness({
-      deps: {
-        readMemory: () => {
-          reads += 1
-          return '### Injected at session start\n세션 기억'
-        },
-      },
-    })
+    const h = harness()
+    h.ports.session.apiMessages = async () => {
+      reads += 1
+      return [{ role: 'user', content: [injected('SessionStart', '세션 기억'), prompt('원문')] }]
+    }
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
     await h.flush()
@@ -2289,35 +2293,28 @@ describe('readMemory — long-term memory folded into the snapshot', () => {
     expect(reads).toBe(1)
   })
 
-  test('omits the memory when memoryContext is off', async () => {
+  test('does not read the conversation when memoryContext is off', async () => {
     let reads = 0
-    const h = harness({
-      config: { memoryContext: false },
-      deps: {
-        readMemory: () => {
-          reads += 1
-          return '숨겨야 할 기억'
-        },
-      },
-    })
+    const h = harness({ config: { memoryContext: false } })
+    h.ports.session.apiMessages = async () => {
+      reads += 1
+      return [{ role: 'user', content: [injected('SessionStart', '숨겨야 할 기억')] }]
+    }
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
     await h.flush()
 
-    expect(reads).toBe(1)
+    expect(reads).toBe(0)
     expect(h.controller.getState().workflow?.context?.memory).toBe('')
     expect(h.completes[0]?.prompt).not.toContain('숨겨야 할 기억')
     expect(h.completes[0]?.prompt).not.toContain('## Long-term memory')
   })
 
   test('treats a throwing reader as no memory and keeps the round going', async () => {
-    const h = harness({
-      deps: {
-        readMemory: () => {
-          throw new Error('memory unavailable')
-        },
-      },
-    })
+    const h = harness()
+    h.ports.session.apiMessages = async () => {
+      throw new Error('memory unavailable')
+    }
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
     await h.flush()
@@ -2329,7 +2326,7 @@ describe('readMemory — long-term memory folded into the snapshot', () => {
     expect(workflow?.context?.memory).toBe('')
   })
 
-  test('an absent reader leaves the memory section off the snapshot', async () => {
+  test('an absent apiMessages port leaves the memory section off the snapshot', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문'), 'pane')

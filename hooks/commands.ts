@@ -333,6 +333,9 @@ function portsOf($: EngineInterface): EnginePorts {
       // The controller only calls `messages()` with no argument; the cast keeps
       // the overloaded call type without reading the method as a value.
       messages: (() => $.session.messages()) as unknown as EnginePorts['session']['messages'],
+      // The Messages API form, where the injected hook context appears; the
+      // first round of an explicit `/optimize` run reads it for the snapshot.
+      apiMessages: () => $.session.messages({ as: 'api' }),
       cwd: () => $.session.cwd(),
       root: () => $.session.root(),
       repo: () => $.session.repo(),
