@@ -201,12 +201,54 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 
 - 먼저 패인·다이얼로그를 닫습니다.
 - 현재 composer가 사용자가 새로 작성한 내용인지 검사합니다.
-- 충돌하면 덮어쓰지 않고 개선안을 유지합니다.
+- 충돌하면 개선안을 유지합니다(디스패치 뒤에 관찰된 충돌은 이미 덮어썼을 수 있습니다).
 - `fill.isFilled === true`일 때만 bypass를 발급합니다.
 - bypass는 세션·작업·초안·만료시간에 연결하고 한 번 소비합니다.
 - 보류(provisional) 티켓을 fill **전에** 먼저 발급합니다. fill이 성공하면 그 티켓을 fill이 돌려준 텍스트로 확정하고, 거절되거나 예외가 나면 철회합니다(`bypass-revoked`). 이미 소비되었거나 사람이 편집한 티켓은 덮어쓰지 않고 그대로 둡니다. 복원 도중 Enter가 와도 분류 시점에 티켓이 살아 있어 같은 원문을 다시 다듬지 않고 그대로 전송합니다.
 - 사용자 `prompt.edit` 결과에 따라 해당 초안의 bypass 텍스트를 갱신합니다.
 - 다른 플러그인의 fill, 초안 비우기, 세션 종료, 만료 시 해제합니다.
+
+**복원 중 관찰된 편집 보호(#28).** 호스트가 조건부 fill(compare-and-set)을
+제공하는지는 확인되지 않았습니다. 그래서 플러그인은 자신이 실제로 관찰한
+이벤트만으로 복원을 보호합니다. 컨트롤러는 복원마다 소유권 epoch와 단조 증가
+관찰 revision을 가진 guard를 만들고, pane close 뒤·`prompt.read` 직후·
+`prompt.fill` 직전(사이에 await 없음)·fill 직후·fallback read 뒤에 검사합니다
+(`hooks/restore-guard.ts`).
+
+- `prompt.edit` 훅은 진입 시(첫 await 전) in-flight 토큰을 만들고, 완료 시
+  정확한 전체 입력창 텍스트로 정산합니다(빈 문자열 포함). 예외/불명 완료는
+  관찰 revision만 올리고 스냅샷을 주장하지 않습니다. 이전 세션의 토큰 정산은
+  새 세션의 revision·초안·bypass·알림·복구 텍스트를 바꾸지 않습니다.
+- 다른 플러그인의 `prompt.fill`은 `next` 전에 무효화하고 완료까지 in-flight로
+  둡니다. `append`/`insert`의 fragment는 복구 텍스트가 아니며, 필요할 때만
+  전체 입력창을 다시 읽어 그 결과를 같은 토큰으로 보호합니다.
+- autocomplete 관찰은 마지막 표시와 다를 때만 무효화합니다(같은 표시 반복은
+  무효화하지 않음). 플러그인 자신의 fill 알림은 외부 revision을 올리지 않습니다.
+- 세션 시작·종료, 새 workflow, 더 새로운 복원은 소유권 epoch를 올립니다.
+  취소는 workflow를 먼저 지우므로 취소 자신의 원문 복원은 그 뒤 epoch로
+  허용되고, 그 뒤의 새 workflow/세션은 이전 복원을 무효화합니다.
+
+검사 결과 `edited`면 `draft-conflict`, `stale`이면 `stale-owner`로 거절하며
+fill을 다시 시도하지 않습니다. fill이 이미 dispatch된 뒤의 충돌은 호스트가
+이미 덮어썼을 수 있으므로 되돌릴 수 없습니다. 이때 그 복원에서 파생된
+provisional/편집 ticket만 철회하고(다른 workflow의 ticket은 건드리지 않음),
+관찰한 전체 텍스트를 `ui.log`에 남깁니다(`복원 중 입력 변경을 감지했습니다.
+자동 복원을 중단했습니다.` 그리고 `복원 중 감지한 입력입니다. 필요한 내용을
+복사하세요:\n<text>`). 빈 문자열은 실제 삭제로 취급하고 대상 텍스트로 대체하지
+않습니다. 자동 보상 fill은 하지 않습니다. 대기 중인 편집 체인이 끝나지 않아도
+복원은 그 토큰을 기다리지 않고 즉시 거절하며, 스냅샷은 그 토큰이 정산될 때
+같은 세션/소유권 epoch가 유지된 경우에만 게시합니다. 취소 실패 알림에는 사라진
+workflow의 원문을 복사할 수 있게 함께 넣습니다.
+
+남는 한계: 마지막 동기 검사와 dispatch 사이에 호스트가 새 입력을 받아들이거나
+세션을 바꾸면, 그 이벤트가 이 플러그인에 도착하기 전(또는 전혀 오지 않으면)
+막을 수 없습니다. 관찰된 텍스트 자체도 commit 전 표시값이거나 IME·붙여넣기에서
+불완전할 수 있습니다. 따라서 이 보호는 **관찰된 이벤트 기준의 best-effort**이며
+무손실 원자 편집이 아닙니다. 실제 Claude Code 터미널에서 read/edit/fill의 commit
+순서, 같은 플러그인 fill 훅 전달, IME·긴 붙여넣기·기록 이동·세션 전환은 아직
+수동 검증하지 않았습니다. 로컬 CLI는 2.1.304이고 생성 선언
+(`.claude-plugin/types/claude-code/index.d.ts`)이 없어 타입체크로 호스트 API
+호환성을 확인하지 못했습니다. CAS 지원 여부도 확인하거나 부정하지 않았습니다.
 
 명시적 전송(`/optimize send`, `/optimize raw`)은 `$.prompt.submit`을 사용합니다. `origin`을 `composer`로 위조하지 않습니다. `asUser: true`로 제출해 모델이 플러그인 메시지 틀 없이 사용자 본인의 말로 읽습니다. `command.run` 훅이 턴을 붙잡는 동안에는 전송이 거부되므로 `clock.after` 콜백으로 미뤄 훅 반환 뒤 1회 실행합니다. 저장된 `e.context`를 보존해야 하면 자체 제출 ticket을 검증한 훅에서 붙입니다. 원래 `wait`·첨부를 재현할 수 없는 제출은 처음부터 가로채지 않습니다.
 
@@ -743,10 +785,10 @@ API 기준: 설치 Claude Code 2.1.285가 생성한 선언
 
 - 목표: 승인된 텍스트를 중복·손실 없이 전달.
 - 입력: transfer/submit ticket, `prompt.read/fill/submit`.
-- 파일: `delivery.ts`, `delivery.test.ts`.
-- 방향: 새 초안 충돌 검사, 패인 종료 후 fill, `isFilled/refusal` 처리, 성공 시에만 bypass 발급. 직접 전송은 plugin origin 유지, `asUser: true`로 제출.
+- 파일: `delivery.ts`, `restore-guard.ts`, `delivery.test.ts`.
+- 방향: 새 초안 충돌 검사, 패인 종료 후 fill, `isFilled/refusal` 처리, 성공 시에만 bypass 발급. 관찰된 편집/소유권 guard로 fill 중단, 실패 시 관찰 텍스트 보존. 직접 전송은 plugin origin 유지, `asUser: true`로 제출.
 - 선행: B.
-- 완료: 복원 거절·다이얼로그·새 초안·이중 클릭·downstream drop 시 텍스트 보존.
+- 완료: 복원 거절·다이얼로그·새 초안·이중 클릭·downstream drop 시 텍스트 보존. 관찰된 편집·세션/workflow 전환 시 미덮어쓰기(디스패치 후는 best-effort).
 - 검증: fill/submit 호출 횟수와 순서 검사, 메타데이터 보존 테스트.
 - 보고: R.
 

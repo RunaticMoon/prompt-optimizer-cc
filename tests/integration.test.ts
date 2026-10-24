@@ -708,7 +708,7 @@ describe('integration — session isolation and delivery accuracy', () => {
 
       expect(w.box()).toBe(PASTE_PLACEHOLDER)
       expect(w.fills).toHaveLength(0)
-      expect(await w.run('accept')).toContain('새로 작성한 내용')
+      expect(await w.run('accept')).toContain('입력 변경을 감지해')
       expect(w.box()).toBe(PASTE_PLACEHOLDER)
       expect(w.fills).toHaveLength(0)
       expect(w.completes).toHaveLength(1)
@@ -732,7 +732,7 @@ describe('integration — session isolation and delivery accuracy', () => {
 
     expect(w.box()).toBe(PASTE_PLACEHOLDER)
     expect(w.fills).toHaveLength(0)
-    expect(await w.run('accept')).toContain('새로 작성한 내용')
+    expect(await w.run('accept')).toContain('입력 변경을 감지해')
     expect(w.box()).toBe(PASTE_PLACEHOLDER)
     expect(w.fills).toHaveLength(0)
     expect(w.completes).toHaveLength(2)
@@ -769,7 +769,7 @@ describe('integration — session isolation and delivery accuracy', () => {
       expect(w.box()).toBe(replacement)
       expect(w.fills).toHaveLength(0)
       expect(w.completes).toHaveLength(1)
-      expect(await w.run('accept')).toContain('새로 작성한 내용')
+      expect(await w.run('accept')).toContain('입력 변경을 감지해')
       expect(w.box()).toBe(replacement)
       expect(w.fills).toHaveLength(0)
       expect(w.submits).toHaveLength(0)
@@ -1845,10 +1845,10 @@ describe('integration — combined review lifecycle (#31)', () => {
   })
 
   test('RV3 · undo 뒤 accept는 입력창에 새로 쓴 내용을 덮어쓰지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
-    // #28's typed-during-delivery guard lives on a separate, not-yet-merged
-    // branch. This variant asserts only the guarantees present here — accept's
-    // existing draft-conflict protection and undo's state-only (never touches
-    // the composer) rule — and imports nothing from #28.
+    // The observed-edit refusal wording follows #28's restore guard now that it
+    // is merged; the guarantees asserted here are unchanged — accept's
+    // draft-conflict protection and undo's state-only (never touches the
+    // composer) rule.
     const w = setup($, on)
     await w.start()
     w.setModel((_request, call) => answered(`개선안${call}`))
@@ -1869,7 +1869,7 @@ describe('integration — combined review lifecycle (#31)', () => {
     // A draft typed after the undo owns the box: accept refuses and keeps it.
     await w.edit('내가 방금 쓴 요청')
     expect(w.box()).toBe('내가 방금 쓴 요청')
-    expect(await w.run('accept')).toContain('새로 작성한 내용이 있어 덮어쓰지 않았습니다')
+    expect(await w.run('accept')).toContain('입력 변경을 감지해')
     expect(w.box()).toBe('내가 방금 쓴 요청')
     expect(w.fills).toHaveLength(fillsBeforeUndo)
     expect(w.submits).toHaveLength(0)

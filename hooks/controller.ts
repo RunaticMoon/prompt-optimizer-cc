@@ -44,6 +44,7 @@ import {
   type PreparationBudget,
   type PreparationDegradation,
 } from './preparation'
+import { createRestoreTracker, type RestoreOperation } from './restore-guard'
 import { resolveTargetModel } from './resolve-target-model'
 import { undoTarget } from './revisions'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
@@ -93,6 +94,16 @@ export const UNDO_NOTICE = '이전 성공 라운드로 되돌렸습니다. 사�
 function extensionGuide(workflow: Readonly<Workflow> | null | undefined): string {
   return hasPendingCorrection(workflow) ? CORRECTION_GUIDE : EXTEND_GUIDE
 }
+/**
+ * Logged when the box changed (or changed hands) while a restore was in
+ * flight. It is a `ui.log` line, not only a toast: a pane-mode toast is gone
+ * before the person can copy the captured text.
+ */
+const RESTORE_CONFLICT_NOTICE = '복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.'
+/** Prefix for the exact external text kept for manual copy. */
+const RESTORE_RECOVERY_PREFIX = '복원 중 감지한 입력입니다. 필요한 내용을 복사하세요:\n'
+/** Prefix for a cancelled run's saved original when it could not be restored. */
+const CANCEL_ORIGINAL_PREFIX = '복원할 원문입니다. 필요한 내용을 복사하세요:\n'
 /** Result reason for an action refused while its run is mid-flight. */
 export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
 
@@ -194,8 +205,21 @@ export interface OptimizerController {
    * pasted, a carried key as typed (PSTB-2735). The edit hook must call this on
    * entry, before `next`, because a paste and its Enter can arrive in one write
    * and the edit chain can finish after the submit hook (A-REPORT §7).
+   *
+   * @returns the token to settle with {@link finishPromptEdit} on every exit
    */
-  observeEditInput(e: { key?: unknown; inputText: string }): void
+  observeEditInput(e: { key?: unknown; inputText: string }): number
+  /**
+   * Settles one edit token: `text` is the hook's exact full box result, or
+   * `undefined` when the chain failed (which still invalidates an in-flight
+   * restore). A capture that arrives after a conflict was reported is published
+   * through `ports.ui.log`.
+   */
+  finishPromptEdit(token: number | undefined, text: string | undefined, ports?: EnginePorts): void
+  /** Notes one foreign `prompt.fill` entering, before its `next`. */
+  beginForeignFill(): number
+  /** Settles a foreign fill with the complete box text read after it, if any. */
+  finishForeignFill(token: number | undefined, text: string | undefined, ports?: EnginePorts): void
   /** Observes display text on paths such as long paste that emit no edit. */
   observeComposer(text: string): void
   /**
@@ -236,11 +260,29 @@ function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
+/**
+ * Sends one durable log line without awaiting it or letting a missing,
+ * throwing or rejecting log port change a restore's outcome.
+ */
+function logQuietly(ports: EnginePorts | undefined, text: string): void {
+  try {
+    const pending = ports?.ui.log?.(text)
+    if (pending !== undefined) void Promise.resolve(pending).catch(() => undefined)
+  } catch {
+    // Best effort: the notice wording must not claim durable recovery without it.
+  }
+}
+
 /** The Korean notice for one restore refusal. */
 function refusalNotice(reason: TransferRefusal): string {
   switch (reason) {
     case 'draft-conflict':
-      return '입력창에 새로 작성한 내용이 있어 덮어쓰지 않았습니다'
+      // A conflict can be detected after the fill was already dispatched, so
+      // the wording must not promise that nothing was overwritten.
+      return '입력 변경을 감지해 복원을 완료하지 못했습니다.'
+    case 'stale-owner':
+      // A superseded caller stays silent: the current run owns the UI now.
+      return ''
     case 'no_composer':
       return '입력창을 사용할 수 없어 개선안을 넣지 못했습니다'
     case 'dialog':
@@ -348,6 +390,12 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * a verdict the classifier never reached.
    */
   let lastSubmissionStatus: SubmissionStatus | null = null
+  /**
+   * Observed-event guard for restores (#28): ownership epoch and monotonic
+   * revision, fed by the edit/fill/autocomplete hooks. Session-local; cleared
+   * whenever ownership moves so old user text never leaks into a new session.
+   */
+  const restoreTracker = createRestoreTracker()
 
   function sameQuestion(asked: Workflow): boolean {
     const current = state.workflow
@@ -697,18 +745,26 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * ticket is skipped once the tentative one has been consumed, revoked or edited,
    * so a spent permit cannot come back to life and a person's correction is never
    * overwritten.
+   *
+   * The {@link RestoreOperation} carries this restore's ownership and observed
+   * revision: a session/workflow change makes it stale, an observed edit or
+   * foreign fill makes it edited. Either stops the fill; if the fill was already
+   * dispatched, only this restore's permit lineage is revoked and the captured
+   * text is logged for manual copy. No second fill is ever attempted.
    */
   async function restore(
     ports: EnginePorts,
     workflow: Workflow,
     text: string,
   ): Promise<Awaited<ReturnType<typeof transferDraft>>> {
+    const operation = restoreTracker.begin()
     const provisional: BypassTicket = {
       sessionId: workflow.sessionId,
       workflowId: workflow.id,
       text,
       expiresAt: deps.now() + BYPASS_TTL_MS,
     }
+    operation.tickets.add(provisional)
     apply({ type: 'bypass-issued', ticket: provisional })
 
     let result: Awaited<ReturnType<typeof transferDraft>>
@@ -728,23 +784,70 @@ export function createController(deps: ControllerDeps): OptimizerController {
           // handback until after our scheduled clear. Only the already accepted
           // text may be replaced in either case; fresh user input stays protected.
           expectedDraft: consumedPrompt?.workflowId === workflow.id ? consumedPrompt.texts : undefined,
+          guard: operation,
         },
       )
     } catch (cause) {
       if (state.bypass === provisional) {
         apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
       }
+      restoreTracker.end(operation)
       throw cause
     }
 
-    // Only this restore's own tentative permit may be replaced or revoked: a
-    // consumed, revoked or edited permit is a new (or missing) object and must
-    // be left alone.
-    if (state.bypass === provisional) {
-      if (result.kind === 'filled') apply({ type: 'bypass-issued', ticket: result.ticket })
-      else apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
+    const ownership = operation.check()
+    if (ownership === 'stale') {
+      // A newer session/workflow/restore owns the box, and may own its permit.
+      // Drop only this operation's own lineage and stay silent to this caller.
+      revokeOperationTicket(operation)
+      restoreTracker.end(operation)
+      return { kind: 'refused', reason: 'stale-owner' }
     }
+
+    if (result.kind === 'filled') {
+      // Only this restore's own tentative permit may be replaced: a consumed,
+      // revoked or edited permit is a new (or missing) object and is left alone.
+      if (state.bypass === provisional) {
+        apply({ type: 'bypass-issued', ticket: result.ticket })
+        operation.tickets.add(result.ticket)
+      }
+      restoreTracker.end(operation)
+      return result
+    }
+
+    if (result.reason === 'draft-conflict' && ownership === 'edited') {
+      // The observed revision moved (or an edit is still in flight), so the
+      // host may already have overwritten the person's text. Revoke the permit
+      // derived from this restore, publish what was captured, and never fill
+      // again. An empty captured string is a real deletion, not "unknown".
+      revokeOperationTicket(operation)
+      logQuietly(ports, RESTORE_CONFLICT_NOTICE)
+      // The guard may have refused before a pending edit or foreign-fill read
+      // settled, so ask the operation again: a complete snapshot that landed
+      // just after the refusal is still the person's only copy.
+      const recovery = result.recoveryText ?? operation.recoveryText()
+      if (recovery !== undefined) {
+        logQuietly(ports, `${RESTORE_RECOVERY_PREFIX}${recovery}`)
+      }
+      // A pending edit token may still produce the exact box text; keep this
+      // operation until it settles. Never await a possibly hung edit chain.
+      restoreTracker.retain(operation)
+      if (!restoreTracker.hasPending()) restoreTracker.end(operation)
+      return result
+    }
+
+    if (state.bypass === provisional) {
+      apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
+    }
+    restoreTracker.end(operation)
     return result
+  }
+
+  /** Revokes only a permit whose lineage this restore owns. */
+  function revokeOperationTicket(operation: RestoreOperation): void {
+    const bypass = state.bypass
+    if (bypass === null || !operation.tickets.has(bypass)) return
+    apply({ type: 'bypass-revoked', sessionId: state.sessionId })
   }
 
   /**
@@ -765,6 +868,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
       notify(notice)
       return
     }
+    // A superseded restore belongs to a run the person already left.
+    if (result.reason === 'stale-owner') return
     notify(`원문을 입력창에 복원하지 못했습니다: ${refusalNotice(result.reason)}`)
   }
 
@@ -1148,6 +1253,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
         try {
           resetExtra()
           workflow = makeWorkflow(decision.text, e.context ?? [], ui)
+          // A replacement run owns the box from here: an older restore still
+          // in flight must not report into (or fill over) this workflow.
+          restoreTracker.invalidate()
           apply({ type: 'start', workflow })
           const scheduledWorkflow = workflow
           scheduleTask(
@@ -1198,6 +1306,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
     try {
       resetExtra()
       workflow = makeWorkflow(source, [], ui)
+      // A replacement run owns the box from here: an older restore still in
+      // flight must not report into (or fill over) this workflow.
+      restoreTracker.invalidate()
       apply({ type: 'start', workflow })
       const scheduledWorkflow = workflow
       scheduleTask(
@@ -1344,12 +1455,20 @@ export function createController(deps: ControllerDeps): OptimizerController {
     try {
       result = await restore(ports, workflow, workflow.draft)
     } catch (cause) {
+      // The caller may have been superseded while the restore was in flight;
+      // its notice and phase change belong to the run the person already left.
+      if (!stillOwner(workflow)) return { ok: false, reason: '' }
       apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'reviewing' })
       const reason = `개선안을 입력창에 넣지 못했습니다: ${describeError(cause)}`
       notify(reason)
       return { ok: false, reason }
     }
 
+    // A superseded restore owns neither the box nor the UI: no dismiss, no
+    // phase change, no notice; the current run keeps whatever it did.
+    if (result.kind === 'refused' && result.reason === 'stale-owner') {
+      return { ok: false, reason: '' }
+    }
     if (result.kind === 'filled') {
       // `restore` already confirmed the permit with the fill's own text.
       apply({ type: 'dismiss', workflowId: workflow.id })
@@ -1360,6 +1479,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
     const reason = refusalNotice(result.reason)
     notify(reason)
     return { ok: false, reason }
+  }
+
+  /** Whether the workflow a caller captured still owns this session's state. */
+  function stillOwner(workflow: Workflow): boolean {
+    return state.sessionId === workflow.sessionId && state.workflow?.id === workflow.id
   }
 
   async function send(
@@ -1457,22 +1581,43 @@ export function createController(deps: ControllerDeps): OptimizerController {
     try {
       result = await restore(ports, workflow, workflow.original)
     } catch (cause) {
-      const reason = `개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${describeError(cause)}`
+      const reason =
+        `개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${describeError(cause)}\n` +
+        `${CANCEL_ORIGINAL_PREFIX}${workflow.original}`
       notify(reason)
       return { ok: false, reason }
     }
 
+    // The run was already dropped; a restore that lost ownership to a newer
+    // workflow/session must not report into the new one.
+    if (result.kind === 'refused' && result.reason === 'stale-owner') {
+      return { ok: false, reason: '' }
+    }
     if (result.kind === 'filled') {
       // `restore` already confirmed the permit with the fill's own text.
       notify('개선을 취소하고 원문을 입력창에 복원했습니다.')
       return { ok: true }
     }
-    const reason = `개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${refusalNotice(result.reason)}`
+    // The cancelled workflow is gone, so this notice is the only copyable
+    // record of what the restore could not place back in the box.
+    const reason =
+      `개선을 취소했습니다. 원문을 입력창에 복원하지 못했습니다: ${refusalNotice(result.reason)}\n` +
+      `${CANCEL_ORIGINAL_PREFIX}${workflow.original}`
     notify(reason)
     return { ok: false, reason }
   }
 
+  /**
+   * Applies one completed edit's full box text to the draft/bypass state. The
+   * register hook pairs it with {@link finishPromptEdit}, which records the
+   * observed revision for the restore guard.
+   */
   function onPromptEdit(text: string): void {
+    applyEditText(text)
+  }
+
+  /** The state half of a completed edit (composition, raw mode, permit). */
+  function applyEditText(text: string): void {
     // The box's text is the running draft's anchor: an emptied box (the
     // engine's own clear, or a person deleting everything) starts a fresh draft.
     composition = noteBox(composition, text)
@@ -1483,16 +1628,61 @@ export function createController(deps: ControllerDeps): OptimizerController {
     if (state.rawMode !== null) {
       apply({ type: 'raw-mode-seen', sessionId: state.sessionId, draft: text })
     }
-    if (state.bypass === null) return
+    const before = state.bypass
+    if (before === null) return
     if (text.trim() === '') {
       apply({ type: 'bypass-revoked', sessionId: state.sessionId })
       return
     }
     apply({ type: 'bypass-edited', sessionId: state.sessionId, text })
+    // A permit edited from this restore's own provisional still belongs to it:
+    // a late conflict revokes it instead of leaving a stale bypass behind.
+    if (state.bypass !== null) restoreTracker.trackTicket(before, state.bypass)
   }
 
-  function observeEditInput(e: { key?: unknown; inputText: string }): void {
+  /**
+   * Settles one edit token with the hook's exact result. A capture that lands
+   * after the restore already reported a conflict is published for manual copy.
+   */
+  function finishPromptEdit(
+    token: number | undefined,
+    text: string | undefined,
+    ports?: EnginePorts,
+  ): void {
+    settleObservation(token, text, ports)
+  }
+
+  /** Notes one foreign fill entering, before its `next` can rewrite the box. */
+  function beginForeignFill(): number {
+    return restoreTracker.beginForeignFill()
+  }
+
+  /** Settles a foreign fill with the complete box text read after it, if any. */
+  function finishForeignFill(
+    token: number | undefined,
+    text: string | undefined,
+    ports?: EnginePorts,
+  ): void {
+    settleObservation(token, text, ports)
+  }
+
+  /** Applies one settled observation, unless it belongs to an older session. */
+  function settleObservation(
+    token: number | undefined,
+    text: string | undefined,
+    ports?: EnginePorts,
+  ): void {
+    const settled = restoreTracker.settle(token, text)
+    // A completion belonging to an older session changes nothing here: not the
+    // draft snapshot, not the permit, and certainly not a recovery notice.
+    if (!settled.accepted) return
+    if (text !== undefined) applyEditText(text)
+    if (settled.lateText !== undefined) logQuietly(ports, `${RESTORE_RECOVERY_PREFIX}${settled.lateText}`)
+  }
+
+  function observeEditInput(e: { key?: unknown; inputText: string }): number {
     composition = noteEditInput(composition, e)
+    return restoreTracker.beginEdit()
   }
 
   function submissionFacts(text: string): SubmissionFacts {
@@ -1575,6 +1765,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
   function onSessionStart(sessionId: string): void {
     abortAll()
+    // Ownership moved: an in-flight restore from the old session must go stale,
+    // and its captured user text must never be published into this one.
+    restoreTracker.invalidate()
     pendingAsk = null
     resetGuidance()
     composition = EMPTY_COMPOSITION
@@ -1583,6 +1776,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
   function onSessionEnd(): void {
     abortAll()
+    restoreTracker.invalidate()
     pendingAsk = null
     resetGuidance()
     composition = EMPTY_COMPOSITION
@@ -1606,7 +1800,13 @@ export function createController(deps: ControllerDeps): OptimizerController {
     cancel,
     onPromptEdit,
     observeEditInput,
+    finishPromptEdit,
+    beginForeignFill,
+    finishForeignFill,
     observeComposer: text => {
+      // A changed display is one more observed box view (and invalidates an
+      // in-flight restore); an identical repeat is not a new observation.
+      restoreTracker.observeDisplay(text)
       // Autocomplete sees a long paste's placeholder even though no edit
       // arrived for it, so the draft's composition follows it whichever branch
       // below handles the host's handback. Do not treat it as a user edit or

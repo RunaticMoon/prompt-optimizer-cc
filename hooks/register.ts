@@ -260,11 +260,16 @@ export function register(on: On, options: PluginOptions): void {
     // Record the edit's facts on entry, before `next` (and before the optimizer-
     // off mode consumes it): a paste and its Enter can arrive in one write, and
     // the edit chain can finish after the submit hook classifies (A-REPORT §7).
+    // The token is settled on every exit (consumed, normal or thrown), so a
+    // restore never keeps waiting on this hook.
+    let token: number | undefined
     try {
-      controller.observeEditInput(e)
+      token = controller.observeEditInput(e)
     } catch {
       // Recording the draft's composition must not break the edit path.
+      token = undefined
     }
+    const ports = portsOf($)
     // The optimizer-off mode reads the edit before the box changes; a consumed
     // edit (the marker typed, or ctrl+u) returns the box the controller built
     // instead of calling `next`. A throwing reader falls back to the plain path.
@@ -280,14 +285,22 @@ export function register(on: On, options: PluginOptions): void {
       // follow the box the edit produced, or its ticket keeps the pre-arm text
       // and the submit mismatches. The rawMode's draft is the same text here,
       // so re-seeing it is harmless.
-      controller.onPromptEdit(consumed.text)
+      controller.finishPromptEdit(token, consumed.text, ports)
       if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
       return consumed
     }
-    const r = await next(e)
+    let r
+    try {
+      r = await next(e)
+    } catch (cause) {
+      // An unknown result still invalidates an in-flight restore, but it is
+      // not a box snapshot: never fabricate one from the input text.
+      controller.finishPromptEdit(token, undefined, ports)
+      throw cause
+    }
     // Also remember raw paste placeholders: submit sees their expanded text,
     // while a dropped submission can restore the display text instead.
-    controller.onPromptEdit(r.text)
+    controller.finishPromptEdit(token, r.text, ports)
     if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
     return r
   })
@@ -304,7 +317,18 @@ export function register(on: On, options: PluginOptions): void {
     currentSchedule = fn => {
       $.clock.after(1, fn)
     }
-    const r = await next(e)
+    const ports = portsOf($)
+    // Another plugin rewriting the box invalidates any restore on entry, before
+    // `next`, and its token stays in flight until the box has been read.
+    const foreign = e.origin.kind === 'plugin' && e.origin.name !== PLUGIN_NAME
+    const token = foreign ? controller.beginForeignFill() : undefined
+    let r
+    try {
+      r = await next(e)
+    } catch (cause) {
+      if (token !== undefined) controller.finishForeignFill(token, undefined, ports)
+      throw cause
+    }
     // Any landed fill changed the box, so the armed mode no longer describes
     // what the person is about to send, whichever plugin made the fill.
     if (r.isFilled) {
@@ -317,24 +341,24 @@ export function register(on: On, options: PluginOptions): void {
       controller.clearRawMode()
       if ((controller.getState().rawMode !== null) !== wasArmed) $.ui.invalidate('ui.render')
     }
-    if (
-      r.isFilled &&
-      e.origin.kind === 'plugin' &&
-      e.origin.name !== PLUGIN_NAME &&
-      controller.getState().bypass !== null
-    ) {
-      // Another plugin altered the box: the restored draft is gone, so its
-      // bypass follows what the box actually holds now. The fill's own `text`
-      // is only its fragment for `append`/`insert`, so read the box; a box
-      // that cannot be read falls back to the fragment. A fill that was
-      // refused left the box as it was, so the permit still stands.
-      let text = e.text
-      try {
-        text = (await $.prompt.read()).text
-      } catch {
-        text = e.text
+    if (token !== undefined) {
+      // The fill's own `text` is only its fragment for `append`/`insert`, so a
+      // landed fill is read for a complete box snapshot. A failed read keeps
+      // the old permit fallback below but claims no recovery text.
+      let captured: string | undefined
+      if (r.isFilled && controller.getState().bypass !== null) {
+        let text = e.text
+        try {
+          text = (await ports.prompt.read()).text
+          captured = text
+        } catch {
+          text = e.text
+        }
+        // Another plugin altered the box: the restored draft is gone, so its
+        // bypass follows what the box actually holds now.
+        if (captured === undefined) controller.onPromptEdit(text)
       }
-      controller.onPromptEdit(text)
+      controller.finishForeignFill(token, captured, ports)
     }
     return r
   })
