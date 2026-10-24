@@ -25,6 +25,12 @@ import {
   SYSTEM_PROMPT_MAX_CHARS,
   TIMEOUT_MS_RANGE,
 } from './contracts'
+import {
+  PreparationCancelled,
+  createLocalPreparation,
+  type PreparationCollectionOptions,
+  type PreparationDegradation,
+} from './preparation'
 
 /** Every known setting key, in the order warnings are emitted. */
 const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG) as ConfigKey[]
@@ -278,50 +284,106 @@ function describeError(cause: unknown): string {
 /**
  * Reads the explicitly configured system prompt file, if any.
  *
- * An empty `systemPromptFile` reads nothing. `~` is expanded with `$.env`'s
- * `HOME` and read through `$.fs`; text beyond {@link SYSTEM_PROMPT_MAX_CHARS}
- * is dropped with a warning, and any failure falls back to the built-in prompt
- * with a warning naming the file.
+ * An empty `systemPromptFile` reads nothing, not even a timer. `~` is expanded
+ * with `$.env`'s `HOME` and read through `$.fs`; each read runs under the
+ * round's preparation budget, and text beyond {@link SYSTEM_PROMPT_MAX_CHARS}
+ * is dropped with a warning. An ordinary missing/unreadable file falls back to
+ * the built-in prompt with a warning naming the file; a read that outlived the
+ * budget is reported through `onDegraded` and returns no text.
  */
 export async function loadSystemPromptExtra(
   $: EnginePorts,
   config: OptimizerConfig,
+  options: PreparationCollectionOptions = {},
 ): Promise<{ text: string; warning?: string }> {
   const file = config.systemPromptFile
   if (file === '') return { text: '' }
 
-  let home: string | undefined
-  try {
-    home = await $.env.get('HOME')
-  } catch {
-    home = undefined
-  }
-  const path = expandHome(file, home)
-
-  try {
-    await $.fs.stat(path)
-  } catch (cause) {
-    return {
-      text: '',
-      warning: `could not read system prompt file "${path}" (${describeError(cause)}); using the built-in prompt`,
-    }
+  const ownsBudget = options.budget === undefined
+  const budget = options.budget ?? createLocalPreparation({
+    clock: $.clock,
+    signal: options.signal,
+    now: () => Date.now(),
+  })
+  const degraded = (label: string, reason: PreparationDegradation): void => {
+    options.onDegraded?.(label, reason)
   }
 
-  let raw: string
   try {
-    raw = await $.fs.read(path)
-  } catch (cause) {
-    return {
-      text: '',
-      warning: `could not read system prompt file "${path}" (${describeError(cause)}); using the built-in prompt`,
+    // An absolute or relative path needs no HOME lookup at all. A tilde path
+    // must resolve HOME first; reading the literal `~` would be a wrong file.
+    const needsHome = file === '~' || file.startsWith('~/')
+    let home: string | undefined
+    if (needsHome) {
+      const homeResult = await budget.run('extra-home', async () => {
+        try {
+          return await $.env.get('HOME')
+        } catch {
+          return null
+        }
+      })
+      if (homeResult.kind === 'cancelled') throw new PreparationCancelled()
+      if (homeResult.kind !== 'ok') degraded('extra-home', homeResult.kind)
+      if (homeResult.kind !== 'ok' || homeResult.value == null || homeResult.value === '') {
+        return {
+          text: '',
+          warning: `could not resolve the home directory for system prompt file "${file}"; using the built-in prompt`,
+        }
+      }
+      home = homeResult.value
     }
-  }
+    const path = expandHome(file, home)
 
-  if (raw.length > SYSTEM_PROMPT_MAX_CHARS) {
-    return {
-      text: raw.slice(0, SYSTEM_PROMPT_MAX_CHARS),
-      warning: `system prompt file "${path}" is longer than ${SYSTEM_PROMPT_MAX_CHARS} characters; the extra text is ignored`,
+    // Expected file failures are caught inside the task so they keep their
+    // specific warning; only a budget failure reaches the degraded path.
+    const stat = await budget.run('extra-stat', async () => {
+      try {
+        await $.fs.stat(path)
+        return { ok: true as const }
+      } catch (cause) {
+        return { ok: false as const, message: describeError(cause) }
+      }
+    })
+    if (stat.kind === 'cancelled') throw new PreparationCancelled()
+    if (stat.kind !== 'ok') {
+      degraded('extra-stat', stat.kind)
+      return { text: '' }
     }
+    if (!stat.value.ok) {
+      return {
+        text: '',
+        warning: `could not read system prompt file "${path}" (${stat.value.message}); using the built-in prompt`,
+      }
+    }
+
+    const read = await budget.run('extra-read', async () => {
+      try {
+        return { ok: true as const, text: await $.fs.read(path) }
+      } catch (cause) {
+        return { ok: false as const, message: describeError(cause) }
+      }
+    })
+    if (read.kind === 'cancelled') throw new PreparationCancelled()
+    if (read.kind !== 'ok') {
+      degraded('extra-read', read.kind)
+      return { text: '' }
+    }
+    if (!read.value.ok) {
+      return {
+        text: '',
+        warning: `could not read system prompt file "${path}" (${read.value.message}); using the built-in prompt`,
+      }
+    }
+    const raw = read.value.text
+
+    if (raw.length > SYSTEM_PROMPT_MAX_CHARS) {
+      return {
+        text: raw.slice(0, SYSTEM_PROMPT_MAX_CHARS),
+        warning: `system prompt file "${path}" is longer than ${SYSTEM_PROMPT_MAX_CHARS} characters; the extra text is ignored`,
+      }
+    }
+    return { text: raw }
+  } finally {
+    if (ownsBudget) budget.dispose()
   }
-  return { text: raw }
 }
