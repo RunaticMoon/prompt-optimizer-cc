@@ -166,17 +166,16 @@ export function extractSearchTerms(
 
   const matched = new Set<number>()
   for (const term of direct) {
-    const group = index.byMember.get(term.text)
-    if (group !== undefined) matched.add(group)
+    for (const group of index.byMember.get(term.text) ?? []) matched.add(group)
   }
   for (const raw of hangulTokens(source)) {
     for (const ending of REQUEST_ENDINGS) {
       if (!raw.endsWith(ending)) continue
       const stem = raw.slice(0, -ending.length)
       if (stem.length < 2) continue
-      const group = index.byMember.get(stem)
-      if (group === undefined) continue
-      matched.add(group)
+      const owners = index.byMember.get(stem)
+      if (owners === undefined) continue
+      for (const group of owners) matched.add(group)
       add(stem, SEARCH_WEIGHT.hangul)
     }
   }
@@ -207,8 +206,10 @@ export function extractSearchTerms(
 /**
  * Extracts only targets a fresh answer genuinely added: safe relative paths,
  * code-shaped or quoted identifiers, known alias concepts, and Hangul nouns
- * explicitly attached to 기능/화면/모듈/대상/처리. Deictic choices and style
- * instructions yield none; an option number is never resolved into a target.
+ * explicitly attached to 기능/화면/모듈/대상/처리. A particle-stripped stem
+ * counts only when it names a known alias member, so ordinary prose nouns stay
+ * search-only. Deictic choices and style instructions yield none; an option
+ * number is never resolved into a target.
  */
 export function extractTargets(
   text: string,
@@ -237,7 +238,11 @@ export function extractTargets(
   }
   for (const raw of hangulTokens(prose)) {
     if (index.byMember.has(raw)) add(raw)
-    for (const stem of stemsFor(raw, index)) add(stem)
+    for (const stem of stemsFor(raw, index)) {
+      // A stripped stem authorizes a scan only when it names a known concept;
+      // an unknown noun stays search-only unless a marker names it below.
+      if (index.byMember.has(stem)) add(stem)
+    }
   }
   const marker = new RegExp(`([가-힣]{2,40})\\s*(?:${TARGET_MARKERS.join('|')})`, 'g')
   for (const match of prose.matchAll(marker)) add(match[1] ?? '')
@@ -444,23 +449,29 @@ function isSearchToken(value: string): boolean {
 }
 
 interface GroupIndex {
-  /** Member surface to the index of its first group. */
-  byMember: Map<string, number>
-  /** Member surface to its group's canonical key. */
+  /** Member surface to every group containing it, first occurrence order. */
+  byMember: Map<string, number[]>
+  /** Member surface to its first group's canonical key. */
   keyFor: Map<string, string>
   /** Every member surface, first occurrence order. */
   members: string[]
 }
 
-/** Builds member and key indexes; the first group wins on a collision. */
+/**
+ * Builds member and key indexes. A member may belong to several groups (a
+ * project mapping on a built-in surface), so every owning group is recorded
+ * and expanded once; canonical keys keep the first group's key.
+ */
 function groupIndex(groups: readonly AliasGroup[]): GroupIndex {
-  const byMember = new Map<string, number>()
+  const byMember = new Map<string, number[]>()
   const keyFor = new Map<string, string>()
   const members: string[] = []
   groups.forEach((group, index) => {
     const key = groupKeyOf(groups, index)
     for (const member of group) {
-      if (!byMember.has(member)) byMember.set(member, index)
+      const owners = byMember.get(member)
+      if (owners === undefined) byMember.set(member, [index])
+      else if (!owners.includes(index)) owners.push(index)
       if (!keyFor.has(member)) {
         keyFor.set(member, key)
         members.push(member)

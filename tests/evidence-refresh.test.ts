@@ -106,6 +106,13 @@ describe('initialRefreshState', () => {
     expect(refresh.seen).toEqual(['login'])
     expect(refresh.reserveChars).toBe(1000)
   })
+
+  test('seeds seen with the concepts the initial scan already searched', () => {
+    const refresh = initialRefreshState(OWNER, '대시보드 고쳐줘', '', [], 500)
+    expect(refresh.seen).toContain('대시보드')
+    // A marker around an already-searched noun must not rescan it.
+    expect(planRefresh(refresh, '대시보드 화면으로')).toBeNull()
+  })
 })
 
 describe('planRefresh', () => {
@@ -129,6 +136,12 @@ describe('planRefresh', () => {
       '한국어를 유지해',
       '   ',
     ]) {
+      expect(planRefresh(state(), text)).toBeNull()
+    }
+  })
+
+  test('an unmarked noun with a particle is style prose, not a new target', () => {
+    for (const text of ['문장을 더 자연스럽게', '어색한 부분을 고쳐줘', '로그인 화면으로 보여줘']) {
       expect(planRefresh(state(), text)).toBeNull()
     }
   })

@@ -62,7 +62,6 @@ import { undoTarget } from './revisions'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import {
-  CONTEXT_PROJECT_CHARS,
   TARGET_MODEL_TIMEOUT_MS,
   type BypassTicket,
   type ContextSnapshot,
@@ -1025,11 +1024,13 @@ export function createController(deps: ControllerDeps): OptimizerController {
       if (!live()) return
 
       // Only a fresh refine/retry answer may add evidence. A bare retry or a
-      // repeated choice never reaches the filesystem.
+      // repeated choice never reaches the filesystem. A reserve that cannot
+      // fit the block wrapper renders nothing, so it never plans a scan and
+      // never spends an attempt.
       if (fresh !== undefined && fresh.trim() !== '' && config.contextMaxChars > 0) {
         const budget = refreshBudget
         const cached = refreshState
-        if (budget !== null && budget.reserve > 0 && cached !== null
+        if (budget !== null && budget.reserve > REFRESH_BLOCK_OVERHEAD && cached !== null
           && cached.owner.sessionId === workflow.sessionId
           && cached.owner.workflowId === workflowId
           && cached.owner.generation === generation) {

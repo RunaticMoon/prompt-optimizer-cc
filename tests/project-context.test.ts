@@ -432,6 +432,27 @@ describe('collectProjectEvidence — bilingual ranking and refreshed limits', ()
     expect(text).toContain('41: export const wishList = true')
   })
 
+  test('a project mapping on a built-in surface reaches its own source file', async () => {
+    const { ports } = filesystem({
+      '/repo/GLOSSARY.md': '# Glossary\n로그인: sessionStore\n',
+      '/repo/src/session.ts': 'export const sessionStore = true\n',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '로그인 기능')
+    expect(text).toContain('src/session.ts')
+    expect(text).toContain('1: export const sessionStore = true')
+  })
+
+  test('selects the login source for the issue mixed-language request', async () => {
+    const { ports } = filesystem({
+      '/repo/src/auth/login.ts': 'export async function login(email, password) {\n  return validateCredentials(email, password)\n}',
+      '/repo/src/cart/cart.ts': 'export function addCartItem(item) { return cart.add(item) }',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '로그인 login 오류를 고쳐줘')
+    expect(text).toContain('src/auth/login.ts')
+    expect(text).toContain('export async function login')
+    expect(text).not.toContain('src/cart/cart.ts')
+  })
+
   test('the two glossary prepass reads count toward the read budget and are not repeated', async () => {
     const { ports, reads } = filesystem({
       '/repo/GLOSSARY.md': '찜목록: wishList\n',

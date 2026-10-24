@@ -5029,6 +5029,41 @@ describe('repository follow-up refresh', () => {
     for (const request of h.completes) expect(requestText(request.prompt)).not.toContain('<repository_followup>')
   })
 
+  test('particle style answers never scan and never spend an attempt', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const reads = h.calls.fileRead
+    const stats = h.calls.stat
+
+    await h.controller.refine(h.ports, '문장을 더 자연스럽게')
+    await h.controller.refine(h.ports, '어색한 부분을 고쳐줘')
+    await h.controller.refine(h.ports, '로그인 화면으로 보여줘')
+    expect(h.calls.fileRead).toBe(reads)
+    expect(h.calls.stat).toBe(stats)
+    for (const request of h.completes) expect(requestText(request.prompt)).not.toContain('<repository_followup>')
+
+    // The two attempts are intact: a real new target still scans.
+    await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+    expect(h.calls.fileRead).toBeGreaterThan(reads)
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('targets: cart')
+  })
+
+  test('a reserve too small for the block wrapper plans no scan or attempt', async () => {
+    const h = harness({ tree: true, files, config: { contextMaxChars: 270 } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const reads = h.calls.fileRead
+    const stats = h.calls.stat
+
+    await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+    expect(h.calls.fileRead).toBe(reads)
+    expect(h.calls.stat).toBe(stats)
+    expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('<repository_followup>')
+  })
+
   test('a retry with a fresh new target scans, and a path answer is a new target', async () => {
     const h = harness({ tree: true, files })
     h.controller.onSessionStart('sess-1')

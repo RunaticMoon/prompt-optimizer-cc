@@ -113,7 +113,9 @@ export function refreshAllocation(contextMaxChars: number): RefreshAllocation {
  * Builds the initial refresh state from the original request and only the
  * explicitly present user conversation text. Assistant suggestions are not
  * promoted to user decisions. `seen` uses canonical concept keys, so Korean
- * login and English login count as the same concept.
+ * login and English login count as the same concept, and it also covers the
+ * concepts the initial scan already searched so a follow-up repeating one of
+ * them does not rescan.
  */
 export function initialRefreshState(
   owner: RefreshOwner,
@@ -125,6 +127,9 @@ export function initialRefreshState(
   const aliases = mergeAliasGroups(projectAliases)
   const userText = conversationUserText(conversation)
   const seen: string[] = []
+  for (const term of extractSearchTerms(request, aliases)) {
+    if (!seen.includes(term.key)) seen.push(term.key)
+  }
   for (const key of extractTargets(`${request}\n${userText}`, aliases)) {
     if (!seen.includes(key)) seen.push(key)
   }

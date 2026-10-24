@@ -96,6 +96,15 @@ describe('extractSearchTerms', () => {
     expect(terms('favorites 화면', aliases)).toContain('찜목록')
   })
 
+  test('a project mapping on a built-in surface expands forward too', () => {
+    const cart = terms('장바구니 화면', parseProjectAliases('장바구니: shoppingBag'))
+    expect(cart).toContain('shoppingbag')
+    expect(cart).toContain('cart')
+    const login = terms('로그인 기능', parseProjectAliases('로그인: sessionStore'))
+    expect(login).toContain('sessionstore')
+    expect(login).toContain('auth')
+  })
+
   test('ranks direct input above aliases', () => {
     expect(weightOf('login API', 'login')).toBeGreaterThan(weightOf('login API', '로그인') ?? 0)
     expect(weightOf('로그인 API', '로그인')).toBeGreaterThan(weightOf('로그인 API', 'login') ?? 0)
@@ -144,6 +153,13 @@ describe('extractTargets', () => {
     for (const text of ['1번', '아까 고른 것', '그대로', '더 짧게', '한국어를 유지해']) {
       expect(extractTargets(text)).toEqual([])
     }
+  })
+
+  test('a particle-stripped unknown noun is not a target without a marker', () => {
+    expect(extractTargets('문장을 더 자연스럽게')).toEqual([])
+    expect(extractTargets('어색한 부분을 고쳐줘')).toEqual([])
+    // The marker path still answers with the already-seen concept only.
+    expect(extractTargets('로그인 화면으로 보여줘')).toEqual(['login'])
   })
 
   test('collapses repeated alias surfaces into one canonical target', () => {
