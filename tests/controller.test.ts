@@ -1293,7 +1293,7 @@ describe('refine — the improvement dialogue', () => {
     expect(h.notices).toContain('개선 횟수 한도에 도달했습니다')
   })
 
-  test('puts a refinement instruction in the request exactly once', async () => {
+  test('does not duplicate a refinement instruction in <instruction>', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
@@ -1302,15 +1302,15 @@ describe('refine — the improvement dialogue', () => {
     await h.controller.refine(h.ports, '더 짧게')
 
     const refined = requestText(h.completes.at(-1)?.prompt)
-    // The supplement is rendered once, in the dialogue; the request must not
-    // also repeat it in an `<instruction>` section.
-    expect(refined.split('더 짧게')).toHaveLength(2)
+    // The supplement is rendered in the decision evidence and the dialogue;
+    // the request must not also repeat it in an `<instruction>` section.
+    expect(refined.split('더 짧게')).toHaveLength(3)
     expect(refined).not.toContain('<instruction>')
 
     await h.controller.retry(h.ports, '조금 더')
 
     const retried = requestText(h.completes.at(-1)?.prompt)
-    expect(retried.split('조금 더')).toHaveLength(2)
+    expect(retried.split('조금 더')).toHaveLength(3)
     expect(retried).not.toContain('<instruction>')
   })
 
@@ -1358,10 +1358,10 @@ describe('refine — the improvement dialogue', () => {
     await h.controller.refine(h.ports, '더 짧게')
     await h.controller.retry(h.ports)
 
-    // The supplement is already in the dialogue; a bare retry must not also
-    // re-render it as the `<instruction>` section.
+    // The supplement is already in the decision evidence and the dialogue; a
+    // bare retry must not also re-render it as the `<instruction>` section.
     const retried = requestText(h.completes.at(-1)?.prompt)
-    expect(retried.split('더 짧게')).toHaveLength(2)
+    expect(retried.split('더 짧게')).toHaveLength(3)
     expect(retried).not.toContain('<instruction>')
   })
 })
