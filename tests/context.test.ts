@@ -479,3 +479,63 @@ describe('collectContext', () => {
     expect(snapshot.text).not.toContain('## Long-term memory')
   })
 })
+
+describe('repository source records', () => {
+  test('buildSnapshot carries the records without altering the text', () => {
+    const sources = [{ path: 'docs/ADR.md', excerpt: 'docs/ADR.md\n1: Decision: keep history', kind: 'domain' as const }]
+    const carried = buildSnapshot(baseInput({ project: 'docs/ADR.md\n1: Decision: keep history', projectSources: sources }))
+    expect(carried.repositorySources).toEqual(sources)
+    expect(carried.text).toContain('Decision: keep history')
+
+    const without = buildSnapshot(baseInput({ project: 'x' }))
+    expect('repositorySources' in without).toBe(false)
+  })
+
+  test('collectContext carries the collector records, each read exactly once', async () => {
+    const { engine, reads } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      files: {
+        '/repo/CLAUDE.md': 'project rules',
+        '/repo/GLOSSARY.md': '# Domain\nNode: resolved graph object',
+        '/repo/package.json': '{"scripts":{"test":"vitest run"}}',
+      },
+    })
+    // The plain fake stats only files; give the scan a resolvable root and
+    // real paths so the bounded inspection can read its candidates.
+    const baseStat = engine.fs.stat.bind(engine.fs)
+    engine.fs.stat = (async (path: string, options?: { resolve?: boolean }) => {
+      if (path === '/repo') {
+        return { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/repo' }
+      }
+      const result = await baseStat(path, options)
+      return result.kind === 'file' && result.realPath === undefined
+        ? { ...result, realPath: path }
+        : result
+    }) as typeof engine.fs.stat
+
+    const snapshot = await collectContext(engine, DEFAULT_CONFIG, 'node image API')
+
+    const sources = snapshot.repositorySources ?? []
+    expect(sources.map(source => source.path).sort()).toEqual(['GLOSSARY.md', 'package.json'])
+    for (const source of sources) {
+      expect(source.excerpt.length).toBeGreaterThan(0)
+      expect(snapshot.text).toContain(source.excerpt)
+      // One scan serves both the text and the records: each path is read once,
+      // and nothing is parsed back out of the model-facing text.
+      expect(reads.filter(path => path === `/repo/${source.path}`)).toHaveLength(1)
+    }
+  })
+
+  test('unavailable or skipped collection records no sources', async () => {
+    const { engine } = fakeEngine()
+    const unavailable = await collectContext(engine, DEFAULT_CONFIG, 'node image API')
+    expect(unavailable.project).toContain('repository inspection unavailable')
+    expect(unavailable.repositorySources).toEqual([])
+
+    const { engine: zero } = fakeEngine()
+    const skipped = await collectContext(zero, { ...DEFAULT_CONFIG, contextMaxChars: 0 }, 'node image API')
+    expect(skipped.project).toBe('')
+    expect(skipped.repositorySources).toEqual([])
+  })
+})

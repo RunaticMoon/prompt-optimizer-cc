@@ -39,6 +39,7 @@ import {
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
 import { resolveTargetModel } from './resolve-target-model'
+import { undoTarget } from './revisions'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import {
@@ -75,6 +76,8 @@ export const CORRECTION_NOTICE = '결정을 정정했습니다. /optimize retry�
 export const CORRECTION_LIMIT_NOTICE =
   '결정을 정정했습니다. 라운드 한도에 도달했으니 /optimize more 로 승인한 뒤 /optimize retry 로 반영하세요.'
 const ACCEPT_NOTICE = '개선안을 입력창에 넣었습니다. Enter 로 전송하세요.'
+/** One successful undo: state only, counters kept. */
+export const UNDO_NOTICE = '이전 성공 라운드로 되돌렸습니다. 사용량과 라운드 한도는 유지됩니다.'
 
 /** The limit guidance that matches why another round would still help. */
 function extensionGuide(workflow: Readonly<Workflow> | null | undefined): string {
@@ -156,6 +159,13 @@ export interface OptimizerController {
    * only: it spends no call or round and never touches the draft.
    */
   correctDecision(id: string, text: string): ActionResult
+  /**
+   * Restores the preceding successful revision's review state (draft, change
+   * note, question, choices, dialogue, decisions). State only: it calls no
+   * model, never touches the composer, and keeps usage, rounds and the
+   * approved round limit exactly as they are.
+   */
+  undo(): ActionResult
   accept(ports: EnginePorts): Promise<ActionResult>
   sendDraft(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
@@ -232,9 +242,10 @@ function refusalNotice(reason: TransferRefusal): string {
  * None of it is shared between sessions; `onSessionStart`/`onSessionEnd` tear
  * it all down.
  *
- * `Workflow.generation` stays `0` for a run's whole life: ids from `newId` only
- * increase within a session and never repeat, so {@link isStale} still tells a
- * late result from the current run without bumping the field on cancel/reset.
+ * `Workflow.generation` is a monotonic state epoch: ids from `newId` only
+ * increase within a session and never repeat, and an undo bumps the epoch, so
+ * {@link isStale} still tells a late result, answer or scheduled callback from
+ * the current run without restoring any older epoch.
  */
 export function createController(deps: ControllerDeps): OptimizerController {
   let state: RuntimeState = initialState('')
@@ -833,8 +844,16 @@ export function createController(deps: ControllerDeps): OptimizerController {
             },
           }
         }
+        // The reducer folds the usage but accepts the reply only from a live
+        // generating run, so a duplicate same-generation completion stores
+        // nothing and must raise no notice or dialog for it either. The gate
+        // is defense-in-depth: no public path issues a second completion for
+        // one generation (rounds are scheduled only from a matching
+        // consumeAndRun phase snapshot, re-entry into a generating run is
+        // refused synchronously, and undo is refused while generating).
+        const live = !stale && state.workflow?.phase === 'generating'
         apply({ type: 'reply', workflowId, generation, sessionId: current.sessionId, reply: result.reply, usage: result.usage })
-        if (stale) return
+        if (!live) return
         const question = result.reply.question
         const options = result.reply.options ?? []
         const notice = question !== null && question !== ''
@@ -1093,23 +1112,23 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
   function correctDecision(id: string, text: string): ActionResult {
     const workflow = state.workflow
-    if (workflow === null) return refuseCorrection('진행 중인 개선 작업이 없습니다.')
+    if (workflow === null) return refuse('진행 중인 개선 작업이 없습니다.')
     if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
       return { ok: false, reason: IN_FLIGHT_REASON }
     }
     // A host dialog cannot be closed by the plugin: refuse rather than clear a
     // pending marker while the person still sees the old choices.
     if (pendingAsk !== null || workflow.questionAsk === 'pending' || workflow.limitAsk === 'pending') {
-      return refuseCorrection('열린 선택 창을 먼저 닫아 주세요.')
+      return refuse('열린 선택 창을 먼저 닫아 주세요.')
     }
     const ledger = workflow.decisions ?? emptyLedger()
     if (findDecision(ledger, id) === undefined) {
-      return refuseCorrection(`결정 ${id}을(를) 찾지 못했습니다. /optimize decisions로 id를 확인하세요.`)
+      return refuse(`결정 ${id}을(를) 찾지 못했습니다. /optimize decisions로 id를 확인하세요.`)
     }
     if (!isActiveDecision(ledger, id)) {
-      return refuseCorrection(`결정 ${id}은(는) 이미 대체되었습니다. 활성 결정을 정정하세요.`)
+      return refuse(`결정 ${id}은(는) 이미 대체되었습니다. 활성 결정을 정정하세요.`)
     }
-    if (text.trim() === '') return refuseCorrection('정정할 내용을 입력하세요.')
+    if (text.trim() === '') return refuse('정정할 내용을 입력하세요.')
 
     apply({ type: 'decision-corrected', workflowId: workflow.id, targetId: id, text })
     // The notice has to be actionable: at the limit a retry would be refused
@@ -1118,10 +1137,39 @@ export function createController(deps: ControllerDeps): OptimizerController {
     return { ok: true }
   }
 
-  /** Notifies one correction refusal and returns it for the command's answer. */
-  function refuseCorrection(reason: string): ActionResult {
+  /** Notifies one refusal and returns it for the command's answer. */
+  function refuse(reason: string): ActionResult {
     notify(reason)
     return { ok: false, reason }
+  }
+
+  function undo(): ActionResult {
+    const workflow = state.workflow
+    if (workflow === null) return refuse('진행 중인 개선 작업이 없습니다.')
+    if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
+      return { ok: false, reason: IN_FLIGHT_REASON }
+    }
+    // The host cannot close an outstanding dialog either: undo refuses and
+    // leaves the pending marker exactly as it is.
+    if (pendingAsk !== null || workflow.questionAsk === 'pending' || workflow.limitAsk === 'pending') {
+      return refuse('열린 선택 창을 먼저 닫아 주세요.')
+    }
+    const currentRevisionId = workflow.currentRevisionId
+    if (undoTarget(workflow, currentRevisionId) === null || currentRevisionId === undefined) {
+      return refuse('되돌릴 이전 성공 라운드가 없습니다.')
+    }
+    // State only: no model call, no prompt read/fill/submit, no ui.ask. The
+    // reducer restores the snapshot atomically and bumps the epoch, so every
+    // pre-undo callback turns stale.
+    apply({
+      type: 'undo',
+      sessionId: state.sessionId,
+      workflowId: workflow.id,
+      generation: workflow.generation,
+      currentRevisionId,
+    })
+    notify(UNDO_NOTICE)
+    return { ok: true }
   }
 
   async function accept(ports: EnginePorts): Promise<ActionResult> {
@@ -1383,6 +1431,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     retry,
     extendRounds,
     correctDecision,
+    undo,
     accept,
     sendDraft: (ports, workflowId) => send(ports, 'draft', workflowId),
     sendOriginal: (ports, workflowId) => send(ports, 'original', workflowId),

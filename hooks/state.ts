@@ -25,6 +25,7 @@ import type {
 } from './contracts'
 import { appendAnswer, appendCorrection, emptyLedger, isActiveDecision, questionIdFor } from './decisions'
 import { REQUEST_BUDGET_NOTICE } from './model'
+import { recordRevision, undoTarget } from './revisions'
 
 /**
  * The only legal `phase` moves. Everything else — including a move to the same
@@ -119,14 +120,17 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const current = base.workflow
       // One run per session: an in-flight run cannot be displaced by another.
       if (current !== null && current.phase !== 'idle') return base
-      // Every real run starts with a ledger and a null pending-question id;
-      // fixture workflows that predate the fields get the same defaults.
+      // Every real run starts with a ledger, an empty revision history and a
+      // null pending-question id; fixture workflows that predate the fields
+      // get the same defaults.
       return {
         ...base,
         workflow: {
           ...event.workflow,
           decisions: event.workflow.decisions ?? emptyLedger(),
           questionId: event.workflow.questionId ?? null,
+          revisions: event.workflow.revisions ?? [],
+          nextRevisionId: event.workflow.nextRevisionId ?? 1,
         },
       }
     }
@@ -172,7 +176,11 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         ? addTotals(base.usage, event.usage, now)
         : base.usage
       const current = matchWorkflow(base, event.workflowId, event.generation)
-      if (current === null) return usage === base.usage ? base : { ...base, usage }
+      // Only a live generating run may accept a result: a duplicate settled
+      // reply must not overwrite the review state or append history twice.
+      if (current === null || current.phase !== 'generating') {
+        return usage === base.usage ? base : { ...base, usage }
+      }
 
       const question = event.reply.question
       const updated: Workflow = {
@@ -201,7 +209,20 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       delete updated.questionAsk
       delete updated.limitAsk
       if (current.correctionPending === true) updated.correctionPending = false
-      return { ...base, usage, workflow: updated }
+      // The snapshot is taken after the reply is fully folded in, so the
+      // recorded draft, dialogue and ledger are exactly what the person would
+      // go back to. Failures and budget refusals never reach this point.
+      const revision = recordRevision(current, {
+        successfulRound: updated.rounds,
+        draft: updated.draft,
+        message: updated.message ?? '',
+        question: updated.question ?? null,
+        questionId: updated.questionId ?? null,
+        options: [...(updated.options ?? [])],
+        dialogue: [...updated.dialogue],
+        decisions: current.decisions ?? emptyLedger(),
+      })
+      return { ...base, usage, workflow: { ...updated, ...revision } }
     }
 
     case 'question-ask': {
@@ -365,6 +386,54 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
           limitAsk: undefined,
         },
       }
+    }
+
+    case 'undo': {
+      // State-only restore of the preceding successful revision. The event
+      // names the session, epoch and revision pointer the caller saw, and all
+      // three are re-checked here so a stale or foreign undo changes nothing.
+      if (event.sessionId !== base.sessionId) return base
+      const current = matchWorkflow(base, event.workflowId, event.generation)
+      if (current === null || current.currentRevisionId !== event.currentRevisionId) return base
+      if (current.phase !== 'reviewing' && current.phase !== 'failed') return base
+      // A pending host dialog cannot be closed by the plugin, so its marker
+      // must survive: the controller refuses earlier, and the reducer repeats
+      // the gate so the rule holds even when a caller skips its own check.
+      if (current.questionAsk === 'pending' || current.limitAsk === 'pending') return base
+      const plan = undoTarget(current, event.currentRevisionId)
+      if (plan === null) return base
+      const updated: Workflow = {
+        ...current,
+        phase: 'reviewing',
+        progress: undefined,
+        // A new epoch rejects every pre-undo result and answer, even when the
+        // restored round count or question text still matches. The snapshot's
+        // own era is never restored.
+        generation: current.generation + 1,
+        draft: plan.target.draft,
+        message: plan.target.message,
+        question: plan.target.question,
+        questionId: plan.target.questionId,
+        options: [...plan.target.options],
+        dialogue: [...plan.target.dialogue],
+        // Entries revert to the snapshot, but id numbering keeps the current
+        // high-water mark so a post-undo answer never recycles a decision id.
+        decisions: {
+          entries: plan.target.decisions.entries,
+          nextId: Math.max(current.decisions?.nextId ?? 1, plan.target.decisions.nextId),
+        },
+        // Descendants of the restored revision are dropped immediately (no
+        // redo); a later successful refine appends with a fresh id.
+        revisions: plan.revisions,
+        currentRevisionId: plan.target.id,
+      }
+      delete updated.lastError
+      delete updated.budgetError
+      delete updated.questionAsk
+      delete updated.limitAsk
+      if (current.correctionPending === true) updated.correctionPending = false
+      // Rounds, usage, roundLimit, original/context and ids stay as they are.
+      return { ...base, workflow: updated }
     }
 
     case 'cancel': {

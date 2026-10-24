@@ -105,13 +105,46 @@ export interface DecisionLedger {
   nextId: number
 }
 
+/**
+ * One successful reply, kept in memory so the person can compare against it
+ * and undo to it (#31). Snapshot fields are the workflow state exactly as the
+ * successful reply left it; `context`/`original` stay workflow-constant and
+ * are not copied per revision.
+ */
+export interface DraftRevision {
+  /** Workflow-local id (`r1`, `r2`, …); never reused, even after undo. */
+  id: string
+  /** The workflow's round counter at the moment this success was recorded. */
+  successfulRound: number
+  /** The draft exactly as this reply delivered it. */
+  draft: string
+  /** The reply's change note. */
+  message: string
+  /** The reply's clarifying question as offered then, or null. */
+  question: string | null
+  /** The question id minted with that question, or null. */
+  questionId: string | null
+  /** The answer choices offered with that question. */
+  options: readonly string[]
+  /** The improvement dialogue as it stood after this reply. */
+  dialogue: readonly OptimizerMessage[]
+  /** The decision ledger as it stood after this reply. */
+  decisions: DecisionLedger
+}
+
 /** One optimization run over one original prompt. */
 export interface Workflow {
   /** Stable id for this run, unique per session. */
   id: string
   /** Session the run belongs to. */
   sessionId: string
-  /** Always 0; workflow ids are unique per session, which is what makes late replies stale. */
+  /**
+   * Monotonic state epoch for this run. Unique workflow ids already make a
+   * late result from another run stale; undo also bumps this epoch, so a
+   * pre-undo reply, answer or scheduled callback is rejected even when the
+   * round count and question text still match. Snapshots never restore an
+   * older epoch.
+   */
   generation: number
   /** Current stage (see {@link Phase}). */
   phase: Phase
@@ -159,6 +192,12 @@ export interface Workflow {
   questionId?: string | null
   /** Last preflight refusal whose protected evidence exceeded the request budget. */
   budgetError?: BudgetFailure
+  /** Newest-last successful revisions kept for comparison and undo (newest five). */
+  revisions?: readonly DraftRevision[]
+  /** Id of the revision the workflow currently shows; the last of {@link revisions}. */
+  currentRevisionId?: string
+  /** Next revision id number to mint; a high-water mark, never reused after undo. */
+  nextRevisionId?: number
 }
 
 /** Counts and decision ids for one local preflight budget refusal. */
@@ -247,6 +286,21 @@ export interface ModelUsage {
   cache_creation_input_tokens: number
 }
 
+/**
+ * One repository file the collector actually read and selected for the
+ * snapshot (#31). The path is the collector's own record — never a path
+ * parsed out of model or file text — and the excerpt is exactly what the
+ * snapshot text carries for it.
+ */
+export interface RepositorySource {
+  /** The relative path the collector read, as labelled in the excerpt. */
+  path: string
+  /** The final selected excerpt (clipped to the snapshot budget), verbatim. */
+  excerpt: string
+  /** What kind of file it is. */
+  kind: 'domain' | 'scripts' | 'source'
+}
+
 /** The deterministic, size-bounded context read once at the start of a run. */
 export interface ContextSnapshot {
   /** Selected recent conversation, newest first then reordered. */
@@ -259,6 +313,12 @@ export interface ContextSnapshot {
   tools: string
   /** Bounded, path-labelled repository evidence relevant to the original request. */
   project?: string
+  /**
+   * The repository files behind {@link project}: only paths the collector
+   * actually read and selected. Inclusion of any excerpt in the current
+   * request is a separate matter (later trimming may exclude it).
+   */
+  repositorySources?: readonly RepositorySource[]
   /** The assembled snapshot text under the configured character budget. */
   text: string
   /** Length of {@link text} in characters. */
@@ -389,6 +449,12 @@ export type OptimizerEvent =
   | { type: 'instruct'; workflowId: string; text: string }
   /** The user explicitly replaced one active decision; state only, no model call. */
   | { type: 'decision-corrected'; workflowId: string; targetId: string; text: string }
+  /**
+   * The user undid to the preceding successful revision; state only, no model
+   * call. Independently gated: the reducer re-checks the session, the epoch
+   * and the revision pointer the caller saw.
+   */
+  | { type: 'undo'; sessionId: string; workflowId: string; generation: number; currentRevisionId: string }
   /** The user edited the restored draft in the composer; the bypass follows the edited text. */
   | { type: 'bypass-edited'; sessionId: string; text: string }
   /** The bypass permit was revoked (another fill, cleared draft, session end, expiry). */

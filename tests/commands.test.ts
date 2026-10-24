@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import { describe, expect, test } from 'claude-code/testing'
 
 import type {
+  DraftRevision,
   GuidanceStatus,
   OptimizerConfig,
   RuntimeState,
@@ -10,7 +11,7 @@ import type {
   Workflow,
 } from '../hooks/contracts'
 import { DEFAULT_CONFIG } from '../hooks/contracts'
-import type { ActionResult } from '../hooks/controller'
+import { UNDO_NOTICE, type ActionResult } from '../hooks/controller'
 import {
   OPTIMIZE_COMMAND,
   formatStatus,
@@ -177,6 +178,42 @@ describe('parseOptimizeArgs', () => {
     expect(parseOptimizeArgs('--')).toEqual({ kind: 'start' })
     // A longer token that merely begins with `--` is not the escape.
     expect(parseOptimizeArgs('--status')).toEqual({ kind: 'start', text: '--status' })
+    expect(parseOptimizeArgs('-- show original을 보여줘')).toEqual({ kind: 'start', text: 'show original을 보여줘' })
+  })
+
+  test('undo and sources take no argument, in any case', () => {
+    expect(parseOptimizeArgs('undo')).toEqual({ kind: 'undo' })
+    expect(parseOptimizeArgs('  UNDO  ')).toEqual({ kind: 'undo' })
+    expect(parseOptimizeArgs('sources')).toEqual({ kind: 'sources' })
+    expect(parseOptimizeArgs('SOURCES')).toEqual({ kind: 'sources' })
+    for (const args of ['undo now', 'sources extra']) {
+      const parsed = parseOptimizeArgs(args)
+      expect(parsed.kind).toBe('error')
+      if (parsed.kind === 'error') expect(parsed.message).toContain('추가 인자를 받지 않습니다')
+    }
+  })
+
+  test('show defaults to draft and takes exactly one known target', () => {
+    expect(parseOptimizeArgs('show')).toEqual({ kind: 'show', target: 'draft' })
+    expect(parseOptimizeArgs('SHOW Original')).toEqual({ kind: 'show', target: 'original' })
+    expect(parseOptimizeArgs('show previous')).toEqual({ kind: 'show', target: 'previous' })
+    expect(parseOptimizeArgs('show draft')).toEqual({ kind: 'show', target: 'draft' })
+    for (const args of ['show file', 'show draft original']) {
+      const parsed = parseOptimizeArgs(args)
+      expect(parsed.kind).toBe('error')
+      if (parsed.kind === 'error') expect(parsed.message).toContain('draft, original, previous 중 하나')
+    }
+  })
+
+  test('diff defaults to original and takes exactly one known baseline', () => {
+    expect(parseOptimizeArgs('diff')).toEqual({ kind: 'diff', baseline: 'original' })
+    expect(parseOptimizeArgs('DIFF Previous')).toEqual({ kind: 'diff', baseline: 'previous' })
+    expect(parseOptimizeArgs('diff original')).toEqual({ kind: 'diff', baseline: 'original' })
+    for (const args of ['diff draft', 'diff original previous', 'diff 비교']) {
+      const parsed = parseOptimizeArgs(args)
+      expect(parsed.kind).toBe('error')
+      if (parsed.kind === 'error') expect(parsed.message).toContain('original 또는 previous 중 하나')
+    }
   })
 })
 
@@ -358,7 +395,7 @@ interface Rig {
   /** Which UI choice `chooseUi` answers with. */
   uiChoice: 'pane' | 'composer'
   /** What each controller action returns; success unless a test overrides one. */
-  results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision', ActionResult>
+  results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision' | 'undo', ActionResult>
   /** Callbacks the deferred `$.clock.after` captured, in order. */
   scheduled: Array<() => void>
   /** Every `ui.toast` the hook made. */
@@ -380,7 +417,7 @@ function rig(
     setResult?: { ok: false; error: string }
     configSetResult?: { value?: unknown; deny?: string }
     configSetError?: unknown
-    results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision', ActionResult>>
+    results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision' | 'undo', ActionResult>>
     /**
      * When the key is present, the controller exposes `getGuidanceStatus`
      * (returning this value); when absent, the controller is the legacy facade.
@@ -397,13 +434,14 @@ function rig(
   const sendCalls: Array<{ method: 'draft' | 'original'; workflowId: string | undefined }> = []
   const current = opts.current ?? liveState()
   const currentConfig = opts.config ?? config()
-  const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision', ActionResult> = {
+  const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision' | 'undo', ActionResult> = {
     accept: { ok: true },
     sendDraft: { ok: true },
     sendOriginal: { ok: true },
     cancel: { ok: true },
     extendRounds: { ok: true },
     correctDecision: { ok: true },
+    undo: { ok: true },
     ...opts.results,
   }
 
@@ -425,6 +463,10 @@ function rig(
     correctDecision: (id, text) => {
       calls.push(`correctDecision(${id},${text})`)
       return results.correctDecision
+    },
+    undo: () => {
+      calls.push('undo')
+      return results.undo
     },
     accept: async () => {
       calls.push('accept')
@@ -1029,6 +1071,197 @@ describe('registerCommands — controller intents', () => {
     wire(on, r)
     const result = await run($, 'accept')
     expect(result.text).toBe('오류: controller exploded')
+  })
+})
+
+describe('registerCommands — review and undo intents', () => {
+  function revision(id: string, draft: string, over: Partial<DraftRevision> = {}): DraftRevision {
+    return {
+      id,
+      successfulRound: 1,
+      draft,
+      message: '',
+      question: null,
+      questionId: null,
+      options: [],
+      dialogue: [],
+      decisions: { entries: [], nextId: 1 },
+      ...over,
+    }
+  }
+
+  /** A workflow holding two retained successes, the second being current. */
+  function historyState(over: Partial<Workflow> = {}): RuntimeState {
+    return liveState({
+      workflow: workflow({
+        draft: '현재 초안 첫 줄',
+        revisions: [revision('r1', '직전 초안 첫 줄'), revision('r2', '현재 초안 첫 줄')],
+        currentRevisionId: 'r2',
+        nextRevisionId: 3,
+        ...over,
+      }),
+    })
+  }
+
+  test('undo calls the controller and answers with the shared success notice', async ($, on) => {
+    const r = rig()
+    wire(on, r)
+    const result = await run($, 'undo')
+    expect(result.text).toBe(UNDO_NOTICE)
+    expect(r.calls).toEqual(['undo'])
+  })
+
+  test('undo answers the controller refusal verbatim', async ($, on) => {
+    const r = rig({ results: { undo: { ok: false, reason: '되돌릴 이전 성공 라운드가 없습니다.' } } })
+    wire(on, r)
+    expect((await run($, 'undo')).text).toBe('되돌릴 이전 성공 라운드가 없습니다.')
+    expect(r.calls).toEqual(['undo'])
+  })
+
+  test('undo on a host without the method says so instead of starting a run', async ($, on) => {
+    const r = rig()
+    wire(on, r)
+    delete (r.deps.controller as Partial<typeof r.deps.controller>).undo
+    expect((await run($, 'undo')).text).toBe('되돌리기를 지원하지 않는 호스트입니다.')
+    expect(r.calls).toEqual([])
+  })
+
+  test('undo without a workflow never reaches the controller', async ($, on) => {
+    const r = rig({ current: liveState({ workflow: null }) })
+    wire(on, r)
+    expect((await run($, 'undo')).text).toContain('진행 중인 개선 작업이 없습니다')
+    expect(r.calls).toEqual([])
+  })
+
+  test('show returns the full stored text for each target', async ($, on) => {
+    const r = rig({ current: historyState() })
+    wire(on, r)
+    expect((await run($, 'show')).text).toBe('현재 개선안:\n현재 초안 첫 줄')
+    expect((await run($, 'show draft')).text).toBe('현재 개선안:\n현재 초안 첫 줄')
+    expect((await run($, 'show original')).text).toBe('사용자 원문:\n원본 요청')
+    expect((await run($, 'show previous')).text).toBe('직전 성공 라운드 개선안:\n직전 초안 첫 줄')
+    expect(r.calls).toEqual([])
+  })
+
+  test('show previous matches the retained-history boundary', async ($, on) => {
+    const first = rig({ current: historyState({ revisions: [revision('r1', '유일한 초안')], currentRevisionId: 'r1' }) })
+    wire(on, first)
+    expect((await run($, 'show previous')).text).toBe('비교할 이전 성공 라운드가 없습니다.')
+
+    const evicted = rig({
+      current: historyState({
+        revisions: [revision('r6', '가장 오래된 보관 초안'), revision('r7', '현재 초안')],
+        currentRevisionId: 'r7',
+      }),
+    })
+    wire(on, evicted)
+    expect((await run($, 'show previous')).text).toBe('직전 성공 라운드 개선안:\n가장 오래된 보관 초안')
+  })
+
+  test('show without a draft yet says so instead of printing an empty text', async ($, on) => {
+    const r = rig({ current: historyState({ draft: '' }) })
+    wire(on, r)
+    expect((await run($, 'show')).text).toBe('아직 생성된 개선안이 없습니다.')
+  })
+
+  test('diff compares the stored draft against the chosen baseline, never the composer', async ($, on) => {
+    const r = rig({ current: historyState() })
+    wire(on, r)
+    const againstOriginal = (await run($, 'diff')).text
+    expect(againstOriginal.startsWith('원문 대비 변경\n')).toBe(true)
+    expect(againstOriginal).toContain('-원본 요청')
+    expect(againstOriginal).toContain('+현재 초안 첫 줄')
+    expect(againstOriginal).not.toContain('요약 생략')
+
+    const againstPrevious = (await run($, 'diff previous')).text
+    expect(againstPrevious.startsWith('직전 성공 라운드 대비 변경\n')).toBe(true)
+    expect(againstPrevious).toContain('-직전 초안 첫 줄')
+    expect(againstPrevious).toContain('+현재 초안 첫 줄')
+    expect(r.calls).toEqual([])
+  })
+
+  test('diff summarizes beyond 80 rendered lines with the omitted count', async ($, on) => {
+    // No shared line: one removal plus 101 additions, 102 rendered lines.
+    const draft = ['현재 첫 줄', ...Array.from({ length: 100 }, (_, i) => `추가 ${i + 1}`)].join('\n')
+    const r = rig({ current: historyState({ draft }) })
+    wire(on, r)
+    const text = (await run($, 'diff previous')).text
+    expect(text).toContain('변경: +101 -1')
+    const lines = text.split('\n')
+    // Title, heading, the kept window of 80, then the omitted-count line.
+    expect(lines).toHaveLength(83)
+    expect(lines.filter(line => line.startsWith('+'))).toHaveLength(79)
+    expect(lines.filter(line => line.startsWith('-'))).toHaveLength(1)
+    expect(text).toContain('… 외 22줄 요약 생략')
+    expect(text).toContain('전체 텍스트는 /optimize show previous 와 /optimize show 로 확인')
+  })
+
+  test('diff previous and show previous share the same predecessor error', async ($, on) => {
+    const r = rig({ current: historyState({ revisions: [revision('r1', '유일한 초안')], currentRevisionId: 'r1' }) })
+    wire(on, r)
+    expect((await run($, 'diff previous')).text).toBe('비교할 이전 성공 라운드가 없습니다.')
+    expect((await run($, 'show previous')).text).toBe('비교할 이전 성공 라운드가 없습니다.')
+  })
+
+  test('diff without a draft says there is nothing to compare', async ($, on) => {
+    const r = rig({ current: historyState({ draft: '' }) })
+    wire(on, r)
+    expect((await run($, 'diff')).text).toBe('비교할 개선안이 없습니다.')
+  })
+
+  test('sources combine the decision ledger with the collector records', async ($, on) => {
+    const r = rig({
+      current: liveState({
+        workflow: workflow({
+          decisions: {
+            entries: [{
+              id: 'd1',
+              text: '경영진',
+              source: {
+                kind: 'user-answer', questionId: 'q:wf-1:1:1', question: '대상 독자는?',
+                options: ['경영진', '개발팀'], answeredAfterRound: 1,
+              },
+            }],
+            nextId: 2,
+          },
+          context: {
+            conversation: '', rules: '', location: '', tools: '', text: '', chars: 0,
+            repositorySources: [
+              { path: 'docs/GLOSSARY.md', excerpt: 'docs/GLOSSARY.md\n3: 독자: 경영진과 개발팀', kind: 'domain' },
+            ],
+          },
+        }),
+      }),
+    })
+    wire(on, r)
+    const result = await run($, 'sources')
+    expect(result.text).toContain('확정된 사용자 결정:')
+    expect(result.text).toContain('- d1 · 활성')
+    expect(result.text).toContain('수집한 저장소 근거 · 현재 요청 포함 여부는 별도:')
+    expect(result.text).toContain('- [domain] docs/GLOSSARY.md')
+    expect(result.text).toContain('  3: 독자: 경영진과 개발팀')
+    expect(result.text).toContain('미확정 제안')
+    expect(r.calls).toEqual([])
+  })
+
+  test('sources without a workflow never reads a port or starts a run', async ($, on) => {
+    const r = rig({ current: liveState({ workflow: null }) })
+    wire(on, r)
+    expect((await run($, 'sources')).text).toContain('진행 중인 개선 작업이 없습니다')
+    expect(r.calls).toEqual([])
+  })
+
+  test('review and undo answers stay command text with no optimizer data in the transcript', async ($, on) => {
+    const r = rig({ current: historyState() })
+    wire(on, r)
+    for (const args of ['undo', 'show', 'diff', 'sources']) {
+      const result = await run($, args)
+      expect(Object.keys(result).sort()).toEqual(['text'])
+      expect(result.text.length).toBeGreaterThan(0)
+    }
+    // No port was touched: no model, prompt or submit spy fired.
+    expect(r.calls).toEqual(['undo'])
+    expect(r.scheduled).toEqual([])
   })
 })
 

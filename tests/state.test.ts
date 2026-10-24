@@ -236,13 +236,13 @@ describe('reduce — round limit approval', () => {
   })
 
   test('a new reply, failure or instruction clears approval status but preserves the approved limit', () => {
-    const events: OptimizerEvent[] = [
-      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: ZERO },
-      { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'try again' },
-      { type: 'instruct', workflowId: 'wf-1', text: '더 짧게' },
+    const events: ReadonlyArray<{ event: OptimizerEvent; phase: Phase }> = [
+      { event: { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: ZERO }, phase: 'generating' },
+      { event: { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'try again' }, phase: 'generating' },
+      { event: { type: 'instruct', workflowId: 'wf-1', text: '더 짧게' }, phase: 'reviewing' },
     ]
-    for (const event of events) {
-      const current = deepFreeze(state({ workflow: workflow({ rounds: 5, roundLimit: 10, limitAsk: 'closed' }) }))
+    for (const { event, phase } of events) {
+      const current = deepFreeze(state({ workflow: workflow({ phase, rounds: 5, roundLimit: 10, limitAsk: 'closed' }) }))
       const next = reduce(current, event, 1)
       expect(next.workflow?.limitAsk).toBeUndefined()
       expect(next.workflow?.roundLimit).toBe(10)
@@ -251,17 +251,24 @@ describe('reduce — round limit approval', () => {
 })
 
 describe('reduce — start', () => {
+  const startedDefaults = {
+    decisions: { entries: [], nextId: 1 },
+    questionId: null,
+    revisions: [],
+    nextRevisionId: 1,
+  }
+
   test('installs a workflow when none is active', () => {
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state(), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
+    expect(next.workflow).toEqual({ ...wf, ...startedDefaults })
   })
 
   test('replaces a workflow that is already idle', () => {
     const old = workflow({ id: 'wf-old', phase: 'idle' })
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state({ workflow: old }), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
+    expect(next.workflow).toEqual({ ...wf, ...startedDefaults })
   })
 
   test('ignores a start while a run is in progress', () => {
@@ -418,13 +425,27 @@ describe('reduce — reply', () => {
   })
 
   test('a matching reply clears a previous failure', () => {
-    const current = state({ workflow: workflow({ phase: 'failed', lastError: 'boom' }) })
+    // Legal retry path: failed → generating, then the reply lands.
+    const current = state({ workflow: workflow({ phase: 'generating', lastError: 'boom' }) })
     const next = reduce(
       current,
       { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: usage() },
       1,
     )
     expect('lastError' in (next.workflow ?? {})).toBe(false)
+  })
+
+  test('a reply outside generating only records usage', () => {
+    for (const phase of ['idle', 'collecting', 'reviewing', 'transferring', 'sending'] as const) {
+      const current = state({ workflow: workflow({ phase, draft: 'KEEP' }) })
+      const next = reduce(
+        current,
+        { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ draft: 'STALE' }), usage: usage({ input_tokens: 4 }) },
+        1,
+      )
+      expect(next.workflow?.draft).toBe('KEEP')
+      expect(next.usage).toEqual(totals({ calls: 1, input: 4, updatedAt: 1 }))
+    }
   })
 
   test('a stale generation leaves the workflow alone but records the usage', () => {
@@ -1104,7 +1125,9 @@ describe('reduce — budget refusal', () => {
       type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
     }, 9)
-    const recovered = reduce(failed, {
+    // A retry re-enters generating before the recovery reply can land.
+    const retrying = reduce(failed, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 9)
+    const recovered = reduce(retrying, {
       type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       reply: reply({ draft: '회복된 초안' }), usage: usage(),
     }, 10)
@@ -1167,7 +1190,8 @@ describe('reduce — explicit decision correction', () => {
     const corrected = reduce(reviewed(), {
       type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '로컬 유지',
     }, 2)
-    const replied = reduce(corrected, {
+    const generating = reduce(corrected, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 2)
+    const replied = reduce(generating, {
       type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       reply: reply({ draft: '정정 반영 초안', message: '' }), usage: usage(),
     }, 3)
@@ -1194,7 +1218,8 @@ describe('reduce — explicit decision correction', () => {
 
   test('a model reply or failure cannot create a supersession', () => {
     const current = reviewed()
-    const replied = reduce(current, {
+    const generating = reduce(current, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 1)
+    const replied = reduce(generating, {
       type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       reply: reply({ draft: '모델 초안', message: '모델 메모' }), usage: usage(),
     }, 1)
@@ -1203,6 +1228,168 @@ describe('reduce — explicit decision correction', () => {
       type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
     }, 1)
     expect(failed.workflow?.decisions?.entries.some(entry => entry.supersedes !== undefined)).toBe(false)
+  })
+})
+
+describe('reduce — undo', () => {
+  function generating(current: RuntimeState): RuntimeState {
+    return reduce(current, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 1)
+  }
+
+  function succeed(current: RuntimeState, over: Partial<OptimizerReply> = {}): RuntimeState {
+    return reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(over), usage: ZERO,
+    }, 1)
+  }
+
+  /** Drives `count` successful rounds on one workflow, ending at reviewing. */
+  function withSuccesses(count: number, over: Partial<Workflow> = {}): RuntimeState {
+    let current = state({ workflow: workflow({ ...over, phase: 'generating' }) })
+    for (let round = 1; round <= count; round += 1) {
+      current = succeed(current, { draft: `초안 ${round}` })
+      if (round < count) current = generating(current)
+    }
+    return current
+  }
+
+  function undoEvent(
+    over: Partial<{ sessionId: string; workflowId: string; generation: number; currentRevisionId: string }> = {},
+  ): OptimizerEvent {
+    return {
+      type: 'undo', sessionId: SESSION, workflowId: 'wf-1',
+      generation: 1, currentRevisionId: 'r2', ...over,
+    }
+  }
+
+  test('restores the preceding snapshot atomically on a new epoch', () => {
+    const first = succeed(state({ workflow: workflow({ phase: 'generating' }) }), { draft: '첫 초안', message: '첫 메모' })
+    const second = succeed(generating(first), {
+      draft: '둘째 초안', message: '둘째 메모', question: '둘째 질문?', options: ['A', 'B'],
+    })
+    const answered = reduce(second, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    const undone = reduce(answered, undoEvent(), 2)
+
+    expect(undone.workflow?.phase).toBe('reviewing')
+    expect(undone.workflow?.generation).toBe(2)
+    expect(undone.workflow?.draft).toBe('첫 초안')
+    expect(undone.workflow?.message).toBe('첫 메모')
+    expect(undone.workflow?.question).toBeNull()
+    expect(undone.workflow?.questionId).toBeNull()
+    expect(undone.workflow?.options).toEqual([])
+    expect(undone.workflow?.dialogue).toEqual(first.workflow?.dialogue)
+    expect(undone.workflow?.revisions).toEqual([first.workflow?.revisions?.[0]])
+    expect(undone.workflow?.currentRevisionId).toBe('r1')
+    // Entries revert to the snapshot; id numbering keeps its high-water mark.
+    expect(undone.workflow?.nextRevisionId).toBe(3)
+    expect(undone.workflow?.decisions).toEqual({ entries: [], nextId: 2 })
+    // Counters, allowance and identity are untouched by an undo.
+    expect(undone.workflow?.rounds).toBe(answered.workflow?.rounds)
+    expect(undone.workflow?.usage).toEqual(answered.workflow?.usage)
+    expect(undone.usage).toBe(answered.usage)
+    expect(undone.workflow?.original).toBe('원본')
+    expect(undone.workflow?.originalContext).toEqual(['ctx-a'])
+    expect(undone.workflow?.id).toBe('wf-1')
+    expect(undone.workflow?.sessionId).toBe(SESSION)
+  })
+
+  test('undo refuses while a question or limit dialog is pending, and a spent marker allows it', () => {
+    const reviewed = withSuccesses(2)
+    const asked = reduce(reviewed, {
+      type: 'question-ask', workflowId: 'wf-1', round: 2, question: null, status: 'pending',
+    }, 1)
+    expect(asked.workflow?.questionAsk).toBe('pending')
+    expect(reduce(asked, undoEvent(), 2)).toBe(asked)
+    const limited = reduce(reviewed, { type: 'limit-ask', workflowId: 'wf-1', round: 2, status: 'pending' }, 1)
+    expect(limited.workflow?.limitAsk).toBe('pending')
+    expect(reduce(limited, undoEvent(), 2)).toBe(limited)
+
+    // A dialog that already closed no longer blocks the restore.
+    const closed = reduce(asked, {
+      type: 'question-ask', workflowId: 'wf-1', round: 2, question: null, status: 'closed',
+    }, 2)
+    const undone = reduce(closed, undoEvent(), 3)
+    expect(undone.workflow?.currentRevisionId).toBe('r1')
+    expect(undone.workflow?.generation).toBe(2)
+    expect(undone.workflow?.questionAsk).toBeUndefined()
+  })
+
+  test('undo from a failure clears the failure records and restores reviewing', () => {
+    const second = withSuccesses(2, { roundLimit: 7 })
+    const failed = reduce(generating(second), { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom' }, 1)
+    const refused = reduce(generating(failed), {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 1)
+    expect(refused.workflow?.lastError).toBeDefined()
+    expect(refused.workflow?.budgetError).toBeDefined()
+    const undone = reduce(refused, undoEvent({ currentRevisionId: 'r2' }), 2)
+    expect(undone.workflow?.phase).toBe('reviewing')
+    expect('lastError' in (undone.workflow ?? {})).toBe(false)
+    expect('budgetError' in (undone.workflow ?? {})).toBe(false)
+    expect(undone.workflow?.roundLimit).toBe(7)
+    // Two successes and one failed attempt: a budget refusal spends no round.
+    expect(undone.workflow?.rounds).toBe(3)
+  })
+
+  test('consecutive undos walk back successes and a replayed event is ignored', () => {
+    const three = withSuccesses(3)
+    const firstUndo = reduce(three, undoEvent({ currentRevisionId: 'r3' }), 1)
+    expect(firstUndo.workflow?.currentRevisionId).toBe('r2')
+    expect(firstUndo.workflow?.generation).toBe(2)
+    const secondUndo = reduce(firstUndo, undoEvent({ generation: 2, currentRevisionId: 'r2' }), 1)
+    expect(secondUndo.workflow?.currentRevisionId).toBe('r1')
+    expect(secondUndo.workflow?.revisions?.map(revision => revision.id)).toEqual(['r1'])
+    expect(secondUndo.workflow?.generation).toBe(3)
+    // The first undo's own event, replayed at the new epoch, changes nothing.
+    expect(reduce(firstUndo, undoEvent({ currentRevisionId: 'r3' }), 1)).toBe(firstUndo)
+    // The oldest retained success has no predecessor.
+    expect(reduce(secondUndo, undoEvent({ generation: 3, currentRevisionId: 'r1' }), 1)).toBe(secondUndo)
+  })
+
+  test('a post-undo answer never recycles a decision id', () => {
+    const first = succeed(state({ workflow: workflow({ phase: 'generating' }) }), {
+      draft: '첫 초안', message: '메모', question: '어느 쪽?', options: ['A', 'B'],
+    })
+    const second = succeed(generating(first), { draft: '둘째 초안' })
+    const corrected = reduce(second, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    const undone = reduce(corrected, undoEvent(), 1)
+    const answered = reduce(undone, { type: 'instruct', workflowId: 'wf-1', text: 'B' }, 1)
+    expect(undone.workflow?.decisions?.entries).toEqual([])
+    expect(answered.workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d2'])
+  })
+
+  test('stale, foreign, mispointed and busy undos are ignored', () => {
+    const base = withSuccesses(2)
+    for (const event of [
+      undoEvent({ sessionId: 'other' }),
+      undoEvent({ generation: 9 }),
+      undoEvent({ workflowId: 'other' }),
+      undoEvent({ currentRevisionId: 'r1' }),
+      undoEvent({ currentRevisionId: 'r9' }),
+    ]) {
+      expect(reduce(base, event, 1)).toBe(base)
+    }
+    const event = undoEvent()
+    for (const phase of ['idle', 'collecting', 'generating', 'transferring', 'sending'] as const) {
+      const busy = state({
+        workflow: workflow({ phase, revisions: base.workflow?.revisions, currentRevisionId: 'r2', nextRevisionId: 3 }),
+      })
+      expect(reduce(busy, event, 1)).toBe(busy)
+    }
+    const fresh = withSuccesses(1)
+    expect(reduce(fresh, undoEvent({ currentRevisionId: 'r1' }), 1)).toBe(fresh)
+    const empty = state()
+    expect(reduce(empty, event, 1)).toBe(empty)
+  })
+
+  test('a pre-undo reply is stale on the new epoch and only records usage', () => {
+    const undone = reduce(withSuccesses(2), undoEvent(), 2)
+    const stale = reduce(undone, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ draft: '옛 결과' }), usage: usage({ input_tokens: 5 }),
+    }, 2)
+    expect(stale.workflow?.draft).toBe(undone.workflow?.draft)
+    expect(stale.workflow?.generation).toBe(2)
+    expect(stale.usage.calls).toBe(undone.usage.calls + 1)
   })
 })
 

@@ -10,6 +10,7 @@ import {
   PROJECT_MAX_READ_BYTES,
   PROJECT_MAX_STATS,
   collectProjectEvidence,
+  collectProjectEvidenceSnapshot,
 } from '../hooks/project-context'
 
 function filesystem(
@@ -262,5 +263,102 @@ describe('collectProjectEvidence', () => {
     const text = await collectProjectEvidence(ports, '/repo', '/repo', 'image')
     expect(text).toContain('GLOSSARY.md')
     expect(timerSignal?.aborted).toBe(true)
+  })
+})
+
+describe('collectProjectEvidenceSnapshot — source records', () => {
+  test('records the collector path and the final excerpt of every selected file', async () => {
+    const { ports, reads } = filesystem({
+      '/repo/GLOSSARY.md': '# Domain\nNode: resolved graph object',
+      '/repo/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+    })
+
+    const { text, sources } = await collectProjectEvidenceSnapshot(ports, '/repo', '/repo', 'image API')
+
+    expect(sources.map(source => source.path).sort()).toEqual(['GLOSSARY.md', 'package.json'])
+    const glossary = sources.find(source => source.path === 'GLOSSARY.md')
+    expect(glossary?.kind).toBe('domain')
+    expect(glossary?.excerpt).toContain('1: # Domain')
+    const scripts = sources.find(source => source.path === 'package.json')
+    expect(scripts?.kind).toBe('scripts')
+    expect(scripts?.excerpt).toContain('test: vitest run')
+    // Every record is the excerpt that actually landed in the text, from a
+    // file the collector really read.
+    for (const source of sources) {
+      expect(text).toContain(source.excerpt)
+      expect(reads).toContain(`/repo/${source.path}`)
+    }
+  })
+
+  test('failed, linked, escaping and binary reads never become source records', async () => {
+    const { ports } = filesystem({
+      '/repo/README.md': 'unreadable',
+      '/repo/GLOSSARY.md': 'Image: artifact',
+      '/repo/src/image-link.ts': 'linked file',
+      '/repo/src/image-escaped.ts': 'escaped parent',
+      '/repo/src/image-bytes.ts': '\0binary',
+    }, {
+      failRead: '/repo/README.md',
+      stats: {
+        '/repo/src/image-link.ts': { isLink: true, realPath: '/elsewhere/image.ts' },
+        '/repo/src/image-escaped.ts': { realPath: '/repo-other/image.ts' },
+      },
+    })
+
+    const { text, sources } = await collectProjectEvidenceSnapshot(ports, '/repo', '/repo', 'image')
+
+    expect(sources.map(source => source.path)).toEqual(['GLOSSARY.md'])
+    expect(text).not.toContain('unreadable')
+    expect(text).not.toContain('binary')
+  })
+
+  test('a fake path inside a file body cannot create a source record', async () => {
+    const { ports } = filesystem({
+      '/repo/src/real.ts': 'export const real = 1\n// see also: docs/fake-adr.md and missing/fake.ts',
+    })
+
+    const { sources } = await collectProjectEvidenceSnapshot(ports, '/repo', '/repo', 'real fake')
+
+    expect(sources.map(source => source.path)).toEqual(['src/real.ts'])
+    expect(sources.some(source => source.path.includes('fake'))).toBe(false)
+  })
+
+  test('a timeout leaves the records empty and a late scan cannot add them', async () => {
+    const { ports, reads, lists } = filesystem({ '/repo/README.md': 'image docs' })
+    let finishStat: ((value: FsStat) => void) | undefined
+    let expire: (() => void) | undefined
+    let timerSignal: AbortSignal | undefined
+    ports.fs.stat = () => new Promise(resolve => { finishStat = resolve })
+    ports.clock = { sleep: (_ms, options) => {
+      timerSignal = options?.signal
+      return new Promise<void>(resolve => { expire = resolve })
+    } }
+    const pending = collectProjectEvidenceSnapshot(ports, '/repo', '/repo', 'image')
+    expire?.()
+    const result = await pending
+    expect(result.text).toContain('inspection timed out')
+    expect(result.sources).toEqual([])
+    expect(timerSignal?.aborted).toBe(true)
+    finishStat?.({ kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/repo' })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(result.sources).toEqual([])
+    expect(reads).toEqual([])
+    expect(lists).toEqual([])
+  })
+
+  test('the compatibility wrapper returns the snapshot text with the same single scan', async () => {
+    const files = {
+      '/repo/GLOSSARY.md': '# Domain\nNode: resolved graph object',
+      '/repo/package.json': '{"scripts":{"test":"vitest run"}}',
+    }
+    const scanned = filesystem(files)
+    const wrapped = filesystem(files)
+
+    const snapshot = await collectProjectEvidenceSnapshot(scanned.ports, '/repo', '/repo', 'image API')
+    const text = await collectProjectEvidence(wrapped.ports, '/repo', '/repo', 'image API')
+
+    expect(text).toBe(snapshot.text)
+    expect(wrapped.reads).toEqual(scanned.reads)
   })
 })

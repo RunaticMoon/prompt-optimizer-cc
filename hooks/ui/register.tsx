@@ -6,6 +6,8 @@ import type { OptimizerController } from '../controller'
 import { PANE_ID } from '../controller'
 import { DEFAULT_CONFIG, type EnginePorts, type Workflow } from '../contracts'
 import { workflowRoundLimit } from '../state'
+import { undoTarget } from '../revisions'
+import { formatDraftDiff, formatShow, formatSources, NO_PREVIOUS_NOTICE } from '../review-view'
 import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, ROUND_APPROVAL_PENDING, ROUND_EXTENSION_GUIDE, UI_COLORS, phaseColor, phaseLabel, questionGuide } from './present'
 import { progressText, tokenUsageText } from './progress'
 import { PANE_ROWS } from './ui-ports'
@@ -38,7 +40,31 @@ const KEYS = {
   instruction: 'optimizer:instruction',
   accept: 'optimizer:accept',
   more: 'optimizer:more',
+  full: 'optimizer:full',
+  diffOriginal: 'optimizer:diff-original',
+  diffPrevious: 'optimizer:diff-previous',
+  previous: 'optimizer:previous',
+  sources: 'optimizer:sources',
+  undo: 'optimizer:undo',
 } as const
+
+const REVIEW_ACTIONS = [
+  { key: KEYS.full, hotkey: 'f', label: '개선안 전문 보기' },
+  { key: KEYS.diffOriginal, hotkey: 'o', label: '원문 대비 변경' },
+  { key: KEYS.diffPrevious, hotkey: 'p', label: '직전 성공 대비 변경' },
+  { key: KEYS.previous, hotkey: 'v', label: '직전 성공 전문 보기' },
+  { key: KEYS.sources, hotkey: 's', label: '결정 출처 보기' },
+] as const
+type ReviewKey = typeof REVIEW_ACTIONS[number]['key']
+const REVIEW_GUIDE = '검토: /optimize show · diff original|previous · sources · undo'
+const PROPOSAL_NOTICE = '개선안·변경 메모는 미확정 모델 제안입니다. 사용자 결정은 출처에서 확인하세요.'
+
+function undoUnavailable(workflow: Workflow): string | undefined {
+  if (isBusy(workflow.phase)) return '작업 중에는 되돌릴 수 없습니다.'
+  if (workflow.questionAsk === 'pending' || workflow.limitAsk === 'pending') return '열린 선택 창을 먼저 닫아 주세요.'
+  if (!undoTarget(workflow, workflow.currentRevisionId)) return '되돌릴 이전 성공 라운드가 없습니다.'
+  return undefined
+}
 
 /** Keep `$` at the hook registration site; helpers receive only method closures. */
 function portsOf($: EngineInterface): EnginePorts {
@@ -264,6 +290,9 @@ export function registerUi(
   onPanePlacement: (placed: boolean) => void = () => undefined,
 ): void {
   let showOriginal = false
+  let review: ReviewKey = KEYS.full
+  let undoNotice = ''
+  let diffCache: { generation: number; revision?: string; baseline: 'original' | 'previous'; before: string; after: string; text: string } | undefined
   let renderedWorkflowId: string | undefined
   const panePlacements = new Map<string, 'inline' | 'dock'>()
   let paneClosed = false
@@ -273,6 +302,9 @@ export function registerUi(
     if (renderedWorkflowId === workflow?.id) return
     renderedWorkflowId = workflow?.id
     showOriginal = false
+    review = KEYS.full
+    undoNotice = ''
+    diffCache = undefined
     panePlacements.clear()
     paneClosed = false
     drawnBands.clear()
@@ -332,7 +364,7 @@ export function registerUi(
     add(workflow.lastError ? errorSummary(workflow.lastError) : '', UI_COLORS.error, 0)
     // Composer (or a surviving workflow after pane close) has no draft panel.
     if (composer) add(`개선안: ${workflow.draft || (isBusy(workflow.phase) ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')}`, UI_COLORS.draft, 3)
-    if (workflow.ui === 'composer') add(COMPOSER_GUIDE, UI_COLORS.section, 0)
+    if (workflow.ui === 'composer') add(`${COMPOSER_GUIDE} · 검토: /optimize help`, UI_COLORS.section, 0)
     const total = sections.reduce((sum, section) => sum + section.lines.length, 1)
     const overflow = total > bandRows
     const available = Math.max(0, bandRows - 1 - (overflow && bandRows > 1 ? 1 : 0))
@@ -367,7 +399,7 @@ export function registerUi(
             {row === counts[index]! - 1 && counts[index]! < section.lines.length ? ellipsizeLine(line, columns) : line}
           </Text>))}
         {overflow && bandRows > 1 && <Text color={UI_COLORS.section} wrap="truncate-end">
-          {`… ${omitted}줄 더 · ${atLimit ? limitGuide : composer ? '/optimize accept · retry <답변>' : '패널에서 확인'}`}
+          {`… ${omitted}줄 더 · ${atLimit ? limitGuide : composer ? '/optimize help' : '패널에서 확인'}`}
         </Text>}
       </Box>
     )
@@ -389,7 +421,7 @@ export function registerUi(
       onPanePlacement(true)
     }
     if (!workflow) return <Text color={UI_COLORS.unavailable}>진행 중인 개선 작업이 없습니다</Text>
-    if (workflow.ui === 'composer') return <Text color={UI_COLORS.section}>개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다.</Text>
+    if (workflow.ui === 'composer') return <Text color={UI_COLORS.section} wrap="wrap">{`개선 대화는 입력창에서 진행 중입니다. /optimize cancel로 취소할 수 있습니다. ${REVIEW_GUIDE} · /optimize help`}</Text>
 
     const maxRounds = workflowRoundLimit(workflow, getMaxRounds())
     const busy = isBusy(workflow.phase)
@@ -405,6 +437,35 @@ export function registerUi(
     const bandDrawn = drawnBands.has(bandKey(workflow.id, e.surface))
     const draftText = workflow.draft || (busy ? '개선안을 준비하고 있습니다…' : '아직 개선안이 없습니다.')
     const draftColor = workflow.draft ? UI_COLORS.draft : busy ? UI_COLORS.progress : UI_COLORS.unavailable
+    const previous = undoTarget(workflow, workflow.currentRevisionId)?.target
+    const undoReason = undoUnavailable(workflow)
+    const reviewUnavailable = (key: ReviewKey): string | undefined =>
+      busy ? '작업이 끝나면 검토할 수 있습니다.'
+        : (key === KEYS.diffPrevious || key === KEYS.previous) && !previous ? NO_PREVIOUS_NOTICE
+        : key !== KEYS.sources && !workflow.draft.trim() ? '아직 개선안이 없습니다.' : undefined
+    let reviewText = ''
+    if (review !== KEYS.full) {
+      const unavailable = reviewUnavailable(review)
+      if (unavailable) reviewText = unavailable
+      else if (review === KEYS.sources) reviewText = formatSources(workflow)
+      else if (review === KEYS.previous) reviewText = formatShow('직전 성공 라운드 전문', previous!.draft)
+      else {
+        const baseline = review === KEYS.diffOriginal ? 'original' : 'previous'
+        const before = baseline === 'original' ? workflow.original : previous!.draft
+        if (!diffCache || diffCache.generation !== workflow.generation || diffCache.revision !== workflow.currentRevisionId
+          || diffCache.baseline !== baseline || diffCache.before !== before || diffCache.after !== workflow.draft) {
+          diffCache = { generation: workflow.generation, revision: workflow.currentRevisionId, baseline, before,
+            after: workflow.draft, text: formatDraftDiff(before, workflow.draft, baseline) }
+        }
+        reviewText = diffCache.text
+      }
+    }
+    const reviewNotices = <Box flexDirection="column">
+      <Text color={UI_COLORS.section} wrap="wrap">{PROPOSAL_NOTICE}</Text>
+      {workflow.correctionPending && <Text color={UI_COLORS.progress} wrap="wrap">정정이 아직 개선안에 반영되지 않았습니다. /optimize retry로 반영하세요.</Text>}
+      {workflow.budgetError && <Text color={UI_COLORS.error} wrap="wrap">요청 예산을 초과하여 생성하지 않았습니다. 기존 개선안과 사용자 결정은 보존됩니다. /optimize status로 확인하세요.</Text>}
+      {undoNotice && <Text color={UI_COLORS.section} wrap="wrap">{undoNotice}</Text>}
+    </Box>
     const originalToggleLabel = showOriginal ? '원문 접기' : '원문 전체 보기'
     const progress = progressText(workflow)
     const progressRow = progress && <Text color={UI_COLORS.progress} wrap="truncate-end">{progress}</Text>
@@ -446,7 +507,9 @@ export function registerUi(
       return <Box flexDirection="column" paddingX={1}>
         {rows.slice(0, budget)}
         <Box flexDirection="column">
-          {rows.slice(budget)}{header}{limitRow}{question}{optionsText}{draft}{messageSection}
+          {rows.slice(budget)}{header}{limitRow}{question}{optionsText}{draft}{messageSection}{reviewNotices}
+          <Text color={UI_COLORS.section} wrap="wrap">{REVIEW_GUIDE}</Text>
+          <Text color={UI_COLORS.section} wrap="wrap">{`되돌리기: ${undoReason ?? '직전 성공 라운드 복원 · 입력창과 사용량 유지'}`}</Text>
           <Text color={UI_COLORS.section} wrap="wrap">직접 입력: /optimize retry &lt;선택지 답변 또는 보완 내용&gt;</Text>
           <Text color={UI_COLORS.section} wrap="wrap">{'명령: /optimize accept · cancel · retry <보완>'}</Text>
           <Text bold color={UI_COLORS.original}>원문</Text>
@@ -459,6 +522,9 @@ export function registerUi(
     if (typeof Button !== 'function') return <Box flexDirection="column" paddingX={1}>
       {header}{progressRow}{limitRow}{question}{optionsText}{draft}
       {messageSection}
+      {reviewNotices}
+      <Text color={UI_COLORS.section} wrap="wrap">{REVIEW_GUIDE}</Text>
+      <Text color={UI_COLORS.section} wrap="wrap">{`되돌리기: ${undoReason ?? '직전 성공 라운드 복원 · 입력창과 사용량 유지'}`}</Text>
       <Text bold color={UI_COLORS.original}>원문</Text>
       <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
       {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
@@ -499,6 +565,20 @@ export function registerUi(
         <Text color={UI_COLORS.original} wrap="wrap">{workflow.original}</Text>
       </Box>}
     </Box>
+    const reviewControls = <Box flexDirection="column">
+      {REVIEW_ACTIONS.map(action => {
+        const reason = reviewUnavailable(action.key)
+        return reason
+          ? <Text key={action.key} color={UI_COLORS.unavailable} wrap="wrap">{`${action.hotkey}: ${action.label} · 사용 불가 · ${reason}`}</Text>
+          : <Button key={action.key} hotkey={action.hotkey}
+              label={`${action.hotkey}: ${action.label}${review === action.key ? ' (선택됨)' : ''}`} onPress={() => undefined} />
+      })}
+      {undoReason
+        ? <Text color={UI_COLORS.unavailable} wrap="wrap">{`u: 되돌리기 · 사용 불가 · ${undoReason}`}</Text>
+        : <Button key={KEYS.undo} hotkey="u" label="u: 직전 성공으로 되돌리기" onPress={() => undefined} />}
+      <Text color={UI_COLORS.section} wrap="wrap">되돌리기는 직전 성공 상태를 복원합니다. 입력창·사용량·호출 횟수는 유지됩니다.</Text>
+    </Box>
+    const reviewBody = review === KEYS.full ? draft : <Text color={UI_COLORS.text} wrap="wrap">{reviewText}</Text>
 
     if (e.props.placement === 'inline' && isCompactViewport(e.viewport)) {
       const budget = estimatedCompactRows(e.viewport!)
@@ -533,8 +613,11 @@ export function registerUi(
           {limitRow}
           <Text color={UI_COLORS.section} wrap="truncate-end">{`Tab 이동 · 아래로 스크롤하여 전문 확인 · ${escapeHint}`}</Text>
           {question}{optionsText}
-          <Text bold color={UI_COLORS.draft}>개선안 전문</Text>
-          <Text color={draftColor} wrap="wrap">{draftText}</Text>
+          {reviewControls}{reviewNotices}
+          {review === KEYS.full ? <Box flexDirection="column">
+            <Text bold color={UI_COLORS.draft}>개선안 전문</Text>
+            <Text color={draftColor} wrap="wrap">{draftText}</Text>
+          </Box> : reviewBody}
           {messageSection}{originalSection}
           {workflow.lastError && <Text color={UI_COLORS.error} wrap="wrap">{`오류: ${workflow.lastError}`}</Text>}
         </Box>
@@ -552,8 +635,10 @@ export function registerUi(
       {!(waiting && workflow.questionAsk === 'pending') && <Text color={busy ? UI_COLORS.progress : UI_COLORS.section} wrap="wrap">{keyHintText}</Text>}
       {question}
       {retryReady && options.length > 0 && <Box flexDirection="column">{optionButtons(false)}</Box>}
-      {draft}
+      {review === KEYS.full && draft}
       {acceptAction(false)}{instruction(false)}
+      {reviewControls}{reviewNotices}
+      {review !== KEYS.full && reviewBody}
       {atLimit && workflow.limitAsk !== 'pending' && limitRow}
       {!bandDrawn && messageSection}
       {originalSection}
@@ -565,7 +650,27 @@ export function registerUi(
   on('ui.press', { plugin: pluginName }, async ($, e, next) => {
     if (e.component !== 'Pane' || e.requestId !== PANE_ID) return next(e)
     const workflow = controller.getState().workflow
+    observeWorkflow(workflow)
     if (!workflow || workflow.ui !== 'pane') return next(e)
+    const reviewAction = REVIEW_ACTIONS.find(action => action.key === e.element)
+    if (reviewAction) {
+      const key = reviewAction.key
+      const needsPrevious = key === KEYS.diffPrevious || key === KEYS.previous
+      if (canAct(workflow) && (key === KEYS.sources || workflow.draft.trim()) && (!needsPrevious || undoTarget(workflow, workflow.currentRevisionId))) {
+        review = key
+        undoNotice = ''
+        $.ui.invalidate('ui.render')
+      }
+      return { element: e.element }
+    }
+    if (e.element === KEYS.undo) {
+      if (!undoUnavailable(workflow)) {
+        const result = controller.undo()
+        undoNotice = result.ok ? '직전 성공 라운드로 되돌렸습니다. 입력창은 변경하지 않았습니다.' : result.reason ?? '되돌리지 못했습니다.'
+        $.ui.invalidate('ui.render')
+      }
+      return { element: e.element }
+    }
     if (e.element === KEYS.original) {
       if (canAct(workflow)) {
         showOriginal = !showOriginal
