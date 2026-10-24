@@ -162,6 +162,22 @@ describe('extractTargets', () => {
     expect(extractTargets('로그인 화면으로 보여줘')).toEqual(['login'])
   })
 
+  test('a marker noun keeps its concept identity after one particle', () => {
+    expect(extractTargets('로그인을 화면에 보여줘')).toEqual(['login'])
+    expect(extractTargets('장바구니를 화면에 표시해줘')).toEqual(['cart'])
+  })
+
+  test('adverbial and generic style captures are not marker targets', () => {
+    expect(extractTargets('자연스럽게 처리해줘')).toEqual([])
+    expect(extractTargets('이 부분을 대상으로 다듬어줘')).toEqual([])
+    expect(extractTargets('기능 화면')).toEqual([])
+  })
+
+  test('an unknown marker noun is still a new target, with or without a particle', () => {
+    expect(extractTargets('대시보드 화면')).toEqual(['대시보드'])
+    expect(extractTargets('대시보드를 화면에')).toEqual(['대시보드'])
+  })
+
   test('collapses repeated alias surfaces into one canonical target', () => {
     expect(extractTargets('로그인 login auth')).toEqual(['login'])
   })

@@ -77,7 +77,7 @@ const BUILTIN_KEYS = [
 const NOISE = new Set([
   '오류', '기능', '추가', '수정', '고쳐줘', '해줘', '해주세요', '해', '더',
   '짧게', '길게', '그대로', '유지해', '한국어', '영어', '번', '아까', '고른',
-  '것', '확인', '부탁', '원해', '필요', '응답',
+  '것', '부분', '확인', '부탁', '원해', '필요', '응답',
 ])
 
 /** Particle suffixes, longest first so one pass strips the longest match. */
@@ -113,12 +113,21 @@ export function canonicalGroupKey(members: readonly string[]): string {
   return aliasGroupKey(normalized)
 }
 
-/** Builds the merged built-in + project group list, dropping empty groups. */
+/**
+ * Builds the merged built-in + project group list, dropping empty groups.
+ * Identical groups are kept once so callers may pass an already merged list
+ * without duplicating round-robin expansion slots.
+ */
 export function mergeAliasGroups(projectAliases: readonly AliasGroup[] = []): readonly AliasGroup[] {
   const groups: AliasGroup[] = []
+  const seen = new Set<string>()
   for (const raw of [...BUILTIN_ALIASES, ...projectAliases]) {
     const members = [...new Set(raw.map(normalize).filter(isSearchToken))]
-    if (members.length > 0) groups.push(members)
+    if (members.length === 0) continue
+    const key = aliasGroupKey(members)
+    if (seen.has(key)) continue
+    seen.add(key)
+    groups.push(members)
   }
   return groups
 }
@@ -206,10 +215,12 @@ export function extractSearchTerms(
 /**
  * Extracts only targets a fresh answer genuinely added: safe relative paths,
  * code-shaped or quoted identifiers, known alias concepts, and Hangul nouns
- * explicitly attached to 기능/화면/모듈/대상/처리. A particle-stripped stem
- * counts only when it names a known alias member, so ordinary prose nouns stay
- * search-only. Deictic choices and style instructions yield none; an option
- * number is never resolved into a target.
+ * explicitly attached to 기능/화면/모듈/대상/처리. A marker-attached noun may
+ * carry one trailing particle: it is stripped and keyed like any other surface,
+ * so `로그인을 화면` names the already-seen login concept while an unknown noun
+ * keeps its stripped form as a new target. Known-concept stems without a marker
+ * also count; other prose nouns stay search-only. Adverbial or generic style
+ * captures yield none, and an option number is never resolved into a target.
  */
 export function extractTargets(
   text: string,
@@ -245,7 +256,22 @@ export function extractTargets(
     }
   }
   const marker = new RegExp(`([가-힣]{2,40})\\s*(?:${TARGET_MARKERS.join('|')})`, 'g')
-  for (const match of prose.matchAll(marker)) add(match[1] ?? '')
+  for (const match of prose.matchAll(marker)) {
+    const captured = normalize(match[1] ?? '')
+    // One trailing particle keeps the concept identity (`로그인을` → `로그인`);
+    // an unknown noun keeps the stripped form so `대시보드를 화면` still works.
+    let noun = captured
+    for (const particle of PARTICLES) {
+      if (!captured.endsWith(particle)) continue
+      const stem = captured.slice(0, -particle.length)
+      if (stem.length >= 2) noun = stem
+      break
+    }
+    // Adverbs and generic style nouns are presentation, not targets, even when
+    // a marker follows them (`자연스럽게 처리`, `부분을 대상`).
+    if (/(?:게|히)$/.test(noun)) continue
+    add(noun)
+  }
 
   return keys
 }

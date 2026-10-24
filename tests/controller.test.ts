@@ -5050,18 +5050,83 @@ describe('repository follow-up refresh', () => {
     expect(requestText(h.completes.at(-1)?.prompt)).toContain('targets: cart')
   })
 
-  test('a reserve too small for the block wrapper plans no scan or attempt', async () => {
-    const h = harness({ tree: true, files, config: { contextMaxChars: 270 } })
+  test('a marker noun with one particle repeats the seen concept', async () => {
+    for (const [initial, refine] of [
+      ['로그인 기능', '로그인을 화면에 보여줘'],
+      ['장바구니 기능', '장바구니를 화면에 표시해줘'],
+    ] as const) {
+      const h = harness({ tree: true, files })
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit(initial), 'pane')
+      await h.flush()
+      const reads = h.calls.fileRead
+      const stats = h.calls.stat
+      const roots = h.calls.root
+      const cwds = h.calls.cwd
+
+      await h.controller.refine(h.ports, refine)
+      expect(h.calls.fileRead).toBe(reads)
+      expect(h.calls.stat).toBe(stats)
+      expect(h.calls.root).toBe(roots)
+      expect(h.calls.cwd).toBe(cwds)
+      expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('<repository_followup>')
+    }
+  })
+
+  test('style marker answers never scan, while a new marker noun scans once', async () => {
+    const h = harness({ tree: true, files })
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
     await h.flush()
     const reads = h.calls.fileRead
     const stats = h.calls.stat
+    const roots = h.calls.root
+    const cwds = h.calls.cwd
 
-    await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+    await h.controller.refine(h.ports, '자연스럽게 처리해줘')
+    await h.controller.refine(h.ports, '이 부분을 대상으로 다듬어줘')
     expect(h.calls.fileRead).toBe(reads)
     expect(h.calls.stat).toBe(stats)
-    expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('<repository_followup>')
+    expect(h.calls.root).toBe(roots)
+    expect(h.calls.cwd).toBe(cwds)
+    for (const request of h.completes) expect(requestText(request.prompt)).not.toContain('<repository_followup>')
+
+    await h.controller.refine(h.ports, '대시보드 화면')
+    expect(h.calls.root).toBeGreaterThan(roots)
+    expect(h.calls.fileRead).toBeGreaterThan(reads)
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('targets: 대시보드')
+  })
+
+  test('the block-wrapper reserve boundary never spends an attempt', async () => {
+    for (const contextMaxChars of [269, 270]) {
+      const h = harness({ tree: true, files, config: { contextMaxChars } })
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+      await h.flush()
+      const reads = h.calls.fileRead
+      const stats = h.calls.stat
+      const roots = h.calls.root
+      const cwds = h.calls.cwd
+
+      await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+      expect(h.calls.fileRead).toBe(reads)
+      expect(h.calls.stat).toBe(stats)
+      // The pre-fix path resolved root/cwd before the zero-character short-circuit.
+      expect(h.calls.root).toBe(roots)
+      expect(h.calls.cwd).toBe(cwds)
+      expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('<repository_followup>')
+    }
+
+    // 276 reserves 46 characters: one renderable character past the wrapper.
+    const h = harness({ tree: true, files, config: { contextMaxChars: 276 } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const roots = h.calls.root
+
+    await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+    expect(h.calls.root).toBeGreaterThan(roots)
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('<repository_followup>')
   })
 
   test('a retry with a fresh new target scans, and a path answer is a new target', async () => {

@@ -1547,4 +1547,74 @@ describe('buildModelRequest — repository follow-up block', () => {
     expect(requestText(withSupplement.prompt)).toContain('원본 요청')
     expect(withSupplement.system).toBe('SYS')
   })
+
+  test('with a decision ledger the supplement renders behind <user_decisions> and before the draft', () => {
+    const wf = workflow({
+      original: 'ORIG',
+      draft: 'DRAFT',
+      context: snapshot('CTX'),
+      dialogue: [{ role: 'user', text: 'U1', decisionId: 'd1' }],
+      decisions: ledger([userDecision({ text: '결정: 로컬에서만 처리' })]),
+      question: null,
+    })
+    const text = requestText(
+      buildModelRequest(wf, config(), 'SYS', undefined, { repositorySupplement: supplement }).prompt,
+    )
+    const decisions = text.indexOf('<user_decisions>')
+    const followup = text.indexOf('<repository_followup>')
+    const draft = text.indexOf('<current_draft>')
+    expect(decisions).toBeGreaterThan(-1)
+    expect(followup).toBeGreaterThan(decisions)
+    expect(draft).toBeGreaterThan(followup)
+    expect(text).toContain('결정: 로컬에서만 처리')
+  })
+
+  test('ledger overflow drops the supplement alone; no decision, dialogue, context or draft yields', () => {
+    const ledgerWorkflow = (contextSize: number): Workflow => workflow({
+      original: 'ORIG',
+      draft: 'D'.repeat(400),
+      context: snapshot('C'.repeat(contextSize)),
+      dialogue: [{ role: 'user', text: 'KEEP-DIALOGUE' }],
+      decisions: ledger([userDecision({ text: '결정: 로컬에서만 처리' })]),
+      question: null,
+    })
+    // Shrink the (flexible) context until the no-supplement build fits with
+    // nothing trimmed at all, so the comparison below cannot pass via trims.
+    let size = MAX_REQUEST_CHARS
+    let base: ModelCompleteRequest
+    do {
+      size -= 25
+      base = buildModelRequest(ledgerWorkflow(size), config(), 'SYS')
+    } while (
+      size > 0
+      && (requestLength(base) > MAX_REQUEST_CHARS
+        || !requestText(base.prompt).includes('KEEP-DIALOGUE')
+        || !requestText(base.prompt).includes('D'.repeat(400)))
+    )
+    expect(requestLength(base)).toBeLessThanOrEqual(MAX_REQUEST_CHARS)
+    expect(requestText(base.prompt)).toContain('KEEP-DIALOGUE')
+
+    let thrown: unknown
+    let withSupplement: ModelCompleteRequest | undefined
+    try {
+      withSupplement = buildModelRequest(ledgerWorkflow(size), config(), 'SYS', undefined, {
+        repositorySupplement: 'E'.repeat(1200),
+      })
+    } catch (cause) {
+      thrown = cause
+    }
+    // Optional refreshed evidence never triggers the protected-content refusal.
+    expect(thrown).toBeUndefined()
+    expect(withSupplement).toBeDefined()
+    const req = withSupplement as ModelCompleteRequest
+    expect(requestLength(req)).toBeLessThanOrEqual(MAX_REQUEST_CHARS)
+    // Byte-identical to the no-supplement build: the block alone was dropped
+    // before any dialogue, context, draft, or decision step could trim.
+    expect(requestText(req.prompt)).toBe(requestText(base.prompt))
+    expect(requestText(req.prompt)).not.toContain('E'.repeat(16))
+    expect(requestText(req.prompt)).toContain('<user_decisions>')
+    expect(requestText(req.prompt)).toContain('결정: 로컬에서만 처리')
+    expect(requestText(req.prompt)).toContain('KEEP-DIALOGUE')
+    expect(requestText(req.prompt)).toContain('D'.repeat(400))
+  })
 })

@@ -13,7 +13,7 @@ import {
   renderRefresh,
   type RefreshState,
 } from '../hooks/evidence-refresh'
-import { parseProjectAliases } from '../hooks/search-terms'
+import { aliasGroupKey, parseProjectAliases } from '../hooks/search-terms'
 
 const OWNER = { sessionId: 'sess-1', workflowId: 'wf-1', generation: 0 }
 
@@ -113,6 +113,21 @@ describe('initialRefreshState', () => {
     // A marker around an already-searched noun must not rescan it.
     expect(planRefresh(refresh, '대시보드 화면으로')).toBeNull()
   })
+
+  test('cap pressure keeps a project concept the initial scan expanded', () => {
+    const aliases = parseProjectAliases('별칭: 로그인')
+    const fillers = [
+      '가람', '고래', '구름', '나무', '노을', '다람', '도시', '라면',
+      '마음', '바다', '별빛', '산들', '새벽', '소리', '숲길', '여울',
+      '우물', '이슬', '자락', '초록', '하늘', '호수', '희망', '구슬',
+    ]
+    const request = `${fillers.join(' ')} 장바구니 로그인`
+    const refresh = initialRefreshState(OWNER, request, '', aliases, 500)
+    // The alias expansion fills the last slots; duplicated groups would spend
+    // them on a repeat instead and hide this concept from `seen`.
+    expect(refresh.seen).toContain(aliasGroupKey(['별칭', '로그인']))
+    expect(planRefresh(refresh, '별칭 모듈도')).toBeNull()
+  })
 })
 
 describe('planRefresh', () => {
@@ -144,6 +159,25 @@ describe('planRefresh', () => {
     for (const text of ['문장을 더 자연스럽게', '어색한 부분을 고쳐줘', '로그인 화면으로 보여줘']) {
       expect(planRefresh(state(), text)).toBeNull()
     }
+  })
+
+  test('a marker noun with one particle repeats the seen concept', () => {
+    expect(planRefresh(state({ seen: ['login'] }), '로그인을 화면에 보여줘')).toBeNull()
+    expect(planRefresh(state({ seen: ['cart'] }), '장바구니를 화면에 표시해줘')).toBeNull()
+  })
+
+  test('adverbial and generic style captures never plan a scan', () => {
+    for (const text of ['자연스럽게 처리해줘', '이 부분을 대상으로 다듬어줘']) {
+      expect(planRefresh(state(), text)).toBeNull()
+    }
+  })
+
+  test('a new marker-attached noun plans exactly one scan', () => {
+    const plan = planRefresh(state(), '대시보드 화면')
+    expect(plan?.newTargets).toEqual(['대시보드'])
+    expect(plan?.nextState.attempts).toBe(1)
+    expect(plan?.query).toContain('대시보드')
+    expect(planRefresh(plan?.nextState ?? state(), '대시보드 화면으로')).toBeNull()
   })
 
   test('a new explicit path is a new target even for the same concept', () => {
