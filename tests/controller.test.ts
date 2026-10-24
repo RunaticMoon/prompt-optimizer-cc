@@ -1525,7 +1525,7 @@ describe('smart trigger — the opt-in approval pass-through', () => {
     expect(outcome).toEqual({ action: 'drop', reason: '보완 요청을 옵티마이저에 전달했습니다.' })
     await h.flush()
     expect(h.calls.complete).toBe(2)
-    expect(h.controller.getState().workflow?.dialogue.at(-2)).toEqual({ role: 'user', text: '응' })
+    expect(h.controller.getState().workflow?.dialogue.at(-2)).toEqual({ role: 'user', text: '응', decisionId: 'd1' })
   })
 
   test('a recalled typed approval passes through again under smart mode', async () => {
