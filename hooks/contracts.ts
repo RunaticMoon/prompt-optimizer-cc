@@ -391,6 +391,23 @@ export type SubmissionDecision =
 /** How an interception was requested. */
 export type OptimizeTrigger = 'auto' | 'prefix' | 'command'
 
+/**
+ * The last classified composer submission's diagnostic metadata, as
+ * `/optimize status` shows it (`hooks/controller.ts`). Metadata only: it never
+ * carries the submission text, a ticket or a workflow, so the reason is
+ * discoverable without recording any prompt.
+ */
+export interface SubmissionStatus {
+  /** What the classifier decided for the submission. */
+  kind: SubmissionDecision['kind']
+  /** For `kind: 'pass'`, why the submission went through untouched. */
+  passReason?: PassReason
+  /** For `kind: 'optimize'`, how the interception was requested. */
+  trigger?: OptimizeTrigger
+  /** How the draft was built, as the composition classifier saw it. */
+  composition?: PasteClassification
+}
+
 /** Why a model completion did not yield a usable draft. */
 export type RewriteFailureReason =
   | 'api-error'
