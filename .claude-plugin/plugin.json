@@ -118,7 +118,7 @@
     "pasteBypass": {
       "type": "boolean",
       "title": "Send pastes as-is",
-      "description": "A prompt that was only pasted, or put in by another app such as Orca, and submitted without typing goes to the main session as-is. Typing anything in the draft makes it eligible again.",
+      "description": "A prompt that was only pasted, or put in by another app such as Orca, and submitted without typing goes to the main session as-is. Typing anything in the draft makes it eligible again. Use /optimize status to inspect the last classification.",
       "required": false,
       "default": true
     }
