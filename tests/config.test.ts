@@ -693,7 +693,9 @@ describe('loadSystemPromptExtra — bounded preparation', () => {
     const result = await pending
 
     expect(result.text).toBe('')
-    expect(result.warning).toContain('home directory')
+    // The timeout is announced through `onDegraded` only: no second warning that
+    // names the missing home directory instead of the expired budget.
+    expect(result.warning).toBeUndefined()
     expect(degraded).toEqual(['extra-home:timeout'])
   })
 

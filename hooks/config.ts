@@ -323,8 +323,13 @@ export async function loadSystemPromptExtra(
         }
       })
       if (homeResult.kind === 'cancelled') throw new PreparationCancelled()
-      if (homeResult.kind !== 'ok') degraded('extra-home', homeResult.kind)
-      if (homeResult.kind !== 'ok' || homeResult.value == null || homeResult.value === '') {
+      if (homeResult.kind !== 'ok') {
+        // A timed-out, failed or unavailable lookup is already announced through
+        // `onDegraded`; a second warning would duplicate the round's one notice.
+        degraded('extra-home', homeResult.kind)
+        return { text: '' }
+      }
+      if (homeResult.value == null || homeResult.value === '') {
         return {
           text: '',
           warning: `could not resolve the home directory for system prompt file "${file}"; using the built-in prompt`,

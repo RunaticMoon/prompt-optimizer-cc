@@ -257,15 +257,25 @@ function commonTarget(reason: TargetModelSnapshot['reason']): TargetModelSnapsho
   return { raw: null, normalizedId: null, profile: 'common', reason }
 }
 
+/** What one optional preparation section reported, so the notice stays accurate. */
+interface PreparationFallback {
+  /** A step or the round's overall timer ended the read. */
+  timeout: boolean
+  /** The read failed, or the host had no usable timer. */
+  failed: boolean
+}
+
 /**
  * One compact line naming the optional sections that actually fell back. It is
  * built from fixed clauses only: no file body, prompt text or raw error leaks
- * into a notice.
+ * into a notice. A failed read must not claim a time limit that never applied.
  */
-function preparationNotice(context: boolean, extra: boolean): string | null {
+function preparationNotice(context: PreparationFallback, extra: PreparationFallback): string | null {
   const clauses: string[] = []
-  if (context) clauses.push('준비 시간 제한으로 일부 문맥을 생략했습니다.')
-  if (extra) clauses.push('시스템 지침 준비가 지연되어 기본 지침을 사용합니다.')
+  if (context.timeout) clauses.push('준비 시간 제한으로 일부 문맥을 생략했습니다.')
+  else if (context.failed) clauses.push('일부 문맥을 읽지 못해 생략했습니다.')
+  if (extra.timeout) clauses.push('시스템 지침 준비가 지연되어 기본 지침을 사용합니다.')
+  else if (extra.failed) clauses.push('시스템 지침을 읽지 못해 기본 지침을 사용합니다.')
   return clauses.length > 0 ? clauses.join(' ') : null
 }
 
@@ -782,12 +792,17 @@ export function createController(deps: ControllerDeps): OptimizerController {
       signal: controller.signal,
       now: deps.now,
     })
-    const degraded = { context: false, extra: false }
+    const degraded: Record<'context' | 'extra', PreparationFallback> = {
+      context: { timeout: false, failed: false },
+      extra: { timeout: false, failed: false },
+    }
     const onDegraded = (label: string, reason: PreparationDegradation): void => {
       if (reason === 'cancelled') return
       // Labels from the system-instruction loader start with `extra-`.
-      if (label.startsWith('extra-')) degraded.extra = true
-      else degraded.context = true
+      const section = label.startsWith('extra-') ? degraded.extra : degraded.context
+      // The overall budget is a time limit too; keep a real timeout wording for it.
+      if (reason === 'timeout' || reason === 'budget') section.timeout = true
+      else section.failed = true
     }
     // Every effect below is preceded by this live check: the budget can settle a
     // stale read or a cancel between two awaits, and no late result may write

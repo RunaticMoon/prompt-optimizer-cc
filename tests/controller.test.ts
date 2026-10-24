@@ -4122,6 +4122,115 @@ describe('bounded preparation', () => {
     expect(h.calls.complete).toBe(1)
   })
 
+  test('a later stage gets only the remaining budget and the last one is refused', async () => {
+    const clock = testClock()
+    let now = 0
+    const advance = (ms: number): void => {
+      now += ms
+      clock.advance(ms)
+    }
+    let transcriptStarted = false
+    let extraReadStarted = false
+    const h = harness({
+      clock,
+      deps: { now: () => now },
+      config: { systemPromptFile: '/extra.md' },
+      files: { '/extra.md': 'extra instructions' },
+      model: () => new Promise<string>(() => {}),
+      version: async () => ({ version: '2.1.292' }),
+    })
+    h.ports.session.messages = (() => {
+      transcriptStarted = true
+      return new Promise<SessionMessage[]>(() => {})
+    }) as EnginePorts['session']['messages']
+    const read = h.ports.fs.read
+    h.ports.fs.read = ((path: string) => {
+      if (path === '/extra.md') {
+        extraReadStarted = true
+        return new Promise<string>(() => {})
+      }
+      return read(path)
+    }) as EnginePorts['fs']['read']
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => transcriptStarted)
+    advance(2_400)
+    await h.waitFor(() => extraReadStarted)
+    advance(2_400)
+    expect(now).toBe(4_800)
+
+    // Only 200 ms is left: the target-model step is capped to it, then the
+    // version read is refused instead of starting past the deadline.
+    await h.waitFor(() => clock.calls.some(call => call.ms === 200))
+    advance(200)
+    await running
+
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.version).toBe(0)
+  })
+
+  test('a failed context read reports no time limit', async () => {
+    const h = harness({ model: () => 'claude-opus-5-5' })
+    h.ports.session.cwd = async () => {
+      throw new Error('EIO: cwd failed')
+    }
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.complete).toBe(1)
+    expect(h.notices).toContain('일부 문맥을 읽지 못해 생략했습니다.')
+    expect(h.notices.some(notice => notice?.includes('준비 시간 제한'))).toBe(false)
+  })
+
+  test('a host without a preparation timer reports failed reads, not a time limit', async () => {
+    const h = harness({
+      config: { systemPromptFile: '/extra.md' },
+      files: { '/extra.md': 'extra instructions' },
+    })
+    h.ports.clock = {} as EnginePorts['clock']
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.complete).toBe(1)
+    expect(h.notices).toContain(
+      '일부 문맥을 읽지 못해 생략했습니다. 시스템 지침을 읽지 못해 기본 지침을 사용합니다.',
+    )
+    expect(h.notices.some(notice => notice?.includes('준비 시간 제한'))).toBe(false)
+  })
+
+  test('a hung HOME for a tilde instruction file gives one timeout notice', async () => {
+    const clock = testClock()
+    const h = harness({
+      clock,
+      model: () => 'claude-opus-5-5',
+      config: { systemPromptFile: '~/notes.md' },
+    })
+    let started = false
+    h.ports.env.get = (() => {
+      started = true
+      return new Promise<string | null>(() => {})
+    }) as EnginePorts['env']['get']
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => started)
+    clock.advance(500)
+    await running
+
+    expect(h.calls.complete).toBe(1)
+    expect(
+      h.notices.filter(notice => notice?.includes('시스템 지침')),
+    ).toEqual(['시스템 지침 준비가 지연되어 기본 지침을 사용합니다.'])
+    expect(h.notices.some(notice => notice?.includes('home directory'))).toBe(false)
+  })
+
   test('a hung version read times out live, memoizes cache=false and completes once', async () => {
     const clock = testClock()
     let started = false
