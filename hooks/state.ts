@@ -23,7 +23,7 @@ import type {
   UsageTotals,
   Workflow,
 } from './contracts'
-import { appendAnswer, emptyLedger, questionIdFor } from './decisions'
+import { appendAnswer, appendCorrection, emptyLedger, isActiveDecision, questionIdFor } from './decisions'
 
 /**
  * The only legal `phase` moves. Everything else — including a move to the same
@@ -320,6 +320,37 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
           ...current,
           decisions: captured === null ? current.decisions : captured.ledger,
           dialogue: [...current.dialogue, userTurn],
+          question: null,
+          questionId: null,
+          options: [],
+          questionAsk: undefined,
+          limitAsk: undefined,
+        },
+      }
+    }
+
+    case 'decision-corrected': {
+      const current = base.workflow
+      if (current === null || current.id !== event.workflowId) return base
+      if (current.phase !== 'reviewing' && current.phase !== 'failed') return base
+      const ledger = current.decisions ?? emptyLedger()
+      // Independently gated here too: an unknown, replaced or blank correction
+      // changes nothing even if a caller skipped its own validation.
+      if (event.text.trim() === '' || !isActiveDecision(ledger, event.targetId)) return base
+      const target = ledger.entries.find(entry => entry.id === event.targetId)
+      if (target === undefined) return base
+      const corrected = appendCorrection(ledger, target, event.text)
+      return {
+        ...base,
+        workflow: {
+          ...current,
+          decisions: corrected.ledger,
+          dialogue: [
+            ...current.dialogue,
+            { role: 'user', text: event.text, decisionId: corrected.decision.id },
+          ],
+          // The old question belonged to the replaced value; a later retry
+          // must not answer it by accident.
           question: null,
           questionId: null,
           options: [],

@@ -381,6 +381,8 @@ export type OptimizerEvent =
   | { type: 'context'; workflowId: string; generation: number; context: ContextSnapshot }
   /** The user sent a refinement instruction; appended to the dialogue before the next completion. */
   | { type: 'instruct'; workflowId: string; text: string }
+  /** The user explicitly replaced one active decision; state only, no model call. */
+  | { type: 'decision-corrected'; workflowId: string; targetId: string; text: string }
   /** The user edited the restored draft in the composer; the bypass follows the edited text. */
   | { type: 'bypass-edited'; sessionId: string; text: string }
   /** The bypass permit was revoked (another fill, cleared draft, session end, expiry). */

@@ -20,6 +20,7 @@ import {
   type ControllerDeps,
   type OptimizerController,
 } from '../hooks/controller'
+import { activeDecisions } from '../hooks/decisions'
 import { REQUEST_BUDGET_NOTICE } from '../hooks/model'
 import type { RawEditFacts } from '../hooks/raw-mode'
 
@@ -2501,6 +2502,107 @@ async function startQuestion(h: Harness, ui: 'pane' | 'composer' = 'pane') {
   await h.controller.onSubmit(h.ports, submit('요청을 개선해 주세요'), ui)
   await h.flush()
 }
+
+
+describe('explicit decision correction', () => {
+  test('replaces an active decision without a call and the retry request uses only the new text', async () => {
+    const h = harness({
+      complete: async (_request, _signal, call) => call === 1 ? questionReply() : answered(`개선안 ${call}`),
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '외부 서비스 사용')
+    const before = h.calls.complete
+
+    const corrected = h.controller.correctDecision('d1', '로컬에서만 처리')
+    expect(corrected).toEqual({ ok: true })
+    expect(h.calls.complete).toBe(before)
+    const workflow = h.controller.getState().workflow
+    expect(workflow?.rounds).toBe(2)
+    expect(workflow?.draft).toBe('개선안 2')
+    expect(workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(workflow?.decisions?.entries[1]?.text).toBe('로컬에서만 처리')
+    expect(workflow?.decisions?.entries[1]?.supersedes).toBe('d1')
+    expect(workflow?.decisions?.entries[1]?.source).toBe(workflow?.decisions?.entries[0]?.source)
+    expect(h.notices).toContain('결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.')
+
+    await h.controller.retry(h.ports)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('로컬에서만 처리')
+    expect(prompt).not.toContain('외부 서비스 사용')
+  })
+
+  test('a correction is allowed at the exhausted round limit and leaves unrelated decisions active', async () => {
+    const h = harness({
+      config: { maxRounds: 3 },
+      complete: async (_request, _signal, call) => call === 1 ? questionReply() : answered(`개선안 ${call}`),
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    await h.controller.refine(h.ports, '둘째 결정')
+    const before = h.calls.complete
+    expect(h.controller.getState().workflow?.rounds).toBe(3)
+
+    const corrected = h.controller.correctDecision('d1', '첫 결정 정정')
+    expect(corrected.ok).toBe(true)
+    expect(h.calls.complete).toBe(before)
+    expect(h.controller.getState().workflow?.rounds).toBe(3)
+    const active = activeDecisions(h.controller.getState().workflow?.decisions ?? { entries: [], nextId: 1 })
+    expect(active.map(entry => entry.text)).toEqual(['둘째 결정', '첫 결정 정정'])
+  })
+
+  test('an open host choice dialog blocks correction instead of clearing its marker', async () => {
+    const dialog = questionDialog()
+    const h = harness({ ui: { ask: dialog.ask }, complete: async () => questionReply() })
+    await startQuestion(h)
+    expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
+
+    const corrected = h.controller.correctDecision('d1', '로컬')
+    expect(corrected.ok).toBe(false)
+    expect(corrected.reason).toBe('열린 선택 창을 먼저 닫아 주세요.')
+    expect(h.notices).toContain('열린 선택 창을 먼저 닫아 주세요.')
+    expect(h.calls.complete).toBe(1)
+    expect(h.controller.getState().workflow?.decisions?.entries).toHaveLength(0)
+  })
+
+  test('missing, blank, replaced and no-workflow corrections fail without a call', async () => {
+    const empty = harness()
+    empty.controller.onSessionStart('sess-1')
+    expect(empty.controller.correctDecision('d1', 'x').reason).toBe('진행 중인 개선 작업이 없습니다.')
+
+    const h = harness({ complete: async (_request, _signal, call) => call === 1 ? questionReply() : answered('개선안') })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    const before = h.calls.complete
+    expect(h.controller.correctDecision('d9', 'x').ok).toBe(false)
+    expect(h.controller.correctDecision('d1', '   ').ok).toBe(false)
+    expect(h.controller.correctDecision('d1', '정정 결정').ok).toBe(true)
+    expect(h.controller.correctDecision('d1', '다시 정정').ok).toBe(false)
+    expect(h.calls.complete).toBe(before)
+  })
+
+  test('a failed later generation keeps the correction and still accepts another', async () => {
+    let call = 0
+    const h = harness({
+      complete: async () => {
+        call += 1
+        if (call === 1) return questionReply()
+        if (call === 2) return answered('두 번째 개선안')
+        return apiError()
+      },
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    expect(h.controller.correctDecision('d1', '정정 결정').ok).toBe(true)
+
+    await h.controller.retry(h.ports)
+    const failed = h.controller.getState().workflow
+    expect(failed?.phase).toBe('failed')
+    expect(failed?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(failed?.decisions?.entries[1]?.text).toBe('정정 결정')
+    expect(h.controller.correctDecision('d2', '실패 뒤 재정정').ok).toBe(true)
+    expect(h.controller.getState().workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2', 'd3'])
+  })
+})
 
 describe('round extensions — explicit approval and workflow isolation', () => {
   test('the default fifth round asks for approval before preserving and asking its unresolved question', async () => {

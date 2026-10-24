@@ -26,6 +26,7 @@ import { EMPTY_COMPOSITION, isPasteOnly, noteAutocomplete, noteBox, noteEditInpu
 import type { Composition } from './composition'
 import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
+import { emptyLedger, findDecision, isActiveDecision } from './decisions'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
@@ -139,6 +140,11 @@ export interface OptimizerController {
   retry(ports: EnginePorts, instruction?: string): Promise<void>
   /** Explicit approval from the extension button or `/optimize more`. */
   extendRounds(ports: EnginePorts): Promise<ActionResult>
+  /**
+   * Replaces one active user decision with the person's exact new text. State
+   * only: it spends no call or round and never touches the draft.
+   */
+  correctDecision(id: string, text: string): ActionResult
   accept(ports: EnginePorts): Promise<ActionResult>
   sendDraft(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
   sendOriginal(ports: EnginePorts, workflowId?: string): Promise<ActionResult>
@@ -1059,6 +1065,37 @@ export function createController(deps: ControllerDeps): OptimizerController {
     await runRound(ports, '')
   }
 
+  function correctDecision(id: string, text: string): ActionResult {
+    const workflow = state.workflow
+    if (workflow === null) return refuseCorrection('진행 중인 개선 작업이 없습니다.')
+    if (workflow.phase !== 'reviewing' && workflow.phase !== 'failed') {
+      return { ok: false, reason: IN_FLIGHT_REASON }
+    }
+    // A host dialog cannot be closed by the plugin: refuse rather than clear a
+    // pending marker while the person still sees the old choices.
+    if (pendingAsk !== null || workflow.questionAsk === 'pending' || workflow.limitAsk === 'pending') {
+      return refuseCorrection('열린 선택 창을 먼저 닫아 주세요.')
+    }
+    const ledger = workflow.decisions ?? emptyLedger()
+    if (findDecision(ledger, id) === undefined) {
+      return refuseCorrection(`결정 ${id}을(를) 찾지 못했습니다. /optimize decisions로 id를 확인하세요.`)
+    }
+    if (!isActiveDecision(ledger, id)) {
+      return refuseCorrection(`결정 ${id}은(는) 이미 대체되었습니다. 활성 결정을 정정하세요.`)
+    }
+    if (text.trim() === '') return refuseCorrection('정정할 내용을 입력하세요.')
+
+    apply({ type: 'decision-corrected', workflowId: workflow.id, targetId: id, text })
+    notify('결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.')
+    return { ok: true }
+  }
+
+  /** Notifies one correction refusal and returns it for the command's answer. */
+  function refuseCorrection(reason: string): ActionResult {
+    notify(reason)
+    return { ok: false, reason }
+  }
+
   async function accept(ports: EnginePorts): Promise<ActionResult> {
     const workflow = state.workflow
     if (workflow === null) {
@@ -1317,6 +1354,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     refine,
     retry,
     extendRounds,
+    correctDecision,
     accept,
     sendDraft: (ports, workflowId) => send(ports, 'draft', workflowId),
     sendOriginal: (ports, workflowId) => send(ports, 'original', workflowId),

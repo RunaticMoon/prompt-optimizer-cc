@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type {
+  AnswerSource,
   BypassTicket,
   ContextSnapshot,
   ModelUsage,
@@ -1105,6 +1106,80 @@ describe('reduce — budget refusal', () => {
     expect(recovered.workflow?.phase).toBe('reviewing')
     expect(recovered.workflow?.budgetError).toBeUndefined()
     expect('lastError' in (recovered.workflow ?? {})).toBe(false)
+  })
+})
+
+
+describe('reduce — explicit decision correction', () => {
+  function source(): AnswerSource {
+    return {
+      kind: 'user-answer',
+      questionId: 'q:wf-1:1:1',
+      question: '처리 위치는?',
+      options: ['로컬', '외부'],
+      answeredAfterRound: 1,
+    }
+  }
+
+  function reviewed(): RuntimeState {
+    return state({
+      workflow: workflow({
+        phase: 'reviewing',
+        rounds: 1,
+        draft: '보존할 초안',
+        question: '이전 질문?',
+        questionId: 'q:wf-1:1:1',
+        options: ['A', 'B'],
+        decisions: { entries: [{ id: 'd1', text: '로컬', source: source(), selectedOption: { index: 1, text: '로컬' } }], nextId: 2 },
+      }),
+    })
+  }
+
+  test('appends a superseding entry with the old source and clears the stale question', () => {
+    const current = reviewed()
+    const next = reduce(current, {
+      type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '외부 서비스 대신 로컬 유지',
+    }, 2)
+    const entries = next.workflow?.decisions?.entries ?? []
+    expect(entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(entries[1]?.text).toBe('외부 서비스 대신 로컬 유지')
+    expect(entries[1]?.source).toBe(entries[0]?.source)
+    expect(entries[1]?.supersedes).toBe('d1')
+    // A correction is free text, not a choice re-resolution.
+    expect(entries[1]?.selectedOption).toBeUndefined()
+    expect(next.workflow?.dialogue).toEqual([
+      { role: 'user', text: '외부 서비스 대신 로컬 유지', decisionId: 'd2' },
+    ])
+    expect(next.workflow?.question).toBeNull()
+    expect(next.workflow?.questionId).toBeNull()
+    expect(next.workflow?.options).toEqual([])
+    expect(next.workflow?.draft).toBe('보존할 초안')
+    expect(next.workflow?.rounds).toBe(1)
+  })
+
+  test('unknown, replaced, blank or in-flight corrections are ignored', () => {
+    const current = reviewed()
+    expect(reduce(current, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd9', text: 'x' }, 1)).toBe(current)
+    expect(reduce(current, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '   ' }, 1)).toBe(current)
+    for (const phase of ['idle', 'collecting', 'generating', 'transferring', 'sending'] as const) {
+      const busy = state({ workflow: workflow({ phase, decisions: { entries: [{ id: 'd1', text: 'A', source: source() }], nextId: 2 } }) })
+      expect(reduce(busy, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: 'B' }, 1)).toBe(busy)
+    }
+    const corrected = reduce(current, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: 'B' }, 1)
+    expect(reduce(corrected, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: 'C' }, 2)).toBe(corrected)
+  })
+
+  test('a model reply or failure cannot create a supersession', () => {
+    const current = reviewed()
+    const replied = reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '모델 초안', message: '모델 메모' }), usage: usage(),
+    }, 1)
+    expect(replied.workflow?.decisions?.entries.some(entry => entry.supersedes !== undefined)).toBe(false)
+    const failed = reduce(current, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 1)
+    expect(failed.workflow?.decisions?.entries.some(entry => entry.supersedes !== undefined)).toBe(false)
   })
 })
 
