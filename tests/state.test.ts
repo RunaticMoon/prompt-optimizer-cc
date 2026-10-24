@@ -1292,6 +1292,27 @@ describe('reduce — undo', () => {
     expect(undone.workflow?.sessionId).toBe(SESSION)
   })
 
+  test('undo refuses while a question or limit dialog is pending, and a spent marker allows it', () => {
+    const reviewed = withSuccesses(2)
+    const asked = reduce(reviewed, {
+      type: 'question-ask', workflowId: 'wf-1', round: 2, question: null, status: 'pending',
+    }, 1)
+    expect(asked.workflow?.questionAsk).toBe('pending')
+    expect(reduce(asked, undoEvent(), 2)).toBe(asked)
+    const limited = reduce(reviewed, { type: 'limit-ask', workflowId: 'wf-1', round: 2, status: 'pending' }, 1)
+    expect(limited.workflow?.limitAsk).toBe('pending')
+    expect(reduce(limited, undoEvent(), 2)).toBe(limited)
+
+    // A dialog that already closed no longer blocks the restore.
+    const closed = reduce(asked, {
+      type: 'question-ask', workflowId: 'wf-1', round: 2, question: null, status: 'closed',
+    }, 2)
+    const undone = reduce(closed, undoEvent(), 3)
+    expect(undone.workflow?.currentRevisionId).toBe('r1')
+    expect(undone.workflow?.generation).toBe(2)
+    expect(undone.workflow?.questionAsk).toBeUndefined()
+  })
+
   test('undo from a failure clears the failure records and restores reviewing', () => {
     const second = withSuccesses(2, { roundLimit: 7 })
     const failed = reduce(generating(second), { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom' }, 1)

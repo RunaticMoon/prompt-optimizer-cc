@@ -396,6 +396,10 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const current = matchWorkflow(base, event.workflowId, event.generation)
       if (current === null || current.currentRevisionId !== event.currentRevisionId) return base
       if (current.phase !== 'reviewing' && current.phase !== 'failed') return base
+      // A pending host dialog cannot be closed by the plugin, so its marker
+      // must survive: the controller refuses earlier, and the reducer repeats
+      // the gate so the rule holds even when a caller skips its own check.
+      if (current.questionAsk === 'pending' || current.limitAsk === 'pending') return base
       const plan = undoTarget(current, event.currentRevisionId)
       if (plan === null) return base
       const updated: Workflow = {

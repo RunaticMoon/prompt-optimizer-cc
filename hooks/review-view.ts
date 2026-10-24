@@ -9,7 +9,7 @@
  * repository excerpt are displayed exactly as kept.
  */
 import type { Workflow } from './contracts'
-import { formatDecisions } from './decision-view'
+import { display, formatDecisions } from './decision-view'
 import { diffDraft, renderDraftDiff } from './draft-diff'
 
 /** The one-line predecessor error shared by `show previous` and `diff previous`. */
@@ -29,10 +29,13 @@ export function formatShow(label: string, text: string): string {
 /**
  * Renders one comparison as one-column text under a baseline title.
  *
- * The first {@link DIFF_MAX_LINES} rendered change lines are kept; anything
- * beyond them is summarized with the omitted count and a pointer to `show`
- * for the complete before/after texts. The heading's added/removed counts
- * always describe the whole comparison, not the kept window.
+ * A comparison that outgrows the {@link DIFF_MAX_LINES}-line window fills the
+ * window with the `-`/`+` change lines first and keeps equal lines only in
+ * the space left, so a long unchanged stretch can never push an actual change
+ * out of view. Anything not kept is summarized with the omitted count and a
+ * pointer to `show` for the complete before/after texts. The heading's
+ * added/removed counts always describe the whole comparison, not the kept
+ * window.
  */
 export function formatDraftDiff(
   before: string,
@@ -43,11 +46,29 @@ export function formatDraftDiff(
   const rendered = renderDraftDiff(diffDraft(before, after))
   const [heading = '', ...body] = rendered.split('\n')
   if (body.length <= DIFF_MAX_LINES) return `${title}\n${rendered}`
-  const omitted = body.length - DIFF_MAX_LINES
+  const kept = keepChangedFirst(body)
+  const omitted = body.length - kept.length
   const showHint = baseline === 'original'
     ? '/optimize show original 과 /optimize show'
     : '/optimize show previous 와 /optimize show'
-  return `${title}\n${heading}\n${body.slice(0, DIFF_MAX_LINES).join('\n')}\n… 외 ${omitted}줄 요약 생략 · 전체 텍스트는 ${showHint} 로 확인`
+  return `${title}\n${heading}\n${kept.join('\n')}\n… 외 ${omitted}줄 요약 생략 · 전체 텍스트는 ${showHint} 로 확인`
+}
+
+/**
+ * Picks the kept window so changed lines are never hidden: every `-`/`+` line
+ * goes in first (in comparison order) and equal lines fill only the space
+ * left. The marks come from {@link renderDraftDiff} itself, so a leading
+ * `-`/`+` is reliably a change and any other leading character is context.
+ */
+function keepChangedFirst(body: readonly string[]): string[] {
+  const changed: string[] = []
+  const context: string[] = []
+  for (const line of body) {
+    if (line.startsWith('-') || line.startsWith('+')) changed.push(line)
+    else context.push(line)
+  }
+  if (changed.length >= DIFF_MAX_LINES) return changed.slice(0, DIFF_MAX_LINES)
+  return [...changed, ...context.slice(0, DIFF_MAX_LINES - changed.length)]
 }
 
 /** The standing label for every generated sentence, agreed or not. */
@@ -68,6 +89,10 @@ function excerptBody(excerpt: string, path: string): string {
  * sources (26's formatter), then the repository files the collector actually
  * read and selected, then the standing unconfirmed-proposal label for the
  * whole generated draft and change note.
+ *
+ * Excerpts are raw file content, so every line goes through 26's control
+ * escape: the line structure stays, but a control character in the file can
+ * neither break the list nor hide in the printed text.
  */
 export function formatSources(workflow: Readonly<Workflow>): string {
   const sources = workflow.context?.repositorySources ?? []
@@ -78,7 +103,7 @@ export function formatSources(workflow: Readonly<Workflow>): string {
     for (const source of sources) {
       lines.push(`- [${source.kind}] ${source.path}`)
       for (const line of excerptBody(source.excerpt, source.path).split('\n')) {
-        lines.push(`  ${line}`)
+        lines.push(`  ${display(line)}`)
       }
     }
   }

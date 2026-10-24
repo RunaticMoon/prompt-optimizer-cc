@@ -204,6 +204,21 @@ describe('diffDraft — bounded fallback', () => {
     expect(rebuild(diff, 'before')).toBe(before)
     expect(rebuild(diff, 'after')).toBe(after)
   })
+
+  test('the exact input-character boundary still uses line LCS; one more char falls back to blocks', () => {
+    const shared = 'x'.repeat(DIFF_MAX_INPUT_CHARS / 2 - 1)
+    const before = `a${shared}`
+    const after = `b${shared}`
+    expect(before.length + after.length).toBe(DIFF_MAX_INPUT_CHARS)
+    const exact = diffDraft(before, after)
+    expect(exact.coarse).toBe(false)
+    expect(kinds(exact)).toEqual([`remove:${before}`, `add:${after}`])
+
+    const over = diffDraft(`${before}!`, after)
+    expect(over.coarse).toBe(true)
+    expect(rebuild(over, 'before')).toBe(`${before}!`)
+    expect(rebuild(over, 'after')).toBe(after)
+  })
 })
 
 describe('renderDraftDiff', () => {

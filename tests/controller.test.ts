@@ -2762,6 +2762,9 @@ describe('undo — state-only restore', () => {
     const prompt = requestText(h.completes.at(-1)?.prompt)
     expect(prompt).toContain('외부 서비스 사용')
     expect(prompt).toContain('"id":"d2"')
+    // The restored question and choices ride along as the pending question too.
+    expect(prompt).toContain('"question":"질문 1?"')
+    expect(prompt).toContain('"options":["로컬","외부"]')
   })
 
   test('a scheduled supplement captured before the undo cannot run a round', async () => {
@@ -2775,6 +2778,38 @@ describe('undo — state-only restore', () => {
     await h.flush()
     expect(h.calls.complete).toBe(before)
     expect(h.controller.getState().workflow?.draft).toBe('개선안 1')
+  })
+
+  test('a pre-undo reply flow can neither complete nor speak after the undo', async () => {
+    const dialog = questionDialog()
+    const h = harness({
+      ui: { ask: dialog.ask },
+      complete: async (_request, _signal, call) => {
+        if (call === 1) return answered('개선안 1', '첫 메모')
+        if (call === 2) return answered('개선안 2', '둘째 메모')
+        // What the captured supplement would get if its round wrongly ran.
+        return answered('개선안 3', '늦은 메모', '늦은 질문?', ['A', 'B'])
+      },
+    })
+    await started(h)
+    await h.controller.refine(h.ports, '첫 보완')
+    const spoken = h.notices.filter(notice => notice !== undefined).length
+    const generationBefore = h.controller.getState().workflow?.generation ?? 0
+    await h.controller.onSubmit(h.ports, submit('더 줄여줘'), 'pane')
+    expect(h.controller.undo().ok).toBe(true)
+    await h.flush()
+
+    // The stale generation produced no completion, no new notice and no dialog:
+    // the restored revision stands exactly as the undo left it.
+    expect(h.calls.complete).toBe(2)
+    expect(h.notices.filter(notice => notice !== undefined)).toHaveLength(spoken + 1)
+    expect(h.notices).toContain('이전 성공 라운드로 되돌렸습니다. 사용량과 라운드 한도는 유지됩니다.')
+    expect(h.notices).not.toContain('늦은 메모')
+    expect(dialog.calls).toHaveLength(0)
+    const restored = h.controller.getState().workflow
+    expect(restored?.phase).toBe('reviewing')
+    expect(restored?.draft).toBe('개선안 1')
+    expect(restored?.generation).toBe(generationBefore + 1)
   })
 
   test('undo is refused while generating and unavailable before any success', async () => {

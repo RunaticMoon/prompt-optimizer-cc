@@ -844,8 +844,12 @@ export function createController(deps: ControllerDeps): OptimizerController {
             },
           }
         }
+        // The reducer folds the usage but accepts the reply only from a live
+        // generating run, so a duplicate same-generation completion stores
+        // nothing and must raise no notice or dialog for it either.
+        const live = !stale && state.workflow?.phase === 'generating'
         apply({ type: 'reply', workflowId, generation, sessionId: current.sessionId, reply: result.reply, usage: result.usage })
-        if (stale) return
+        if (!live) return
         const question = result.reply.question
         const options = result.reply.options ?? []
         const notice = question !== null && question !== ''

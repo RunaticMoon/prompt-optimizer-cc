@@ -95,6 +95,20 @@ describe('formatDraftDiff', () => {
     expect(text).toContain('전체 텍스트는 /optimize show original 과 /optimize show 로 확인')
   })
 
+  test('a long unchanged stretch never pushes the actual change out of the window', () => {
+    // 100 equal lines, then one replacement at the end: 102 rendered body lines.
+    const head = Array.from({ length: 100 }, (_, i) => `줄 ${i + 1}`)
+    const text = formatDraftDiff([...head, '옛 마지막'].join('\n'), [...head, '새 마지막'].join('\n'), 'original')
+    const lines = text.split('\n')
+    expect(text).toContain('변경: +1 -1')
+    // The changed lines lead the kept window; equal lines only fill the space left.
+    expect(lines[2]).toBe('-옛 마지막')
+    expect(lines[3]).toBe('+새 마지막')
+    expect(lines).toHaveLength(83)
+    expect(lines.filter(line => line.startsWith(' 줄 '))).toHaveLength(78)
+    expect(text).toContain(`… 외 ${102 - DIFF_MAX_LINES}줄 요약 생략`)
+  })
+
   test('the previous baseline points at show previous for the full text', () => {
     const after = Array.from({ length: DIFF_MAX_LINES + 5 }, (_, i) => `줄 ${i}`).join('\n')
     const text = formatDraftDiff('옛 줄', after, 'previous')
@@ -147,6 +161,19 @@ describe('formatSources', () => {
     const text = formatSources(workflow({ context: context({ repositorySources: sources }) }))
     expect(text).toContain('- [source] src/a.ts')
     expect(text).toContain('  3: export const a = 1')
+  })
+
+  test('escapes control characters in a raw excerpt so it cannot break the list', () => {
+    const sources: RepositorySource[] = [{
+      path: 'src/evil.ts',
+      excerpt: 'src/evil.ts\n1: 안전\r줄\t탭\u0007벨',
+      kind: 'source',
+    }]
+    const text = formatSources(workflow({ context: context({ repositorySources: sources }) }))
+    expect(text).toContain('- [source] src/evil.ts')
+    // The hostile line keeps its place with every control character escaped.
+    expect(text).toContain('  1: 안전\\r줄\\t탭\\u0007벨')
+    expect(text.split('\n').filter(line => line.includes('안전'))).toHaveLength(1)
   })
 })
 
