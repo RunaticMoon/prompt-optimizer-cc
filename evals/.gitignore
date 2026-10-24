@@ -1,0 +1,3 @@
+# Local evaluation outputs. Never commit result JSON/Markdown.
+results/
+*.local.json
