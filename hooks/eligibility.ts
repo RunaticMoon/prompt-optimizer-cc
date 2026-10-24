@@ -100,32 +100,65 @@ export function classifySubmission(
 
   // 11. Prefix mode improves only what carries the trigger.
   if (config.triggerMode === 'prefix') {
-    if (config.triggerPrefix !== '' && e.text.startsWith(config.triggerPrefix)) {
-      const text = e.text.slice(config.triggerPrefix.length).trim()
-      // Only the trigger was typed: nothing to improve. Return a blank raw
-      // escape so the controller drops it (보낼 내용이 없습니다.) rather than
-      // letting the bare prefix reach the main session.
-      if (text === '') return { kind: 'raw', text: '' }
-      return { kind: 'optimize', text, trigger: 'prefix' }
-    }
-    // The CLI trims trailing whitespace before the hook sees the text, so the
-    // bare trigger arrives without its trailing space. Recognize it as empty
-    // input, not as untriggered text.
-    const bareTrigger = config.triggerPrefix.trimEnd()
-    if (bareTrigger !== '' && e.text.trimEnd() === bareTrigger) {
-      return { kind: 'raw', text: '' }
-    }
-    return pass('no-trigger')
+    return triggerDecision(e.text, config.triggerPrefix) ?? pass('no-trigger')
   }
 
-  // 12. A draft the person never typed — only pasted, or put in by another app
+  // 12. The opt-in smart mode: the explicit trigger prefix first (above paste
+  //     and matching), then the conservative whole-input approvals, then the
+  //     ordinary paste and optimize rules. Uncertain text still optimizes, so
+  //     a wrong guess can only cost a completion, never drop a requirement.
+  if (config.triggerMode === 'smart') {
+    const triggered = triggerDecision(e.text, config.triggerPrefix)
+    if (triggered !== null) return triggered
+    if (config.pasteBypass && facts?.pasted === true) return pass('pasted')
+    if (isSmartContinuation(e.text)) return pass('smart-continuation')
+    return { kind: 'optimize', text: e.text, trigger: 'auto' }
+  }
+
+  // 13. A draft the person never typed — only pasted, or put in by another app
   //     such as Orca — is not their own prompt, so it goes to the main session
-  //     as-is. The reply (8), raw (5), bypass (6) and prefix trigger (11) rules
-  //     above still win.
+  //     as-is. The reply (8), raw (5), bypass (6), prefix (11) and smart
+  //     explicit-trigger (12) rules above still win.
   if (config.pasteBypass && facts?.pasted === true) return pass('pasted')
 
-  // 13. `always` mode improves everything left, on the text as typed.
+  // 14. `always` mode improves everything left, on the text as typed.
   return { kind: 'optimize', text: e.text, trigger: 'auto' }
+}
+
+/**
+ * The existing prefix behavior, shared by `prefix` and `smart` modes: a
+ * nonempty prefix recognized exactly at the text's head, the remainder trimmed,
+ * and only the trigger (or the CLI-trimmed bare trigger) returned as a blank
+ * raw escape. `null` when this text carries no trigger.
+ */
+function triggerDecision(text: string, prefix: string): SubmissionDecision | null {
+  if (prefix !== '' && text.startsWith(prefix)) {
+    const rest = text.slice(prefix.length).trim()
+    // Only the trigger was typed: nothing to improve. Return a blank raw
+    // escape so the controller drops it (보낼 내용이 없습니다.) rather than
+    // letting the bare prefix reach the main session.
+    if (rest === '') return { kind: 'raw', text: '' }
+    return { kind: 'optimize', text: rest, trigger: 'prefix' }
+  }
+  // The CLI trims trailing whitespace before the hook sees the text, so the
+  // bare trigger arrives without its trailing space. Recognize it as empty
+  // input, not as untriggered text.
+  const bareTrigger = prefix.trimEnd()
+  if (bareTrigger !== '' && text.trimEnd() === bareTrigger) return { kind: 'raw', text: '' }
+  return null
+}
+
+/**
+ * The exact whole-input approvals smart mode passes through untouched
+ * (`smart-continuation`). Deliberately tiny and conservative: any variant needs
+ * its own reviewed fixtures first, since one wrong entry lets consequential
+ * text slip past the optimizer.
+ */
+const SMART_CONTINUATIONS: ReadonlySet<string> = new Set(['응', '계속', '진행해'])
+
+/** Whether the whole trimmed input is exactly one of the smart-mode approvals. */
+function isSmartContinuation(text: string): boolean {
+  return SMART_CONTINUATIONS.has(text.trim())
 }
 
 /** A pass decision, by reason. */

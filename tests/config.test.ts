@@ -125,13 +125,16 @@ describe('resolveConfig — modelGuidance', () => {
 })
 
 describe('resolveConfig — enums', () => {
-  test('triggerMode accepts only its two values', () => {
+  test('triggerMode accepts only its three values', () => {
     expect(resolveConfig({ triggerMode: 'prefix' }).config.triggerMode).toBe('prefix')
     expect(resolveConfig({ triggerMode: 'always' }).config.triggerMode).toBe('always')
+    expect(resolveConfig({ triggerMode: 'smart' }).config.triggerMode).toBe('smart')
     for (const value of ['sometimes', '', 1, null]) {
       const { config, warnings } = resolveConfig({ triggerMode: value })
       expect(config.triggerMode).toBe(DEFAULT_CONFIG.triggerMode)
-      expect(warnings).toHaveLength(1)
+      expect(warnings).toEqual([
+        '"triggerMode" must be "always", "prefix" or "smart"; using default "always"',
+      ])
     }
   })
 
@@ -269,6 +272,12 @@ describe('resolveConfig — prefixes', () => {
     const always = resolveConfig({ triggerMode: 'always', triggerPrefix: '', rawPrefix: '>> ' })
     expect(always.config.triggerPrefix).toBe('')
     expect(always.warnings).toEqual([])
+  })
+
+  test('an empty triggerPrefix stays in smart mode (it only disables the prefix shortcut)', () => {
+    const smart = resolveConfig({ triggerMode: 'smart', triggerPrefix: '', rawPrefix: '>> ' })
+    expect(smart.config.triggerPrefix).toBe('')
+    expect(smart.warnings).toEqual([])
   })
 })
 

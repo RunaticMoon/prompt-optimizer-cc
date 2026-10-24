@@ -32,18 +32,19 @@
     "triggerMode": {
       "type": "string",
       "title": "Trigger mode",
-      "description": "\"always\" improves every eligible prompt; \"prefix\" improves only prompts that start with the trigger prefix.",
+      "description": "\"always\" improves every eligible prompt; \"prefix\" improves only prompts that start with the trigger prefix; \"smart\" also lets a few exact approval replies (응, 계속, 진행해) reach the main session untouched.",
       "required": false,
       "default": "always",
       "options": [
         "always",
-        "prefix"
+        "prefix",
+        "smart"
       ]
     },
     "triggerPrefix": {
       "type": "string",
       "title": "Trigger prefix",
-      "description": "Prefix that starts an optimization when trigger mode is \"prefix\".",
+      "description": "Prefix that starts an optimization when trigger mode is \"prefix\"; \"smart\" recognizes it the same way before its own rules.",
       "required": false,
       "default": "?? "
     },
