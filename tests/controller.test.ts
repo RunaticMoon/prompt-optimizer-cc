@@ -4601,6 +4601,67 @@ describe('restore — observed edits and ownership (#28)', () => {
     expect(h.calls.fill).toBe(1)
   })
 
+  test('a foreign fill whose whole-box read lands after the conflict publishes once', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    // Another plugin enters while our fill is still in flight; its full read is
+    // not back yet, so no snapshot is known when the conflict is reported.
+    const foreign = h.controller.beginForeignFill()
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+
+    expect(await accepting).toEqual({ ok: false, reason: CONFLICT })
+    expect(logs).toContain(SHORT)
+    expect(logs.some(line => line.startsWith('복원 중 감지한 입력입니다'))).toBe(false)
+
+    // The whole box resolves after the refusal. It is the only copy of what the
+    // person typed, so it must be published exactly once.
+    h.controller.finishForeignFill(foreign, '외부 플러그인이 읽은 전체 상자', h.ports)
+    expect(logs.filter(line => line.startsWith('복원 중 감지한 입력입니다'))).toEqual([
+      `${RECOVERY}외부 플러그인이 읽은 전체 상자`,
+    ])
+    expect(h.calls.fill).toBe(1)
+  })
+
+  test('an edit settling after the post-fill guard but before retention is still published', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness()
+    // Return the raw fill promise so the edit's settle callback queues behind
+    // delivery's post-fill check and ahead of restore()'s retain.
+    h.ports.prompt.fill = input => {
+      h.calls.fill += 1
+      h.fills.push(input)
+      return pending.promise
+    }
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '새로 작성한 요청' })
+    void pending.promise.then(() => {
+      h.controller.finishPromptEdit(token, '새로 작성한 요청', h.ports)
+    })
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+
+    // At the guard the edit was still pending, so the result carried no text;
+    // by the time restore() decides, its completion holds the whole box.
+    expect(await accepting).toEqual({ ok: false, reason: CONFLICT })
+    expect(logs).toContain(SHORT)
+    expect(logs.filter(line => line.startsWith('복원 중 감지한 입력입니다'))).toEqual([
+      `${RECOVERY}새로 작성한 요청`,
+    ])
+    expect(h.calls.fill).toBe(1)
+  })
+
   test('an observed deletion is recovered as an empty captured text', async () => {
     const h = await reviewing()
     const logs = captureLogs(h)
@@ -4641,6 +4702,27 @@ describe('restore — observed edits and ownership (#28)', () => {
     expect(h.calls.fill).toBe(1)
   })
 
+  test('a session change during a held pane close returns stale-owner without a fill', async () => {
+    const h = await reviewing()
+    const closing = deferred<void>()
+    let closeStarted = false
+    h.ports.ui.close = () => {
+      closeStarted = true
+      return closing.promise
+    }
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => closeStarted)
+    h.controller.onSessionStart('sess-2')
+    closing.resolve()
+
+    expect(await accepting).toEqual({ ok: false, reason: '' })
+    expect(h.calls.fill).toBe(0)
+    expect(h.controller.getState().workflow).toBeNull()
+    // The stale restore issues no permit into the new session.
+    expect(h.controller.getState().bypass).toBeNull()
+  })
+
   test('a replacement run in the same session stales the old restore', async () => {
     const pending = deferred<PromptFilled>()
     const h = harness({ fill: () => pending.promise })
@@ -4657,6 +4739,49 @@ describe('restore — observed edits and ownership (#28)', () => {
     expect(await accepting).toEqual({ ok: false, reason: '' })
     expect(h.controller.getState().workflow?.original).toBe('새 원문')
     await h.flush()
+  })
+
+  test('a replacement run during the held read stales the old restore without a fill', async () => {
+    const h = await reviewing()
+    const read = heldRead(h)
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('새 원문'), 'pane')
+    read.resolve('')
+
+    expect(await accepting).toEqual({ ok: false, reason: '' })
+    expect(h.calls.fill).toBe(0)
+    expect(h.controller.getState().workflow?.original).toBe('새 원문')
+    expect(h.controller.getState().bypass).toBeNull()
+  })
+
+  test('a raw-mode edit consumed during the restore still refuses and publishes its box', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const cancelling = h.controller.cancel(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    // Cancel already dropped the workflow, so the raw marker can arm while the
+    // original is being placed. This edit is consumed instead of chained.
+    const facts = edit({ text: '본문', cursor: 0, inputText: '>> ' })
+    const token = h.controller.observeEditInput(facts)
+    const consumed = h.controller.onComposerEdit(facts)
+    expect(consumed).toEqual({ text: '본문', cursor: 0 })
+    if (consumed === null) throw new Error('expected a consumed raw-mode edit')
+    h.controller.finishPromptEdit(token, consumed.text, h.ports)
+
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+    const cancelled = await cancelling
+    expect(cancelled.ok).toBe(false)
+    expect(cancelled.ok === false ? cancelled.reason : '').toContain(CONFLICT)
+    expect(h.calls.fill).toBe(1)
+    expect(logs).toContain(SHORT)
+    expect(logs).toContain(`${RECOVERY}본문`)
   })
 
   test('an unchanged autocomplete display does not invalidate the restore', async () => {

@@ -822,8 +822,12 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // again. An empty captured string is a real deletion, not "unknown".
       revokeOperationTicket(operation)
       logQuietly(ports, RESTORE_CONFLICT_NOTICE)
-      if (result.recoveryText !== undefined) {
-        logQuietly(ports, `${RESTORE_RECOVERY_PREFIX}${result.recoveryText}`)
+      // The guard may have refused before a pending edit or foreign-fill read
+      // settled, so ask the operation again: a complete snapshot that landed
+      // just after the refusal is still the person's only copy.
+      const recovery = result.recoveryText ?? operation.recoveryText()
+      if (recovery !== undefined) {
+        logQuietly(ports, `${RESTORE_RECOVERY_PREFIX}${recovery}`)
       }
       // A pending edit token may still produce the exact box text; keep this
       // operation until it settles. Never await a possibly hung edit chain.

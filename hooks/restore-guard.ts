@@ -17,6 +17,11 @@
  * - `revision` is the monotonic observed-state counter. It never resets, so a
  *   small value is never reused after a session change, and a restore refuses
  *   on any change even if the box's text later returns to its old value.
+ *
+ * A pending token is deliberately not tied to one restore operation: an edit
+ * that began before a newer restore is still a real external observation, so
+ * settling it invalidates that restore conservatively. Only a session or
+ * workflow change clears pending tokens.
  */
 
 import type { BypassTicket, RestoreCheck, RestoreGuard } from './contracts'
@@ -33,7 +38,7 @@ export interface RestoreOperation extends RestoreGuard {
 
 /** What settling one observation token produced. */
 export interface SettleResult {
-  /** False for a token from an older epoch, or one already settled. */
+  /** False for a token cleared by a session/workflow change, or already settled. */
   accepted: boolean
   /** Captured text a retained, already-conflicted operation was waiting for. */
   lateText?: string
@@ -54,7 +59,8 @@ export interface RestoreTracker {
   /**
    * Settles one token. `text` is the exact complete box result when known;
    * `undefined` still invalidates the observed revision but claims no snapshot.
-   * A token from an older epoch is refused, so its completion changes nothing.
+   * A token cleared by `invalidate` (session/workflow change) or settled twice
+   * is refused, so its completion changes nothing.
    */
   settle(token: number | undefined, text: string | undefined): SettleResult
   /** Notes one autocomplete display; an unchanged repeat changes nothing. */
@@ -68,7 +74,6 @@ export interface RestoreTracker {
 }
 
 interface Token {
-  epoch: number
   kind: 'edit' | 'fill'
 }
 
@@ -130,7 +135,7 @@ export function createRestoreTracker(): RestoreTracker {
 
   function beginEdit(): number {
     nextToken += 1
-    pending.set(nextToken, { epoch, kind: 'edit' })
+    pending.set(nextToken, { kind: 'edit' })
     return nextToken
   }
 
@@ -139,7 +144,7 @@ export function createRestoreTracker(): RestoreTracker {
     // over a box another plugin is already rewriting.
     revision += 1
     nextToken += 1
-    pending.set(nextToken, { epoch, kind: 'fill' })
+    pending.set(nextToken, { kind: 'fill' })
     return nextToken
   }
 
@@ -158,9 +163,10 @@ export function createRestoreTracker(): RestoreTracker {
     }
 
     if (current === null || !retained) return { accepted: true }
-    // A complete edit result (or an untracked caller observation) is the
-    // snapshot the person's edit produced; a fill fragment never is.
-    const late = entry?.kind === 'fill' ? undefined : text
+    // Defined text is always a complete box snapshot: an edit's full result, a
+    // whole-box read after a foreign fill, or an untracked caller observation.
+    // Fill fragments are passed as `undefined`, so they are never published.
+    const late = text
     if (pending.size === 0) end(current)
     return late === undefined ? { accepted: true } : { accepted: true, lateText: late }
   }

@@ -215,7 +215,7 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 `prompt.fill` 직전(사이에 await 없음)·fill 직후·fallback read 뒤에 검사합니다
 (`hooks/restore-guard.ts`).
 
-- `prompt.edit` 훅은 진입 시(첫 await 전) epoch를 담은 토큰을 만들고, 완료 시
+- `prompt.edit` 훅은 진입 시(첫 await 전) in-flight 토큰을 만들고, 완료 시
   정확한 전체 입력창 텍스트로 정산합니다(빈 문자열 포함). 예외/불명 완료는
   관찰 revision만 올리고 스냅샷을 주장하지 않습니다. 이전 세션의 토큰 정산은
   새 세션의 revision·초안·bypass·알림·복구 텍스트를 바꾸지 않습니다.
