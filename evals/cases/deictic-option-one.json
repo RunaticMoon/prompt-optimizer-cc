@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "deictic-option-one",
+  "split": "development",
+  "tags": ["ko", "multi-round", "deictic", "cart"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the numeric/deictic answer matrix in issue #37; synthetic cart schema only."
+  },
+  "original": "장바구니 할인 계산을 고쳐줘.",
+  "context": {
+    "text": "# src/cart/discount.ts\n1: // 장바구니 항목 합계에 할인을 적용한다\n2: export function applyCartDiscount(items: Item[], coupon: Coupon | null) {}\n\n# src/cart/types.ts\n1: export interface Coupon { kind: 'rate' | 'fixed'; amount: number }\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 2,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [
+    {
+      "text": "1번",
+      "when": { "questionIncludes": "할인", "option1Includes": "정률" }
+    }
+  ],
+  "constraints": [
+    {
+      "id": "honor-option-one",
+      "kind": "mustPreserve",
+      "description": "Feed the user's 1번 answer as the selected rate-discount option, not as a new invented choice.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-fixed-discount",
+      "kind": "mustNotInfer",
+      "description": "Do not silently switch to the fixed discount option.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-rate-discount",
+      "kind": "mustInclude",
+      "description": "Keep the rate discount applied to the cart item total.",
+      "severity": "major",
+      "literals": ["정률", "할인"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "uses-rate-discount",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "정률"
+    },
+    {
+      "id": "no-fixed-discount",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "정액"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "장바구니 할인 계산을 고쳐줘. 할인 기준은 아직 정해지지 않았다.",
+      "message": "할인 계산 기준을 확인합니다.",
+      "question": "할인 계산의 기준을 무엇으로 할까요?",
+      "options": [
+        "정률 할인을 항목 합계에 적용",
+        "정액 할인을 항목별로 적용",
+        "쿠폰 할인만 적용"
+      ]
+    },
+    {
+      "draft": "장바구니 할인 계산을 정률 할인 기준으로 고쳐줘. 정률 할인을 항목 합계에 적용하고, 할인 전후 금액과 경계 사례를 완료 기준에 포함해줘.",
+      "message": "1번 선택을 정률 할인 기준으로 반영했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

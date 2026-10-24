@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/RunaticMoon/prompt-optimizer-cc/evals/rubric/review-schema.json",
+  "title": "Prompt optimizer semantic review record v1",
+  "description": "Shape of a human semantic review attached to one case repeat. The runner checks reviewVersion, caseId, caseHash, repeat, each review's criterionId/verdict, that quote appears verbatim in the repeat's round rawText, that criterion items are not duplicated, and that constraintId (constraint-omission only) names a constraint of the case; it does not execute this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reviewVersion",
+    "caseId",
+    "caseHash",
+    "repeat",
+    "reviewerId",
+    "blindLabel",
+    "reviewedAt",
+    "reviews"
+  ],
+  "properties": {
+    "reviewVersion": { "const": 1 },
+    "caseId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "caseHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "repeat": { "type": "integer", "minimum": 1 },
+    "reviewerId": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "blindLabel": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "reviewedAt": { "type": "string", "format": "date-time" },
+    "reviews": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/review" }
+    },
+    "notes": { "type": "string", "maxLength": 2000 }
+  },
+  "$defs": {
+    "verdict": { "enum": ["pass", "fail", "not-applicable"] },
+    "criterionId": {
+      "enum": [
+        "constraint-omission",
+        "scope-addition",
+        "unnecessary-question",
+        "evidence-grounding",
+        "intent-preservation",
+        "draft-usefulness",
+        "open-decisions",
+        "language-literal-fidelity",
+        "rounds-tokens-latency"
+      ]
+    },
+    "quote": { "type": "string", "maxLength": 2000 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "secondOpinion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewerId", "verdict", "quote", "reason"],
+      "properties": {
+        "reviewerId": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "quote": { "$ref": "#/$defs/quote" },
+        "reason": { "$ref": "#/$defs/reason" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criterionId", "verdict", "quote", "reason"],
+      "properties": {
+        "criterionId": { "$ref": "#/$defs/criterionId" },
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "quote": { "$ref": "#/$defs/quote" },
+        "reason": { "$ref": "#/$defs/reason" },
+        "requiredCondition": { "type": "string", "maxLength": 1000 },
+        "constraintId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Required context for constraint-omission items reviewed per constraint; must match a constraints[].id of the case."
+        },
+        "disagreement": { "$ref": "#/$defs/secondOpinion" },
+        "adjudication": { "$ref": "#/$defs/secondOpinion" }
+      }
+    }
+  }
+}

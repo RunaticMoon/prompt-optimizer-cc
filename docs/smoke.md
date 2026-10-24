@@ -350,3 +350,7 @@ forbiddenChanges:    pass | fail — 위반 문장
 - `rename-known-symbol`·`short-wording-cleanup`·`investigate-only`·`english-planning-length`는 불필요한 인터뷰 없이 좁은 초안을 기대한다.
 - 실제 모델이 기대와 다르게 답했다고 해서 자동 테스트를 “통과”로 바꾸지 않는다. 이 표의 결과는 #37 평가 또는 승인된 스모크 기록으로만 남긴다.
 - mock 기반 `npm test`가 보장하는 것은 프롬프트 조립·설정 경로·초안 보존·상한 회귀뿐이다. 실제 질문 수·초안 품질·모델 준수는 이 절차 전까지 미검증이다.
+
+## 6. 저장소 평가 자산
+
+위 2026-10-06 수동 기록과 mock 계약 테스트의 역할은 그대로 유지한다. 새 절차는 저장소의 [`evals/README.md`](../evals/README.md)에 있다. `evals/`는 합성 사례·보류 평가군·사람 심사 기준·명시적 실행기를 보관하며, `node evals/runner/run.mjs --validate --suite development`로 자격 증명 없이 형식을 검증하고 `--mock`으로 파이프라인을 리허설할 수 있다. 실제 모델 실행은 `--live`와 신뢰하는 로컬 어댑터·명시적 모델·호출/라운드 상한을 모두 요구하며, 이 저장소의 `npm test`나 CI는 유료 호출을 시작하지 않는다. 위 기록의 백분율은 새 실행의 baseline이 아니다.

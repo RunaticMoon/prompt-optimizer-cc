@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "id": "english-rename-clear-request",
+  "split": "development",
+  "tags": ["en", "clear-request", "scope"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the English clear-request matrix in issue #37; synthetic file names only."
+  },
+  "original": "Rename parseUser to parseAccount in src/user/parseUser.ts only. Keep the existing tests passing and do not refactor other files.",
+  "context": {
+    "text": "# src/user/parseUser.ts\n1: export function parseUser(raw: string) {}\n\n# tests/user.test.ts\n1: import { parseUser } from '../src/user/parseUser'\n2: test('parses a user', () => {})\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "narrow-file-scope",
+      "kind": "mustPreserve",
+      "description": "Keep the rename inside src/user/parseUser.ts only; do not refactor or rename usages in other files.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-tests-passing",
+      "kind": "mustInclude",
+      "description": "Keep the existing tests passing as a completion condition.",
+      "severity": "major",
+      "literals": ["tests"]
+    },
+    {
+      "id": "no-extra-refactor",
+      "kind": "mustNotInfer",
+      "description": "Do not add unrelated refactoring, documentation or test rewrites.",
+      "severity": "major"
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-new-name",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "parseAccount"
+    },
+    {
+      "id": "keeps-target-file",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "src/user/parseUser.ts"
+    },
+    {
+      "id": "keeps-tests",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "tests"
+    },
+    {
+      "id": "no-wide-rename",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "rename every"
+    },
+    {
+      "id": "no-unnecessary-question",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "In src/user/parseUser.ts only, rename parseUser to parseAccount. Keep the existing tests passing and do not refactor or rename usages in other files.",
+      "message": "이름 변경 범위를 해당 파일로 제한했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

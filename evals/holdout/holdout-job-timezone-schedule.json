@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "holdout-job-timezone-schedule",
+  "split": "holdout",
+  "tags": ["en", "holdout", "scheduler", "timezone"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Holdout domain authored for issue #37; scheduler code and schedule are synthetic. Replaces holdout-export-report-formatting so the holdout is not adjacent to the historical docs/smoke.md CSV tuning scenario; no evaluated result existed for the replaced case."
+  },
+  "original": "Schedule the nightly aggregation job to run at 09:00 Asia/Seoul regardless of the server's timezone. Keep the job's computation exactly as it is, and do not touch the server-wide timezone.",
+  "context": {
+    "text": "# src/jobs/nightly.ts\n1: import { cron } from './scheduler'\n2: // Runs at 03:00 server time today; the server itself runs in UTC.\n3: cron('0 3 * * *', runNightlyAggregation)\n4: export function runNightlyAggregation() {\n5:   return aggregateDailyOrderTotals()\n6: }\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "keep-computation",
+      "kind": "mustPreserve",
+      "description": "The job must keep computing the same daily order totals.",
+      "severity": "critical"
+    },
+    {
+      "id": "fixed-seoul-time",
+      "kind": "mustInclude",
+      "description": "The schedule must anchor the run to 09:00 in Asia/Seoul.",
+      "severity": "major",
+      "literals": ["Asia/Seoul", "09:00"]
+    },
+    {
+      "id": "no-server-timezone-change",
+      "kind": "mustNotInfer",
+      "description": "Do not change the server-wide timezone, including writing process.env.TZ.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-extra-rollups",
+      "kind": "mustNotInfer",
+      "description": "Do not add weekly or monthly rollups to the nightly job.",
+      "severity": "major"
+    }
+  ],
+  "rules": [
+    {
+      "id": "anchors-seoul",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "Asia/Seoul"
+    },
+    {
+      "id": "anchors-nine",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "09:00"
+    },
+    {
+      "id": "excludes-tz-mutation",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "process.env.TZ"
+    },
+    {
+      "id": "excludes-extra-rollups",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "weekly"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "Schedule the nightly aggregation job at 09:00 Asia/Seoul by giving the scheduler an explicit IANA zone, while the server keeps its own timezone. The job still calls aggregateDailyOrderTotals() and nothing else changes.",
+      "message": "실행 시각만 Asia/Seoul 기준 09:00으로 고정하고 계산과 서버 시간대는 그대로 두었습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

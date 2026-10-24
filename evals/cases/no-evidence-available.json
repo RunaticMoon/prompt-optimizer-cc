@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "no-evidence-available",
+  "split": "development",
+  "tags": ["ko", "no-evidence", "uncertainty"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the missing-evidence matrix in issue #37; the empty context is intentional."
+  },
+  "original": "레거시 결제 모듈의 인증 흐름을 정리해줘.",
+  "context": {
+    "text": ""
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "mark-missing-evidence",
+      "kind": "mustPreserve",
+      "description": "Mark the evidence as unavailable instead of pretending the repository was inspected.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-invented-files",
+      "kind": "mustNotInfer",
+      "description": "Do not name files, functions or a confirmed authentication design that the empty context cannot support.",
+      "severity": "critical"
+    },
+    {
+      "id": "leave-verification-targets",
+      "kind": "mustInclude",
+      "description": "Leave concrete targets for the execution agent to verify instead of asking the user to locate files.",
+      "severity": "major",
+      "literals": ["근거", "확인"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "marks-evidence",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "근거"
+    },
+    {
+      "id": "leaves-verification",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "확인"
+    },
+    {
+      "id": "no-invented-path",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "src/"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "레거시 결제 모듈의 인증 흐름을 정리해줘. 다만 제공된 근거가 없어 실제 파일·함수·원인은 확인하지 못했으므로, 실행 단계에서 인증 진입점과 토큰 검증 위치를 확인할 대상으로 남기고 확인되지 않은 사실을 단정하지 마.",
+      "message": "근거 부족을 표시하고 확인 대상을 남겼습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

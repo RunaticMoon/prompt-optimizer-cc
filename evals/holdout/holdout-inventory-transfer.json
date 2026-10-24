@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "holdout-inventory-transfer",
+  "split": "holdout",
+  "tags": ["ko", "holdout", "inventory", "api"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Holdout domain authored for issue #37; warehouse names and request ids are synthetic."
+  },
+  "original": "창고 간 재고 이동 요청 API를 추가해줘. 같은 요청이 두 번 와도 재고가 두 번 빠지지 않게 해줘.",
+  "context": {
+    "text": "# src/inventory/move.ts\n1: // 재고를 다른 창고로 이동한다\n2: export async function moveStock(from: string, to: string, sku: string, qty: number) {}\n\n# docs/idempotency.md\n1: - 요청 헤더 Idempotency-Key로 중복 요청을 구분한다.\n2: - 같은 키의 재요청은 최초 결과를 반환한다.\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "preserve-idempotency",
+      "kind": "mustPreserve",
+      "description": "Keep the idempotency requirement: a repeated request must not deduct stock twice.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-invented-storage",
+      "kind": "mustNotInfer",
+      "description": "Do not invent a new idempotency store, table or endpoint path beyond the supplied repository evidence.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-transfer-api",
+      "kind": "mustInclude",
+      "description": "Keep the warehouse-to-warehouse stock movement API as the deliverable.",
+      "severity": "major",
+      "literals": ["재고 이동", "Idempotency-Key"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-transfer",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "재고 이동"
+    },
+    {
+      "id": "keeps-idempotency-key",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "Idempotency-Key"
+    },
+    {
+      "id": "no-double-deduction",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "두 번 차감해도"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "창고 간 재고 이동 요청 API를 추가해줘. Idempotency-Key 헤더로 같은 요청을 구분하고, 같은 키의 재요청에는 최초 결과를 반환해 재고가 두 번 빠지지 않게 해줘. 기존 moveStock 흐름을 재사용하고 근거에 없는 저장소나 경로는 만들지 마.",
+      "message": "재고 이동 API와 멱등성 요구사항을 함께 보존했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

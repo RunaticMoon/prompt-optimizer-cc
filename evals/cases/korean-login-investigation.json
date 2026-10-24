@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "korean-login-investigation",
+  "split": "development",
+  "tags": ["ko", "investigation", "evidence", "login"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the Korean-only retrieval matrix in issue #37; no user session or repository data was used."
+  },
+  "original": "로그인 오류가 나는데 원인만 조사해줘. 코드는 수정하지 마.",
+  "context": {
+    "text": "# src/auth/login.ts\n1: // 로그인 자격 증명을 검증한다\n2: export async function login(id: string, pw: string) {\n3:   return validateCredentials(id, pw)\n4: }\n5: // 세션 만료 시 재로그인을 요청한다\n6: export function handleSessionExpired() {}\n\n# src/auth/session.ts\n1: // 세션 만료 시간을 확인한다\n2: export function isExpired(session: Session) {}\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "investigate-only",
+      "kind": "mustPreserve",
+      "description": "Investigate the login failure only; do not turn the request into a code change.",
+      "severity": "critical"
+    },
+    {
+      "id": "separate-evidence",
+      "kind": "mustNotInfer",
+      "description": "Do not state a confirmed root cause that the supplied login/session evidence does not establish.",
+      "severity": "critical"
+    },
+    {
+      "id": "login-and-session",
+      "kind": "mustInclude",
+      "description": "Keep both the login credential check and the expired-session re-login path in scope.",
+      "severity": "major",
+      "literals": ["로그인", "세션"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-login",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "로그인"
+    },
+    {
+      "id": "keeps-session",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "세션"
+    },
+    {
+      "id": "no-modification",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "수정해"
+    },
+    {
+      "id": "no-unnecessary-question",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "로그인 오류의 원인만 조사하고 코드는 수정하지 마. 로그인 자격 증명 검증과 세션 만료 후 재로그인 흐름을 확인하고, 확인된 근거와 아직 확인되지 않은 원인을 구분해 보고해줘.",
+      "message": "조사 범위와 수정 금지를 보존했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

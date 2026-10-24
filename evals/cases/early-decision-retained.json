@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "early-decision-retained",
+  "split": "development",
+  "tags": ["ko", "multi-round", "long-history", "decision-retention"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the long-history decision-retention matrix in issue #37; synthetic environment names only."
+  },
+  "original": "결제 실패 로그를 조사해줘.",
+  "context": {
+    "text": "# logs/payment.log\n1: 2026-10-01T09:00:00Z payment timeout provider=pg-a\n2: 2026-10-01T09:01:12Z payment rejected code=E42 provider=pg-a\n\n# src/payment/retry.ts\n1: // 결제 실패 후 재시도 횟수를 계산한다\n2: export function nextRetry(attempt: number) {}\n"
+  },
+  "initialDialogue": [
+    {
+      "role": "optimizer",
+      "text": "어느 환경의 결제 실패 로그를 우선 조사할까요?"
+    },
+    {
+      "role": "user",
+      "text": "운영 환경을 우선 조사해줘."
+    }
+  ],
+  "initialDraft": "운영 환경의 결제 실패 로그를 조사해줘.",
+  "roundsCompleted": 1,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 2,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "retain-environment",
+      "kind": "mustPreserve",
+      "description": "Keep the already-agreed operations environment instead of asking again or switching environments.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-dev-environment",
+      "kind": "mustNotInfer",
+      "description": "Do not replace the agreed operations environment with the development environment.",
+      "severity": "major"
+    },
+    {
+      "id": "keep-log-investigation",
+      "kind": "mustInclude",
+      "description": "Keep the payment failure log investigation and the evidence distinction.",
+      "severity": "major",
+      "literals": ["운영", "로그"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-operations",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "운영"
+    },
+    {
+      "id": "no-dev-environment",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "개발 환경"
+    },
+    {
+      "id": "does-not-reask",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "운영 환경의 결제 실패 로그를 우선 조사해줘. 이미 합의한 운영 환경 기준을 유지하고, 로그에서 확인할 실패 유형과 아직 확인되지 않은 원인을 구분해 보고해줘.",
+      "message": "합의한 운영 환경 기준을 유지했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

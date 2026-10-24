@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "id": "later-correction-supersedes",
+  "split": "development",
+  "tags": ["en", "multi-round", "long-history", "correction"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the binding-correction matrix in issue #37; synthetic API names only."
+  },
+  "original": "Refine the public API response requirements.",
+  "context": {
+    "text": "# docs/api-contract.md\n1: - Public clients consume JSON over HTTP.\n2: - The response envelope currently uses data and errors.\n3: - No GraphQL endpoint exists yet.\n"
+  },
+  "initialDialogue": [
+    {
+      "role": "optimizer",
+      "text": "Which response format should we keep?"
+    },
+    {
+      "role": "user",
+      "text": "Keep the REST response format."
+    },
+    {
+      "role": "optimizer",
+      "text": "I kept the REST format in the draft."
+    },
+    {
+      "role": "user",
+      "text": "Correction: drop REST and move the public API to GraphQL."
+    }
+  ],
+  "initialDraft": "Refine the public API response requirements while keeping the REST response format.",
+  "roundsCompleted": 2,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 3,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "latest-correction-wins",
+      "kind": "mustPreserve",
+      "description": "The later GraphQL correction supersedes the earlier REST decision.",
+      "severity": "critical"
+    },
+    {
+      "id": "do-not-restore-rest",
+      "kind": "mustNotInfer",
+      "description": "Do not restore the superseded REST decision or treat both formats as agreed.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-graphql",
+      "kind": "mustInclude",
+      "description": "Keep GraphQL as the current public API response direction.",
+      "severity": "major",
+      "literals": ["GraphQL"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "uses-graphql",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "GraphQL"
+    },
+    {
+      "id": "drops-rest-keep",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "REST를 유지"
+    },
+    {
+      "id": "drops-rest-format-keep",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "keeping the REST response format"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "Refine the public API response requirements around GraphQL. The earlier decision to keep REST was corrected by the user, so use the latest GraphQL direction and leave the migration scope and compatibility checks as explicit open items.",
+      "message": "이전 REST 결정을 최신 GraphQL 정정으로 대체했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}
