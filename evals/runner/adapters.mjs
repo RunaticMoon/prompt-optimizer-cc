@@ -112,8 +112,9 @@ export async function callAdapter(adapter, request, { signal } = {}) {
 
 /**
  * Normalizes a live usage block. A missing block is `{known:false}` with null
- * counts, never a false zero. A partially supplied block fills missing counts
- * with 0 only when at least one count is a finite number.
+ * counts, never a false zero. A partially supplied block is also
+ * `{known:false}`: zero-filling the missing counts would dress unknown values
+ * up as measured zeros.
  */
 export function normalizeUsage(raw) {
   const source = raw?.counts ?? raw
@@ -126,12 +127,12 @@ export function normalizeUsage(raw) {
     'cache_read_input_tokens',
     'cache_creation_input_tokens',
   ]
-  if (!keys.some(key => typeof source[key] === 'number' && Number.isFinite(source[key]))) {
-    return { known: false, counts: null }
-  }
   const counts = {}
   for (const key of keys) {
-    counts[key] = typeof source[key] === 'number' && Number.isFinite(source[key]) ? source[key] : 0
+    if (typeof source[key] !== 'number' || !Number.isFinite(source[key])) {
+      return { known: false, counts: null }
+    }
+    counts[key] = source[key]
   }
   return { known: true, counts }
 }

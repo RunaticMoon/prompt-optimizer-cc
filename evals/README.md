@@ -35,7 +35,7 @@ node evals/runner/run.mjs --mock --suite holdout --repeats 1 --out /tmp/popt-eva
 node evals/runner/compare.mjs --baseline /tmp/base.json --candidate /tmp/change.json --out /tmp/comparison.md
 ```
 
-`--out`은 **배타적 생성**입니다. 이미 있는 파일을 덮어쓰지 않으며, 첫 어댑터 호출·첫 실행 전에 경로를 선점합니다. 그래서 live 실행이 호출을 소비한 뒤에 출력 경로 충돌로 결과를 버리는 일이 없고, 실행이 끝까지 가지 못하면 선점 파일은 다시 지워집니다. 결과 JSON은 상세 trace를 담습니다. `--out`이 없으면 표준출력에는 집계 요약만 나옵니다.
+`--out`은 **배타적 생성**입니다. 이미 있는 파일을 덮어쓰지 않으며, 첫 어댑터 호출·첫 실행 전에 경로를 선점합니다. 그래서 live 실행이 호출을 소비한 뒤에 출력 경로 충돌로 결과를 버리는 일이 없고, 실행이 끝까지 가지 못하면 선점 파일은 다시 지워집니다. 다만 SIGINT처럼 예외를 던지지 않고 프로세스를 끝내는 신호에는 이 정리가 실행되지 않으므로 선점 파일이 남을 수 있습니다. 결과 JSON은 상세 trace를 담습니다. `--out`이 없으면 표준출력에는 집계 요약만 나옵니다.
 
 ### 실제 모델 실행 (설계만, 이 저장소에서 실행하지 않음)
 
@@ -117,17 +117,24 @@ mock 보고서에는 항상 **pipeline/rule rehearsal only — no semantic-quali
 - `reviewVersion: 1`, `caseId`/`caseHash`/`repeat` 일치, `reviewerId`·`blindLabel`·`reviewedAt` 존재
 - `quote`가 이 반복의 어느 라운드 `rawText`에 **그대로** 나타나는지 (JSON 이스케이프가 섞인 문자열이 아닌 평문 인용)
 - 같은 기준(`criterionId` + `constraint-omission`의 `constraintId`) 항목의 중복 거부 — 비율 분모가 심사 항목 수로 부풀지 않도록
-- `constraintId`가 `constraint-omission`에서만 쓰이고, `constraints`를 넘겼다면 그 사례의 제약 id 중 하나인지
+- `constraintId`는 `constraint-omission`에서만 쓰이며, 이런 항목이 하나라도 있으면 사례의 `constraints` 배열을 반드시 넘겨야 하고 그 값은 사례 제약 id 중 하나여야 한다 (배열을 넘기지 않으면 병합이 거부된다)
 
-호출 예시 (임시 스크립트나 `node --input-type=module -e`로 실행):
+호출 예시. 저장소 루트에서 실행합니다 — `-e` 실행에서 상대 import는 저장소 루트를 기준으로 풀립니다. `-e` 실행의 `process.argv`는 `[node, ...파일 인자]`이고 스크립트 파일 실행은 `[node, 스크립트, ...파일 인자]`이므로, 아래 예시는 파일 인자를 뒤에서 두 개로 읽어 어느 쪽이든 동작합니다:
+
+```bash
+# 스니펫에 인용 문자가 섞여 있으므로 파일로 저장해 넘기는 편이 안전합니다
+node --input-type=module -e "$(cat /tmp/review-merge.mjs)" /tmp/popt-eval-holdout.json /tmp/review-1.json
+```
 
 ```js
+// 위 명령에 들어가는 스니펫. 임시 스크립트 파일로 실행할 때는
+// 이 import를 스크립트 위치 기준 경로로 고칩니다.
 import { readFile, writeFile } from 'node:fs/promises'
 import { mergeHumanReview } from './evals/runner/judge.mjs'
 
-const resultPath = process.argv[2]
+const [resultPath, reviewPath] = process.argv.slice(-2)
 const result = JSON.parse(await readFile(resultPath, 'utf8'))
-const review = JSON.parse(await readFile(process.argv[3], 'utf8'))
+const review = JSON.parse(await readFile(reviewPath, 'utf8'))
 const caseRecord = result.cases.find(item => item.caseId === review.caseId)
 const repeat = caseRecord?.repeats.find(item => item.repeat === review.repeat)
 if (caseRecord === undefined || repeat === undefined) throw new Error('심사 대상 반복이 결과에 없습니다')

@@ -253,8 +253,8 @@ export function gradeEpisode({ caseId = null, replies, rules }) {
  *
  * A quote must appear verbatim in one of the repeat's round `rawText` values,
  * review items are deduplicated by criterion (plus `constraintId` for
- * `constraint-omission`), and a `constraintId` must name a constraint of the
- * case when the caller supplies them.
+ * `constraint-omission`), and an item carrying a `constraintId` requires the
+ * case's constraints array and must name one of its constraints.
  */
 export function mergeHumanReview(repeat, review, { caseId, caseHash, constraints = null } = {}) {
   if (!isPlainObject(repeat)) fail('repeat must be an object')
@@ -311,7 +311,10 @@ export function mergeHumanReview(repeat, review, { caseId, caseHash, constraints
       if (typeof item.constraintId !== 'string' || item.constraintId.trim() === '') {
         fail(`human review reviews[${index}].constraintId must be a nonempty string`)
       }
-      if (caseConstraintIds.size > 0 && !caseConstraintIds.has(item.constraintId)) {
+      if (!Array.isArray(constraints) || constraints.length === 0) {
+        fail(`human review reviews[${index}].constraintId requires the case constraints array`)
+      }
+      if (!caseConstraintIds.has(item.constraintId)) {
         fail(`human review reviews[${index}].constraintId does not name a constraint of this case`)
       }
     }

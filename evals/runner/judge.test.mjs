@@ -329,6 +329,31 @@ test('mergeHumanReview validates constraintId against the case constraints', () 
   assert.equal(merged.humanReview.reviews[0].constraintId, 'keep-login')
 })
 
+test('mergeHumanReview fails closed when a constraintId has no constraints array', () => {
+  const withConstraint = review({
+    reviews: [
+      {
+        criterionId: 'constraint-omission',
+        constraintId: 'keep-login',
+        verdict: 'pass',
+        quote: '로그인 오류를 조사해줘.',
+        reason: 'r',
+      },
+    ],
+  })
+  assert.throws(
+    () => mergeHumanReview(repeatWithRounds(), withConstraint, {}),
+    /constraintId requires the case constraints array/,
+  )
+  assert.throws(
+    () => mergeHumanReview(repeatWithRounds(), withConstraint, { constraints: [] }),
+    /constraintId requires the case constraints array/,
+  )
+
+  const merged = mergeHumanReview(repeatWithRounds(), withConstraint, { constraints: CASE_CONSTRAINTS })
+  assert.equal(merged.humanReview.reviews[0].constraintId, 'keep-login')
+})
+
 test('review criteria are the documented set', () => {
   assert.deepEqual(REVIEW_CRITERIA, [
     'constraint-omission',

@@ -232,7 +232,7 @@ test('parse failures count only rounds whose raw text did not parse', () => {
   assert.equal(summary.rates.parseFailureRate, 0.25)
 })
 
-test('escapeMarkdownCell neutralizes tables and HTML from model text', () => {
+test('escapeMarkdownCell escapes HTML, newlines, pipes and backticks in model text', () => {
   const escaped = escapeMarkdownCell('| <script>alert(1)</script> `x`\nsecond | row', 120)
   assert.ok(!escaped.includes('<script>'))
   assert.ok(!escaped.includes('\n'))
