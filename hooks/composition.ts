@@ -16,6 +16,8 @@
  * and pressing Enter right after one can submit with no event at all.
  */
 
+import type { PasteClassification } from './contracts'
+
 /** What the plugin saw build the current composer draft since the box was last empty. */
 export interface Composition {
   /** A key stroke, or a short key-less burst (fast typing), edited the draft. */
@@ -101,8 +103,31 @@ export function noteAutocomplete(c: Composition, text: string): Composition {
 }
 
 /**
+ * Classifies how the draft was built, without changing any decision.
+ *
+ * The order is fixed: a typed draft is the person's own writing first; then a
+ * paste placeholder outranks a key-less long insertion; a draft nothing at all
+ * was observed for (a paste followed by an immediate Enter) reads as pasted;
+ * and any other observed draft — a delete, a move, a plain autocomplete — is
+ * neither typing nor pasting as far as the seen events go. The reason keeps
+ * the boolean's meaning auditable (`/optimize status`); the `pasted` field
+ * decides exactly as {@link isPasteOnly} always has.
+ *
+ * @param c the draft's composition
+ * @returns whether the draft is paste-only, and why
+ */
+export function classifyComposition(c: Composition): PasteClassification {
+  if (c.typed) return { pasted: false, reason: 'typed' }
+  if (c.placeholder) return { pasted: true, reason: 'paste-placeholder' }
+  if (c.pastedChars > 0) return { pasted: true, reason: 'keyless-long-insert' }
+  if (!c.observed) return { pasted: true, reason: 'no-input-events' }
+  return { pasted: false, reason: 'observed-other' }
+}
+
+/**
  * Whether the draft was only pasted, or injected by another app, and never
- * typed in.
+ * typed in. Kept for the existing callers: the same verdict with its reason
+ * comes from {@link classifyComposition}.
  *
  * True when the person typed nothing and either a large key-less insertion was
  * seen, a paste placeholder was seen, or nothing at all was observed (a paste
@@ -114,5 +139,5 @@ export function noteAutocomplete(c: Composition, text: string): Composition {
  * @returns whether the draft is paste-only
  */
 export function isPasteOnly(c: Composition): boolean {
-  return !c.typed && (c.pastedChars > 0 || c.placeholder || !c.observed)
+  return classifyComposition(c).pasted
 }
