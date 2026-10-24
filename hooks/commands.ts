@@ -27,6 +27,7 @@ import type {
   GuidanceStatus,
   OptimizerConfig,
   RuntimeState,
+  SubmissionStatus,
   Workflow,
 } from './contracts'
 import {
@@ -40,6 +41,7 @@ import { formatDecisions } from './decision-view'
 import { undoTarget } from './revisions'
 import { NO_PREVIOUS_NOTICE, formatDraftDiff, formatShow, formatSources } from './review-view'
 import { canStartRound, workflowRoundLimit } from './state'
+import { formatSubmissionStatus } from './submission-status'
 import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
@@ -82,6 +84,13 @@ export interface CommandController {
    * state only: it never calls the model getter or any other port.
    */
   getGuidanceStatus?(): Readonly<GuidanceStatus> | null
+  /**
+   * The last classified composer submission's verdict and its reason, or `null`
+   * before one exists and after a session start/end. Optional so a controller
+   * without the diagnostic still answers `status`. Reads stored state only: it
+   * never calls the model getter or any other port.
+   */
+  getSubmissionStatus?(): Readonly<SubmissionStatus> | null
   /** Starts an explicit optimization; `text` absent means the composer draft. */
   startExplicit(ports: EnginePorts, text: string | undefined, ui: 'pane' | 'composer'): Promise<void>
   /** Continues the dialogue with one supplement. */
@@ -327,16 +336,19 @@ function parseDiffBaseline(rest: string): ParsedCommand {
 
 /**
  * The `/optimize status` body: the effective settings, the active run's stage
- * and rounds, this session's summed usage, and the target model applied to the
- * last request actually sent. Pure, so it is easy to test.
+ * and rounds, this session's summed usage, the target model applied to the
+ * last request actually sent, and the last classified composer submission's
+ * verdict with its reason. Pure, so it is easy to test.
  *
  * `guidance` is the controller's stored last-applied snapshot; `status` reads
- * it directly and never calls the model getter or any other port.
+ * it directly and never calls the model getter or any other port. The same
+ * holds for `submission`, the controller's stored last-submission diagnostic.
  */
 export function formatStatus(
   config: OptimizerConfig,
   state: Readonly<RuntimeState>,
   guidance?: Readonly<GuidanceStatus> | null,
+  submission?: Readonly<SubmissionStatus> | null,
 ): string {
   const lines: string[] = [
     `프롬프트 옵티마이저: ${config.enabled ? '켜짐' : '꺼짐'}`,
@@ -349,6 +361,7 @@ export function formatStatus(
       ? `그대로 보내기: 맨 앞에 "${config.rawPrefix}" 입력(ctrl+u로 해제)`
       : '그대로 보내기: 꺼짐',
     `붙여넣기 그대로 보내기: ${config.pasteBypass ? '켬 (붙여넣기·외부 앱 입력만으로 채운 프롬프트는 다듬지 않음)' : '끔'}`,
+    formatSubmissionStatus(submission),
   ]
   if (state.rawMode !== null) {
     lines.push('옵티마이저 끔 모드: 켜짐 (다음 제출은 그대로 전송)')
@@ -561,6 +574,7 @@ async function dispatch(
           deps.settings.get(),
           deps.controller.getState(),
           deps.controller.getGuidanceStatus?.() ?? null,
+          deps.controller.getSubmissionStatus?.() ?? null,
         ),
       }
     case 'decisions': {

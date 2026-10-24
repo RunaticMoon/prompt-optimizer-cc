@@ -340,13 +340,42 @@ export type PassReason =
   | 'pasted'
 
 /**
+ * How the classifier read the submitted draft's construction
+ * (`hooks/composition.ts`). `history` never comes from the composition itself:
+ * it marks a verdict remembered for a text submitted earlier in this
+ * controller's life, with `previousReason` carrying that original verdict.
+ */
+export type CompositionReason =
+  | 'typed'
+  | 'paste-placeholder'
+  | 'keyless-long-insert'
+  | 'no-input-events'
+  | 'observed-other'
+  | 'history'
+
+/** The composition classifier's verdict for one draft. */
+export interface PasteClassification {
+  /** The draft was only pasted, or injected by another app, and never typed in. */
+  pasted: boolean
+  /** Why the classifier decided as it did. */
+  reason: CompositionReason
+  /** For `history`, the verdict the text got when it was first submitted. */
+  previousReason?: Exclude<CompositionReason, 'history'>
+}
+
+/**
  * What the plugin saw build the submitted draft since the box was last empty
  * (`hooks/composition.ts`). Optional: a caller that saw no edit or autocomplete
- * events for the draft passes nothing and keeps the older rules only.
+ * events for the draft passes nothing and keeps the older rules only. The
+ * `reason` fields are absent from callers that only saw the older boolean.
  */
 export interface SubmissionFacts {
   /** The draft was only pasted, or injected by another app, and never typed in. */
   pasted: boolean
+  /** Why the classifier decided as it did. */
+  reason?: CompositionReason
+  /** For `history`, the verdict the text got when it was first submitted. */
+  previousReason?: Exclude<CompositionReason, 'history'>
 }
 
 /** What the classifier decides for one submission. */
@@ -361,6 +390,23 @@ export type SubmissionDecision =
 
 /** How an interception was requested. */
 export type OptimizeTrigger = 'auto' | 'prefix' | 'command'
+
+/**
+ * The last classified composer submission's diagnostic metadata, as
+ * `/optimize status` shows it (`hooks/controller.ts`). Metadata only: it never
+ * carries the submission text, a ticket or a workflow, so the reason is
+ * discoverable without recording any prompt.
+ */
+export interface SubmissionStatus {
+  /** What the classifier decided for the submission. */
+  kind: SubmissionDecision['kind']
+  /** For `kind: 'pass'`, why the submission went through untouched. */
+  passReason?: PassReason
+  /** For `kind: 'optimize'`, how the interception was requested. */
+  trigger?: OptimizeTrigger
+  /** How the draft was built, as the composition classifier saw it. */
+  composition?: PasteClassification
+}
 
 /** Why a model completion did not yield a usable draft. */
 export type RewriteFailureReason =

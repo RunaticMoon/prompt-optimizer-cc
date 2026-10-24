@@ -22,7 +22,7 @@
 
 import type { PromptSubmitInput, Timer } from 'claude-code'
 
-import { EMPTY_COMPOSITION, isPasteOnly, noteAutocomplete, noteBox, noteEditInput } from './composition'
+import { EMPTY_COMPOSITION, classifyComposition, noteAutocomplete, noteBox, noteEditInput } from './composition'
 import type { Composition } from './composition'
 import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
@@ -50,10 +50,12 @@ import {
   type ModelUsage,
   type OptimizerConfig,
   type OptimizerEvent,
+  type PasteClassification,
   type RewriteResult,
   type RuntimeState,
   type SubmissionDecision,
   type SubmissionFacts,
+  type SubmissionStatus,
   type TransferRefusal,
   type Workflow,
 } from './contracts'
@@ -148,6 +150,13 @@ export interface OptimizerController {
    * it never calls the model getter or any other port.
    */
   getGuidanceStatus(): Readonly<GuidanceStatus> | null
+  /**
+   * The last classified composer submission's verdict and its reason, or
+   * `null` before one exists, after a session start/end, and after a
+   * classification failure. Metadata only: no submission text is ever kept.
+   * Reads stored state only and has no side effects.
+   */
+  getSubmissionStatus(): Readonly<SubmissionStatus> | null
   onSubmit(ports: EnginePorts, e: PromptSubmitInput, ui: 'pane' | 'composer'): Promise<SubmitOutcome>
   startExplicit(ports: EnginePorts, text: string | undefined, ui: 'pane' | 'composer'): Promise<void>
   refine(ports: EnginePorts, instruction: string): Promise<void>
@@ -190,6 +199,8 @@ export interface OptimizerController {
    * pasted, but a prompt recalled from the engine's history also arrives that
    * way and is not a paste; when nothing was observed and `text` was submitted
    * earlier in this controller's life, its remembered verdict is used instead.
+   * The verdict carries its `reason` (`CompositionReason`, `history` for a
+   * remembered one), so the classification stays explainable.
    */
   submissionFacts(text: string): SubmissionFacts
   /** A fill invalidates the last user-edit snapshot, but keeps accepted text. */
@@ -234,6 +245,15 @@ function refusalNotice(reason: TransferRefusal): string {
 }
 
 /**
+ * Whether a decision may replace the last-submission diagnostic. A slash/shell
+ * pass is excluded so `/optimize status` cannot overwrite the fact being
+ * inspected; every other kind records only whitelisted metadata, never text.
+ */
+function isDiagnosed(decision: SubmissionDecision): boolean {
+  return !(decision.kind === 'pass' && (decision.reason === 'slash-command' || decision.reason === 'shell'))
+}
+
+/**
  * Builds a controller bound to one session's runtime.
  *
  * The returned object owns the serializable {@link RuntimeState}, an
@@ -275,15 +295,24 @@ export function createController(deps: ControllerDeps): OptimizerController {
    */
   let composition: Composition = EMPTY_COMPOSITION
   /**
-   * The paste verdict each composer submission's text got in this controller's
-   * life, keyed by `text.trim()` (PSTB-2735, review M1). ↑ history recall
-   * submits a previous prompt with no edit or autocomplete event, so an
-   * unobserved draft looks pasted; a remembered verdict keeps the judgment the
-   * text got when it was first sent. Oldest entries are dropped past
+   * The verdict each composer submission's text got in this controller's life,
+   * keyed by `text.trim()` (PSTB-2735, review M1). ↑ history recall submits a
+   * previous prompt with no edit or autocomplete event, so an unobserved draft
+   * looks pasted; a remembered verdict keeps the judgment the text got when it
+   * was first sent, including why. Oldest entries are dropped past
    * {@link RECALLED_MAX}, and a session change keeps the map: the engine's
    * input history survives `/clear`.
    */
-  const recalled = new Map<string, boolean>()
+  const recalled = new Map<string, PasteClassification>()
+  /**
+   * The last classified composer submission, for `/optimize status` (#35).
+   * Whitelisted metadata only — the decision kind, pass reason, trigger and
+   * composition verdict — never the submission text. A slash/shell pass never
+   * replaces it, so running `/optimize status` does not overwrite the fact
+   * being inspected, and a classification failure clears it rather than leave
+   * a verdict the classifier never reached.
+   */
+  let lastSubmissionStatus: SubmissionStatus | null = null
 
   function sameQuestion(asked: Workflow): boolean {
     const current = state.workflow
@@ -574,12 +603,17 @@ export function createController(deps: ControllerDeps): OptimizerController {
     extra = null
   }
 
-  /** Clears the run cache and the last-applied guidance on a session change. */
+  /**
+   * Clears the run cache, the last-applied guidance and the last-submission
+   * diagnostic on a session change. The recall map survives: the engine's own
+   * input history does too.
+   */
   function resetGuidance(): void {
     extra = null
     lastGuidance = null
     consumedPrompt = null
     composerSnapshot = undefined
+    lastSubmissionStatus = null
   }
 
   function makeWorkflow(
@@ -929,17 +963,33 @@ export function createController(deps: ControllerDeps): OptimizerController {
     // pre-classification in `register` see the same facts. Record the verdict
     // right here, including on the classify-failure path below, so a later
     // no-event submission of the same text (↑ recall) can reuse it.
-    const facts = e.origin.kind === 'composer' ? submissionFacts(e.text) : undefined
-    if (facts !== undefined) remember(e.text, facts.pasted)
+    const classification = e.origin.kind === 'composer' ? classifyDraft(e.text) : undefined
+    if (classification !== undefined) remember(e.text, classification)
     try {
-      decision = classifySubmission(e, deps.getConfig(), state, deps.now(), facts)
+      decision = classifySubmission(e, deps.getConfig(), state, deps.now(), classification)
     } catch {
       // Classification itself failing must not trap the person: pass through.
-      // The mode is still one-shot, so clear it before returning, and a composer
-      // draft is consumed for the same reason.
+      // Only a composer submission would have been recorded, so only that one
+      // clears the diagnostic rather than leaving a verdict the classifier
+      // never reached. The mode is still one-shot, so clear it before
+      // returning, and a composer draft is consumed for the same reason.
+      if (classification !== undefined) lastSubmissionStatus = null
       if (e.origin.kind === 'composer') composition = EMPTY_COMPOSITION
       if (state.rawMode !== null) apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
       return { action: 'next', text: e.text }
+    }
+
+    // The diagnostic keeps this composer submission's verdict, recorded before
+    // the draft's composition is consumed. A slash/shell pass is left out so
+    // `/optimize status` does not overwrite the fact being inspected; only
+    // whitelisted metadata is kept, never the submission text.
+    if (classification !== undefined && isDiagnosed(decision)) {
+      lastSubmissionStatus = {
+        kind: decision.kind,
+        ...(decision.kind === 'pass' ? { passReason: decision.reason } : {}),
+        ...(decision.kind === 'optimize' ? { trigger: decision.trigger } : {}),
+        composition: classification,
+      }
     }
 
     // A composer submission is one-shot for the draft's composition, whatever
@@ -1346,22 +1396,39 @@ export function createController(deps: ControllerDeps): OptimizerController {
   }
 
   function submissionFacts(text: string): SubmissionFacts {
-    // A recalled history entry emits no edit or autocomplete event, so an
-    // unobserved draft would look pasted. A remembered verdict for the same
-    // text stands instead; anything observed keeps the composition's judgment.
-    if (!composition.observed) {
-      const remembered = recalled.get(text.trim())
-      if (remembered !== undefined) return { pasted: remembered }
-    }
-    return { pasted: isPasteOnly(composition) }
+    return classifyDraft(text)
   }
 
-  /** Records one composer submission's pasted verdict, evicting the oldest. */
-  function remember(text: string, pasted: boolean): void {
+  /**
+   * The full verdict for `text` as submitted now: an observed draft follows the
+   * composition's own classification, and an unobserved one falls back to the
+   * remembered verdict for the same text, marked `history` with the original
+   * cause kept as `previousReason`.
+   */
+  function classifyDraft(text: string): PasteClassification {
+    if (!composition.observed) {
+      const remembered = recalled.get(text.trim())
+      if (remembered !== undefined) {
+        return { pasted: remembered.pasted, reason: 'history', previousReason: remembered.reason }
+      }
+    }
+    return classifyComposition(composition)
+  }
+
+  /**
+   * Records one composer submission's verdict, evicting the oldest. A
+   * `history` verdict flattens to the base reason the text first got, so
+   * repeated recalls never nest or erase the original cause; a new observation
+   * overrides the memory as before. (`previousReason` is always set on a
+   * `history` verdict here; the fallback only guards a hand-built one.)
+   */
+  function remember(text: string, c: PasteClassification): void {
     const key = text.trim()
     if (key === '') return
+    const base: PasteClassification =
+      c.reason === 'history' ? { pasted: c.pasted, reason: c.previousReason ?? 'no-input-events' } : c
     recalled.delete(key)
-    recalled.set(key, pasted)
+    recalled.set(key, base)
     if (recalled.size > RECALLED_MAX) {
       const oldest = recalled.keys().next().value
       if (oldest !== undefined) recalled.delete(oldest)
@@ -1425,6 +1492,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
   return {
     getState: () => state,
     getGuidanceStatus: () => lastGuidance,
+    getSubmissionStatus: () => lastSubmissionStatus,
     onSubmit,
     startExplicit,
     refine,
