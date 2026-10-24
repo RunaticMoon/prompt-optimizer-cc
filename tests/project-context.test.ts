@@ -382,3 +382,177 @@ describe('collectProjectEvidenceSnapshot — source records', () => {
     expect(wrapped.reads).toEqual(scanned.reads)
   })
 })
+
+describe('collectProjectEvidence — bilingual ranking and refreshed limits', () => {
+  test('selects the login source for the issue Korean-only request', async () => {
+    const { ports } = filesystem({
+      '/repo/src/auth/login.ts': 'export async function login(email, password) {\n  return validateCredentials(email, password)\n}',
+      '/repo/src/cart/cart.ts': 'export function addCartItem(item) { return cart.add(item) }',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '로그인 오류를 고쳐줘')
+    expect(text).toContain('src/auth/login.ts')
+    expect(text).toContain('export async function login')
+    expect(text).not.toContain('src/cart/cart.ts')
+  })
+
+  test('selects the cart source for the issue Korean-only request', async () => {
+    const { ports } = filesystem({
+      '/repo/src/auth/login.ts': 'export async function login(email, password) {\n  return validateCredentials(email, password)\n}',
+      '/repo/src/cart/cart.ts': 'export function addCartItem(item) { return cart.add(item) }',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '장바구니 담기 기능을 추가해줘')
+    expect(text).toContain('src/cart/cart.ts')
+    expect(text).toContain('addCartItem')
+    expect(text).not.toContain('src/auth/login.ts')
+  })
+
+  test('matches Korean comments and identifiers in source', async () => {
+    const { ports } = filesystem({
+      '/repo/src/wish.ts': '// 찜목록을 화면에 보여준다\nexport function showWishlist() {}\n',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '찜목록을 보여줘')
+    expect(text).toContain('1: // 찜목록을 화면에 보여준다')
+  })
+
+  test('an English-only request still finds Korean source comments', async () => {
+    const { ports } = filesystem({
+      '/repo/src/order.ts': '// 주문을 생성한다\nexport function createOrder() {}\n',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', 'order API')
+    expect(text).toContain('1: // 주문을 생성한다')
+  })
+
+  test('a project glossary term prioritizes its English source line', async () => {
+    const { ports } = filesystem({
+      '/repo/GLOSSARY.md': '# Glossary\n찜목록: wishList\n',
+      '/repo/src/wish.ts': `${'// filler\n'.repeat(40)}export const wishList = true\n`,
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '찜목록 화면')
+    expect(text).toContain('GLOSSARY.md')
+    expect(text).toContain('41: export const wishList = true')
+  })
+
+  test('a project mapping on a built-in surface reaches its own source file', async () => {
+    const { ports } = filesystem({
+      '/repo/GLOSSARY.md': '# Glossary\n로그인: sessionStore\n',
+      '/repo/src/session.ts': 'export const sessionStore = true\n',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '로그인 기능')
+    expect(text).toContain('src/session.ts')
+    expect(text).toContain('1: export const sessionStore = true')
+  })
+
+  test('selects the login source for the issue mixed-language request', async () => {
+    const { ports } = filesystem({
+      '/repo/src/auth/login.ts': 'export async function login(email, password) {\n  return validateCredentials(email, password)\n}',
+      '/repo/src/cart/cart.ts': 'export function addCartItem(item) { return cart.add(item) }',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '로그인 login 오류를 고쳐줘')
+    expect(text).toContain('src/auth/login.ts')
+    expect(text).toContain('export async function login')
+    expect(text).not.toContain('src/cart/cart.ts')
+  })
+
+  test('the two glossary prepass reads count toward the read budget and are not repeated', async () => {
+    const { ports, reads } = filesystem({
+      '/repo/GLOSSARY.md': '찜목록: wishList\n',
+      '/repo/GLOSSARY-MAP.md': '주문: order\n',
+      '/repo/src/wish.ts': 'export const wishList = true\n',
+      '/repo/src/order.ts': 'export const order = true\n',
+    })
+    await collectProjectEvidence(ports, '/repo', '/repo', '찜목록 주문', {
+      limits: { maxFiles: 3 },
+    })
+    expect(reads.length).toBeLessThanOrEqual(3)
+    expect(reads).toContain('/repo/GLOSSARY.md')
+    expect(reads).toContain('/repo/GLOSSARY-MAP.md')
+    expect(new Set(reads).size).toBe(reads.length)
+  })
+
+  test('an explicit path outranks a broad alias before the read budget is spent', async () => {
+    const { ports, reads } = filesystem({
+      '/repo/src/auth/login.ts': 'export const login = true\n',
+      '/repo/src/cart/cart.ts': 'export const cart = true\n',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '로그인 관련 src/cart/cart.ts 확인', {
+      limits: { maxFiles: 1 },
+    })
+    expect(reads).toEqual(['/repo/src/cart/cart.ts'])
+    expect(text).toContain('src/cart/cart.ts')
+  })
+
+  test('a directly named identifier outranks a broad alias', async () => {
+    const { ports, reads } = filesystem({
+      '/repo/src/shop/basket.ts': 'export const basket = true\n',
+      '/repo/src/cart/addCartItem.ts': 'export const addCartItem = true\n',
+    })
+    await collectProjectEvidence(ports, '/repo', '/repo', '장바구니 addCartItem', {
+      limits: { maxFiles: 1 },
+    })
+    expect(reads).toEqual(['/repo/src/cart/addCartItem.ts'])
+  })
+
+  test('malformed mappings stay inert and never select their English source', async () => {
+    const { ports } = filesystem({
+      '/repo/GLOSSARY.md': 'This is prose, not a mapping.\n찜목록: wishList extra tokens here\nscript: $(rm -rf /)\n',
+      '/repo/src/wish.ts': 'export const wishList = true\n',
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '찜목록')
+    expect(text).not.toContain('export const wishList = true')
+  })
+
+  test('lower limits and an aborted signal stop further IO', async () => {
+    const { ports, reads, lists, stats } = filesystem({
+      '/repo/GLOSSARY.md': '찜목록: wishList\n',
+      '/repo/src/wish.ts': 'export const wishList = true\n',
+    })
+    const controller = new AbortController()
+    controller.abort()
+    const aborted = await collectProjectEvidence(ports, '/repo', '/repo', '찜목록', { signal: controller.signal })
+    expect(aborted).toContain('inspection unavailable')
+    expect(reads).toEqual([])
+    expect(lists).toEqual([])
+    expect(stats).toEqual([])
+
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '찜목록', {
+      limits: { maxFiles: 1, maxDirectories: 0, maxChars: 160 },
+    })
+    expect(text.length).toBeLessThanOrEqual(160)
+    expect(lists).toEqual([])
+    // The root stat and up to one glossary prepass stat are allowed.
+    expect(stats.length).toBeLessThanOrEqual(2)
+  })
+
+  test('overrides cannot enlarge defaults or split a surrogate in the output', async () => {
+    const { ports, reads } = filesystem({
+      '/repo/src/wish.ts': `// 찜목록 😀😀😀\n${'export const wishList = true\n'.repeat(20)}`,
+    })
+    const text = await collectProjectEvidence(ports, '/repo', '/repo', '찜목록', {
+      limits: {
+        maxFiles: 999,
+        maxDirectories: 999,
+        maxEntries: 99999,
+        maxStats: 9999,
+        maxReadBytes: 9999999,
+        maxChars: 99999,
+      },
+    })
+    expect(reads.length).toBeLessThanOrEqual(PROJECT_MAX_FILES)
+    expect(text.length).toBeLessThanOrEqual(CONTEXT_PROJECT_CHARS)
+    expect(text.endsWith('\uD83D')).toBe(false)
+  })
+
+  test('a zero file or stat allowance starts no corresponding operation', async () => {
+    const files = { '/repo/src/wish.ts': 'export const wishList = true\n' }
+    const noFiles = filesystem(files)
+    expect(await collectProjectEvidence(noFiles.ports, '/repo', '/repo', '찜목록', { limits: { maxFiles: 0 } }))
+      .toContain('No usable evidence found')
+    expect(noFiles.reads).toEqual([])
+
+    const noStats = filesystem(files)
+    expect(await collectProjectEvidence(noStats.ports, '/repo', '/repo', '찜목록', { limits: { maxStats: 0 } }))
+      .toContain('inspection unavailable')
+    expect(noStats.stats).toEqual([])
+    expect(noStats.reads).toEqual([])
+  })
+})

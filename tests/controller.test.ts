@@ -1,4 +1,5 @@
 import type {
+  FsEntry,
   ModelCompleteRequest,
   ModelCompleteResult,
   ModelTextBlock,
@@ -85,6 +86,8 @@ interface HarnessOptions {
   box?: string | readonly string[]
   messages?: readonly SessionMessage[]
   files?: Readonly<Record<string, string>>
+  /** Synthesize directories and `fs.list` from the files map (opt-in tree fixture). */
+  tree?: boolean
   /**
    * The main session's model getter. Supplying it also installs a deterministic
    * clock, so the target-model race resolves without a real 500 ms wait. Omit it
@@ -127,6 +130,7 @@ interface Harness {
   closes: string[]
   completes: ModelCompleteRequest[]
   signals: Array<AbortSignal | undefined>
+  lists: string[]
   /** Fault injection: make the next notice-less repaint throw once. */
   flags: { throwOnRepaint: boolean }
   /** Runs every queued round to completion (awaits the round's own promise). */
@@ -245,10 +249,42 @@ function harness(options: HarnessOptions = {}): Harness {
   const closes: string[] = []
   const completes: ModelCompleteRequest[] = []
   const signals: Array<AbortSignal | undefined> = []
+  const lists: string[] = []
   const flags = { throwOnRepaint: false }
   let box = typeof options.box === 'string' ? options.box : ''
   const boxes = Array.isArray(options.box) ? [...options.box] : null
   const files = options.files ?? {}
+  const directories = new Map<string, Map<string, FsEntry>>()
+  if (options.tree === true) {
+    const ensure = (dir: string): Map<string, FsEntry> => {
+      const found = directories.get(dir)
+      if (found !== undefined) return found
+      const created = new Map<string, FsEntry>()
+      directories.set(dir, created)
+      return created
+    }
+    ensure('/repo')
+    for (const [path, text] of Object.entries(files)) {
+      if (!path.startsWith('/repo/')) continue
+      const parts = path.slice('/repo/'.length).split('/')
+      let dir = '/repo'
+      parts.forEach((name, index) => {
+        const child = `${dir}/${name}`
+        const file = index === parts.length - 1
+        ensure(dir).set(name, {
+          name,
+          kind: file ? 'file' : 'dir',
+          size: file ? text.length : 0,
+          mtimeMs: 0,
+          isLink: false,
+        })
+        if (!file) {
+          ensure(child)
+          dir = child
+        }
+      })
+    }
+  }
 
   const deps: ControllerDeps = {
     now: () => now,
@@ -307,9 +343,12 @@ function harness(options: HarnessOptions = {}): Harness {
     fs: {
       stat: async (path: string) => {
         calls.stat += 1
+        if (directories.has(path)) {
+          return { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false, realPath: path }
+        }
         const text = files[path]
         if (text === undefined) throw new Error(`ENOENT: ${path}`)
-        return { kind: 'file' as const, size: text.length, mtimeMs: 0, isLink: false }
+        return { kind: 'file' as const, size: text.length, mtimeMs: 0, isLink: false, realPath: path }
       },
       read: async (path: string) => {
         calls.fileRead += 1
@@ -318,6 +357,14 @@ function harness(options: HarnessOptions = {}): Harness {
         if (text === undefined) throw new Error(`ENOENT: ${path}`)
         return text
       },
+      ...(options.tree === true
+        ? {
+            list: async (path = '/repo'): Promise<FsEntry[]> => {
+              lists.push(path)
+              return [...(directories.get(path)?.values() ?? [])]
+            },
+          }
+        : {}),
     },
     env: {
       get: async (_name: string): Promise<string | null> => null,
@@ -431,6 +478,7 @@ function harness(options: HarnessOptions = {}): Harness {
     closes,
     completes,
     signals,
+    lists,
     flags,
     flush,
     waitFor,
@@ -4914,5 +4962,346 @@ describe('restore — observed edits and ownership (#28)', () => {
     expect(h.controller.getState().bypass).toBeNull()
     h.controller.onPromptEdit('다시 고침')
     expect(h.controller.getState().bypass).toBeNull()
+  })
+})
+
+describe('repository follow-up refresh', () => {
+  const files = {
+    '/repo/GLOSSARY.md': '# Glossary\n찜목록: wishList\n',
+    '/repo/src/auth/login.ts': 'export async function login() { return validateCredentials() }',
+    '/repo/src/cart/cart.ts': 'export function addCartItem(item) { return cart.add(item) }',
+  }
+
+  function prefixOf(request: ModelCompleteRequest): string {
+    const text = requestText(request.prompt)
+    const end = text.indexOf('</original_prompt>')
+    return end < 0 ? text : text.slice(0, end + '</original_prompt>'.length)
+  }
+
+  test('collects the snapshot once, then one bounded scan for a new cart answer', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+
+    const messages = h.calls.messages
+    const reads = h.calls.fileRead
+    const first = h.completes[0]
+    expect(first).toBeDefined()
+    expect(requestText(first?.prompt)).toContain('src/auth/login.ts')
+
+    await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+
+    expect(h.calls.messages).toBe(messages)
+    expect(h.calls.complete).toBe(2)
+    expect(h.calls.fileRead - reads).toBeGreaterThan(0)
+    expect(h.calls.fileRead - reads).toBeLessThanOrEqual(4)
+    const last = h.completes.at(-1)
+    expect(last).toBeDefined()
+    const text = requestText(last?.prompt)
+    const snapshot = h.controller.getState().workflow?.context
+    expect(snapshot?.text.length ?? 0).toBeLessThanOrEqual(5000)
+    expect(snapshot?.project?.length ?? 0).toBeLessThanOrEqual(2000)
+    expect(text).toContain('<repository_followup>')
+    expect(text).toContain('targets: cart')
+    expect(text).toContain('src/cart/cart.ts')
+    const start = text.indexOf('<repository_followup>')
+    const end = text.indexOf('</repository_followup>') + '</repository_followup>'.length
+    expect(end - start).toBeLessThanOrEqual(1000)
+    expect(prefixOf(last as ModelCompleteRequest)).toBe(prefixOf(first as ModelCompleteRequest))
+  })
+
+  test('does not scan for a repeated alias, a choice, a style change, or a bare retry', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const reads = h.calls.fileRead
+
+    await h.controller.refine(h.ports, '로그인 화면')
+    await h.controller.refine(h.ports, '1번')
+    await h.controller.refine(h.ports, '아까 고른 것')
+    await h.controller.refine(h.ports, '더 짧게')
+    await h.controller.retry(h.ports)
+
+    expect(h.calls.fileRead).toBe(reads)
+    expect(h.calls.messages).toBe(1)
+    for (const request of h.completes) expect(requestText(request.prompt)).not.toContain('<repository_followup>')
+  })
+
+  test('particle style answers never scan and never spend an attempt', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const reads = h.calls.fileRead
+    const stats = h.calls.stat
+
+    await h.controller.refine(h.ports, '문장을 더 자연스럽게')
+    await h.controller.refine(h.ports, '어색한 부분을 고쳐줘')
+    await h.controller.refine(h.ports, '로그인 화면으로 보여줘')
+    expect(h.calls.fileRead).toBe(reads)
+    expect(h.calls.stat).toBe(stats)
+    for (const request of h.completes) expect(requestText(request.prompt)).not.toContain('<repository_followup>')
+
+    // The two attempts are intact: a real new target still scans.
+    await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+    expect(h.calls.fileRead).toBeGreaterThan(reads)
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('targets: cart')
+  })
+
+  test('a marker noun with one particle repeats the seen concept', async () => {
+    for (const [initial, refine] of [
+      ['로그인 기능', '로그인을 화면에 보여줘'],
+      ['장바구니 기능', '장바구니를 화면에 표시해줘'],
+    ] as const) {
+      const h = harness({ tree: true, files })
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit(initial), 'pane')
+      await h.flush()
+      const reads = h.calls.fileRead
+      const stats = h.calls.stat
+      const roots = h.calls.root
+      const cwds = h.calls.cwd
+
+      await h.controller.refine(h.ports, refine)
+      expect(h.calls.fileRead).toBe(reads)
+      expect(h.calls.stat).toBe(stats)
+      expect(h.calls.root).toBe(roots)
+      expect(h.calls.cwd).toBe(cwds)
+      expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('<repository_followup>')
+    }
+  })
+
+  test('style marker answers never scan, while a new marker noun scans once', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const reads = h.calls.fileRead
+    const stats = h.calls.stat
+    const roots = h.calls.root
+    const cwds = h.calls.cwd
+
+    await h.controller.refine(h.ports, '자연스럽게 처리해줘')
+    await h.controller.refine(h.ports, '이 부분을 대상으로 다듬어줘')
+    expect(h.calls.fileRead).toBe(reads)
+    expect(h.calls.stat).toBe(stats)
+    expect(h.calls.root).toBe(roots)
+    expect(h.calls.cwd).toBe(cwds)
+    for (const request of h.completes) expect(requestText(request.prompt)).not.toContain('<repository_followup>')
+
+    await h.controller.refine(h.ports, '대시보드 화면')
+    expect(h.calls.root).toBeGreaterThan(roots)
+    expect(h.calls.fileRead).toBeGreaterThan(reads)
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('targets: 대시보드')
+  })
+
+  test('the block-wrapper reserve boundary never spends an attempt', async () => {
+    for (const contextMaxChars of [269, 270]) {
+      const h = harness({ tree: true, files, config: { contextMaxChars } })
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+      await h.flush()
+      const reads = h.calls.fileRead
+      const stats = h.calls.stat
+      const roots = h.calls.root
+      const cwds = h.calls.cwd
+
+      await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+      expect(h.calls.fileRead).toBe(reads)
+      expect(h.calls.stat).toBe(stats)
+      // The pre-fix path resolved root/cwd before the zero-character short-circuit.
+      expect(h.calls.root).toBe(roots)
+      expect(h.calls.cwd).toBe(cwds)
+      expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('<repository_followup>')
+    }
+
+    // 276 reserves 46 characters: one renderable character past the wrapper.
+    const h = harness({ tree: true, files, config: { contextMaxChars: 276 } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const roots = h.calls.root
+
+    await h.controller.refine(h.ports, '장바구니도 같이 봐줘')
+    expect(h.calls.root).toBeGreaterThan(roots)
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('<repository_followup>')
+  })
+
+  test('a retry with a fresh new target scans, and a path answer is a new target', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const reads = h.calls.fileRead
+
+    await h.controller.retry(h.ports, '결제도 확인해줘')
+    expect(h.calls.fileRead).toBeGreaterThan(reads)
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('targets: payment')
+
+    await h.controller.refine(h.ports, 'src/cart/cart.ts도 확인해줘')
+    const text = requestText(h.completes.at(-1)?.prompt)
+    expect(text).toContain('targets: src/cart/cart.ts')
+    expect(text).toContain('<repository_followup>')
+  })
+
+  test('a failed target is not retried by an alias repeat or a third attempt', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+
+    h.ports.fs.stat = async () => {
+      h.calls.stat += 1
+      throw new Error('denied')
+    }
+    const before = h.calls.stat
+    await h.controller.refine(h.ports, '장바구니')
+    const afterFirst = h.calls.stat
+    expect(afterFirst).toBeGreaterThan(before)
+
+    await h.controller.refine(h.ports, '장바구니 다시')
+    expect(h.calls.stat).toBe(afterFirst)
+
+    await h.controller.refine(h.ports, '결제')
+    const afterSecond = h.calls.stat
+    expect(afterSecond).toBeGreaterThan(afterFirst)
+
+    await h.controller.refine(h.ports, '검색')
+    expect(h.calls.stat).toBe(afterSecond)
+  })
+
+  test('contextMaxChars=0 skips both initial and follow-up collection', async () => {
+    const h = harness({ tree: true, files, config: { contextMaxChars: 0 } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    expect(h.calls.fileRead).toBe(0)
+
+    await h.controller.refine(h.ports, '장바구니')
+    expect(h.calls.fileRead).toBe(0)
+    expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('<repository_followup>')
+  })
+
+  test('becoming zero mid-workflow stops scans and suppresses the saved supplement', async () => {
+    let config: OptimizerConfig = { ...DEFAULT_CONFIG }
+    const h = harness({ tree: true, files, deps: { getConfig: () => config } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    await h.controller.refine(h.ports, '장바구니')
+    expect(requestText(h.completes.at(-1)?.prompt)).toContain('<repository_followup>')
+
+    const reads = h.calls.fileRead
+    const beforeZero = h.completes.at(-1)
+    config = { ...config, contextMaxChars: 0 }
+    await h.controller.refine(h.ports, '결제도')
+    expect(h.calls.fileRead).toBe(reads)
+    const text = requestText(h.completes.at(-1)?.prompt)
+    expect(text).not.toContain('<repository_followup>')
+    expect(prefixOf(h.completes.at(-1) as ModelCompleteRequest))
+      .toBe(prefixOf(beforeZero as ModelCompleteRequest))
+  })
+
+  test('a cancel during a follow-up scan cannot complete the round', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const completes = h.calls.complete
+
+    let release: (() => void) | undefined
+    let started = false
+    const stat = h.ports.fs.stat
+    h.ports.fs.stat = async (path, options) => {
+      if (path === '/repo' && !started) {
+        started = true
+        return new Promise(resolve => {
+          release = () => resolve({ kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/repo' })
+        })
+      }
+      return stat(path, options)
+    }
+
+    const pending = h.controller.refine(h.ports, '장바구니')
+    await h.waitFor(() => started)
+    await h.controller.cancel(h.ports)
+    release?.()
+    await pending
+
+    expect(h.calls.complete).toBe(completes)
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('a replacement workflow is not touched by a stale follow-up scan', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const completes = h.calls.complete
+
+    let release: (() => void) | undefined
+    let started = false
+    const stat = h.ports.fs.stat
+    h.ports.fs.stat = async (path, options) => {
+      if (path === '/repo' && !started) {
+        started = true
+        return new Promise(resolve => {
+          release = () => resolve({ kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/repo' })
+        })
+      }
+      return stat(path, options)
+    }
+
+    const pending = h.controller.refine(h.ports, '장바구니')
+    await h.waitFor(() => started)
+    await h.controller.cancel(h.ports)
+    await h.controller.onSubmit(h.ports, submit('결제 기능'), 'pane')
+    await h.flush()
+    const replacement = h.controller.getState().workflow
+    const context = replacement?.context
+    const newCompletes = h.calls.complete
+    expect(replacement?.original).toBe('결제 기능')
+    expect(newCompletes).toBe(completes + 1)
+
+    release?.()
+    await pending
+
+    expect(h.calls.complete).toBe(newCompletes)
+    expect(h.controller.getState().workflow).toBe(replacement)
+    expect(h.controller.getState().workflow?.context).toBe(context)
+    expect(requestText(h.completes.at(-1)?.prompt)).not.toContain('targets: cart')
+  })
+
+  test('a session switch during a follow-up scan strands its result', async () => {
+    const h = harness({ tree: true, files })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('로그인 기능'), 'pane')
+    await h.flush()
+    const completes = h.calls.complete
+
+    let release: (() => void) | undefined
+    let started = false
+    const stat = h.ports.fs.stat
+    h.ports.fs.stat = async (path, options) => {
+      if (path === '/repo' && !started) {
+        started = true
+        return new Promise(resolve => {
+          release = () => resolve({ kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/repo' })
+        })
+      }
+      return stat(path, options)
+    }
+
+    const pending = h.controller.refine(h.ports, '장바구니')
+    await h.waitFor(() => started)
+    h.controller.onSessionStart('sess-2')
+    release?.()
+    await pending
+
+    expect(h.calls.complete).toBe(completes)
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.controller.getState().sessionId).toBe('sess-2')
   })
 })
