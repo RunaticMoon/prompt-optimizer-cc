@@ -102,6 +102,17 @@ export function aliasGroupKey(members: readonly string[]): string {
   return [...new Set(members.map(normalize).filter(Boolean))].sort(compareCodePoint).join('\u001f')
 }
 
+/** Canonical key for one merged group: built-ins keep their table concept key. */
+export function canonicalGroupKey(members: readonly string[]): string {
+  const normalized = [...new Set(members.map(normalize).filter(Boolean))]
+  for (let i = 0; i < BUILTIN_ALIASES.length; i += 1) {
+    const builtin = [...new Set((BUILTIN_ALIASES[i] ?? []).map(normalize))]
+    if (builtin.length !== normalized.length) continue
+    if (builtin.every(member => normalized.includes(member))) return BUILTIN_KEYS[i] ?? aliasGroupKey(normalized)
+  }
+  return aliasGroupKey(normalized)
+}
+
 /** Builds the merged built-in + project group list, dropping empty groups. */
 export function mergeAliasGroups(projectAliases: readonly AliasGroup[] = []): readonly AliasGroup[] {
   const groups: AliasGroup[] = []
@@ -225,6 +236,7 @@ export function extractTargets(
     if (index.byMember.has(identifier)) add(identifier)
   }
   for (const raw of hangulTokens(prose)) {
+    if (index.byMember.has(raw)) add(raw)
     for (const stem of stemsFor(raw, index)) add(stem)
   }
   const marker = new RegExp(`([가-힣]{2,40})\\s*(?:${TARGET_MARKERS.join('|')})`, 'g')
@@ -460,11 +472,5 @@ function groupIndex(groups: readonly AliasGroup[]): GroupIndex {
 
 /** Canonical key for a merged group: built-ins keep their concept key. */
 function groupKeyOf(groups: readonly AliasGroup[], group: number): string {
-  const members = groups[group] ?? []
-  for (let i = 0; i < BUILTIN_ALIASES.length; i += 1) {
-    const normalized = [...new Set((BUILTIN_ALIASES[i] ?? []).map(normalize))]
-    if (normalized.length !== members.length) continue
-    if (normalized.every(member => members.includes(member))) return BUILTIN_KEYS[i] ?? aliasGroupKey(members)
-  }
-  return aliasGroupKey(members)
+  return canonicalGroupKey(groups[group] ?? [])
 }

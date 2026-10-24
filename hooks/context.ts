@@ -31,7 +31,7 @@ import {
   type PreparationCollectionOptions,
   type PreparationDegradation,
 } from './preparation'
-import { PROJECT_SCAN_MS, collectProjectEvidenceSnapshot, type ProjectEvidenceSnapshot } from './project-context'
+import { PROJECT_SCAN_MS, collectProjectEvidenceSnapshot, type ProjectEvidenceSnapshot, type ProjectScanLimits } from './project-context'
 
 /** Per-message character cap before a long message is cut head/tail. */
 export const CONTEXT_MESSAGE_CHARS = 1200
@@ -144,6 +144,12 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
   }
 }
 
+/** Optional collector bounds for the initial evidence excerpt. */
+export interface CollectContextOptions {
+  /** Forwarded only as the collector's output cap; omitted keeps its default. */
+  projectMaxChars?: number
+}
+
 /**
  * Reads the session's own read-only facts and builds a snapshot. Every bounded
  * section that fails, times out or has no host timer is simply left out and the
@@ -152,12 +158,14 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
  * collection entirely, before any transcript, filesystem or timer call.
  *
  * `request` is the original prompt, used only to pick repository evidence.
+ * `options.projectMaxChars` can only lower the collector's excerpt cap; it
+ * does not change any other snapshot section.
  */
 export async function collectContext(
   $: EnginePorts,
   config: OptimizerConfig,
   request = '',
-  options: PreparationCollectionOptions = {},
+  options: PreparationCollectionOptions & CollectContextOptions = {},
 ): Promise<ContextSnapshot> {
   if (config.contextMaxChars <= 0) {
     return buildSnapshot({
@@ -201,9 +209,13 @@ export async function collectContext(
     const rules = root.length > 0 ? await readRules(budget, $, root, cwd, degraded) : []
     // `contextMaxChars > 0` above means repository evidence is wanted. One scan
     // produces both the text and the source records; nothing is parsed back out
-    // of the text and no second scan runs.
+    // of the text and no second scan runs. `projectMaxChars` only lowers the
+    // collector's excerpt cap, never its read or stat allowances.
+    const caps = options.projectMaxChars === undefined
+      ? undefined
+      : { maxChars: options.projectMaxChars }
     const evidence = root.length > 0
-      ? await readProject(budget, $, root, cwd, request, degraded)
+      ? await readProject(budget, $, root, cwd, request, degraded, caps)
       : { text: '', sources: [] as readonly RepositorySource[] }
 
     return buildSnapshot({
@@ -400,10 +412,11 @@ async function readProject(
   cwd: string,
   request: string,
   degraded: (label: string, reason: PreparationDegradation) => void,
+  limits?: Partial<ProjectScanLimits>,
 ): Promise<ProjectEvidenceSnapshot> {
   const result = await budget.run(
     'project',
-    signal => collectProjectEvidenceSnapshot($, root, cwd, request, signal),
+    signal => collectProjectEvidenceSnapshot($, root, cwd, request, signal, limits),
     PROJECT_SCAN_MS,
   )
   if (result.kind === 'ok') return result.value

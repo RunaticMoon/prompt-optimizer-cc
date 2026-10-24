@@ -932,3 +932,19 @@ describe('collectContext — bounded preparation', () => {
     expect(calls.read).toBe(0)
   })
 })
+
+describe('collectContext — project excerpt override', () => {
+  test('forwards projectMaxChars as the collector output cap only', async () => {
+    const { engine } = fakeEngine({
+      messages: [message('user', 'hello')],
+      files: {
+        '/repo/CLAUDE.md': 'project rules',
+        '/repo/GLOSSARY.md': `Image: ${'immutable artifact '.repeat(40)}`,
+      },
+    })
+    const snapshot = await collectContext(engine, DEFAULT_CONFIG, 'image', { projectMaxChars: 140 })
+    expect(snapshot.project?.length).toBeLessThanOrEqual(140)
+    expect(snapshot.rules).toContain('project rules')
+    expect(snapshot.text).toContain('Repository evidence (partial, read-only)')
+  })
+})
