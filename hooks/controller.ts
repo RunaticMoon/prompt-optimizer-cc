@@ -367,7 +367,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
         }
         if (answer !== EXTEND_APPROVAL) {
           mark('declined')
-          notify('추가 호출 없이 현재 개선안과 미해결 질문을 유지합니다.')
+          // A correction-only dialog has no question to name; keep the
+          // correction and point at the explicit approval path instead.
+          notify(pendingCorrection && !asked.question?.trim()
+            ? '추가 라운드를 승인하지 않았습니다. 정정한 결정은 유지되며 /optimize more 로 다시 승인할 수 있습니다.'
+            : '추가 호출 없이 현재 개선안과 미해결 질문을 유지합니다.')
           return
         }
         mark('closed')

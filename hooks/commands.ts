@@ -161,7 +161,7 @@ const HELP_TEXT = [
   '/optimize send — 개선안을 지금 보내기',
   '/optimize raw — 원문을 그대로 보내기',
   '/optimize retry [instruction] — 보완 내용으로 다시 다듬기',
-  '/optimize more — 미해결 질문이 남은 이번 작업에 5회 더 허용',
+  '/optimize more — 미해결 질문이나 반영할 정정이 남은 이번 작업에 5회 더 허용',
   '/optimize cancel — 개선 작업 취소',
   '/optimize status — 설정과 진행 상황 보기',
   '/optimize decisions — 확정 결정과 출처 보기',

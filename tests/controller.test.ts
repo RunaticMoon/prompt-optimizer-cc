@@ -2746,6 +2746,9 @@ describe('round extensions — explicit approval and workflow isolation', () => 
       if (disposition === 'decline') approval.resolve('현재 개선안 유지')
       if (disposition === 'escape') approval.reject(new Error('Esc'))
       await h.waitFor(() => h.controller.getState().workflow?.limitAsk === (disposition === 'decline' ? 'declined' : 'closed'))
+      if (disposition === 'decline') {
+        expect(h.notices).toContain('추가 호출 없이 현재 개선안과 미해결 질문을 유지합니다.')
+      }
 
       await h.controller.refine(h.ports, '승인 없이 계속')
       await h.controller.retry(h.ports, '승인 없이 재시도')
@@ -2765,6 +2768,57 @@ describe('round extensions — explicit approval and workflow isolation', () => 
       expect(followup.calls).toHaveLength(1)
     })
   }
+
+  test('declining a correction-only extension keeps the correction and names the approval path', async () => {
+    const approval = questionDialog()
+    const h = harness({
+      config: { maxRounds: 2 },
+      ui: { ask: approval.ask },
+      // One choice keeps the question dialog closed so the only ask below is
+      // the correction-only round-extension dialog.
+      complete: async (_r, _s, n) => n === 1 ? answered('개선안', '독자를 확인합니다', ASK_QUESTION) : answered('개선안 2'),
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    const atLimit = h.controller.getState().workflow!
+    expect(atLimit.rounds).toBe(2)
+    expect(atLimit.question).toBeNull()
+    expect(h.controller.correctDecision('d1', '정정 결정').ok).toBe(true)
+    expect(hasPendingCorrection(h.controller.getState().workflow)).toBe(true)
+
+    await h.controller.retry(h.ports)
+    expect(approval.calls).toHaveLength(1)
+    expect(approval.calls[0]?.question).toContain('정정한 결정이 아직 반영되지 않았습니다')
+    expect(approval.calls[0]?.question).not.toContain('미해결 질문')
+    approval.resolve('현재 개선안 유지')
+    await h.waitFor(() => h.controller.getState().workflow?.limitAsk === 'declined')
+
+    expect(h.notices).toContain(
+      '추가 라운드를 승인하지 않았습니다. 정정한 결정은 유지되며 /optimize more 로 다시 승인할 수 있습니다.',
+    )
+    expect(h.notices).not.toContain('추가 호출 없이 현재 개선안과 미해결 질문을 유지합니다.')
+    const after = h.controller.getState().workflow!
+    expect(after.question).toBeNull()
+    expect(after.draft).toBe('개선안 2')
+    expect(hasPendingCorrection(after)).toBe(true)
+    expect(h.calls.complete).toBe(2)
+  })
+
+  test('refuses an extension at the limit with no question or pending correction', async () => {
+    const h = harness({ config: { maxRounds: 1 }, complete: async () => answered('개선안') })
+    await startQuestion(h)
+    const before = h.controller.getState().workflow!
+    expect(before.rounds).toBe(1)
+    expect(before.question).toBeNull()
+    expect(hasPendingCorrection(before)).toBe(false)
+
+    expect(await h.controller.extendRounds(h.ports)).toEqual({
+      ok: false,
+      reason: '한도에 도달하고 미해결 질문이나 반영할 정정이 남아 있을 때만 연장할 수 있습니다.',
+    })
+    expect(h.controller.getState().workflow?.roundLimit).toBeUndefined()
+    expect(h.calls.complete).toBe(1)
+  })
 
   test('clears a stale extension dialog after the configured limit changes and it is dismissed', async () => {
     const approval = questionDialog()
