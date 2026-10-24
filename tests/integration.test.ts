@@ -60,8 +60,13 @@ const PASTE_PLACEHOLDER = '다음 내용을 고쳐줘\n[Pasted text #1 +3 lines]
 const PASTE_EXPANDED = '다음 내용을 고쳐줘\n<pasted_content>\n첫째 줄: 로그인 오류\n둘째 줄: 재현 절차\n셋째 줄: 기대 동작\n</pasted_content>'
 
 /** The fixed JSON contract the optimizer's one completion returns. */
-function answered(draft: string, message = '다듬었습니다', question: string | null = null): ModelCompleteResult {
-  return { isAnswered: true, text: JSON.stringify({ draft, message, question }), usage: USAGE }
+function answered(
+  draft: string,
+  message = '다듬었습니다',
+  question: string | null = null,
+  options: readonly string[] = [],
+): ModelCompleteResult {
+  return { isAnswered: true, text: JSON.stringify({ draft, message, question, options }), usage: USAGE }
 }
 
 /** The `api-error` arm, carrying a status and an error kind. */
@@ -1628,5 +1633,255 @@ describe('integration — model-aware guidance at the three entry points', () =>
     expect(w.completes[1]?.system ?? '').not.toContain(`${BLOCK_TAG} opus-5-5]`)
     expect(w.completes[1]?.model).toBe('sonnet')
     expect(w.completes[1]?.effort).toBe('low')
+  })
+})
+
+/**
+ * Task 31-7 — the combined review lifecycle (#31) through the loaded plugin.
+ *
+ * One mocked run walks the whole review story `docs/DESIGN.md` documents for
+ * #31: an original prompt, a numbered composer answer to the model's
+ * clarifying question (captured as a user decision with its exact
+ * question/options source), a success, an explicit targeted correction, a
+ * failed generation, a successful retry that applies the correction, an undo
+ * to the preceding success, another refinement on the restored state, accept,
+ * and the person's own Enter as the only delivery. The variants cover a
+ * session reset with a late reply and the delivery-conflict protection around
+ * an undone draft. Everything is asserted through the real event paths: where
+ * each request's evidence came from, the call/round/usage counters, and that
+ * nothing reaches the main session before the person's Enter.
+ */
+
+describe('integration — combined review lifecycle (#31)', () => {
+  const QUESTION = '어디에서 로그인 오류가 발생하나요?'
+  const OPTIONS = ['웹 브라우저', '모바일 앱']
+  const CORRECTED = '로컬 스크립트로만 재현을 검증한다'
+  const SUPPLEMENT = '더 짧게 줄여줘'
+
+  test('RV1 · 원문→1번 답변→정정→실패→재시도→undo→보완→accept→Enter 전주기', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+
+    // The model's one clarifying question opens the host selection dialog; the
+    // person answers "1번" in the composer instead, so the dialog is held open
+    // until it has gone stale and is released below.
+    const dialogs: Array<{ question: string }[]> = []
+    let answerDialog: (result: { result: { questions: unknown[]; answers: Record<string, string> } }) => void = () => undefined
+    on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+      dialogs.push(e.questions)
+      return new Promise(resolve => { answerDialog = resolve })
+    })
+
+    w.setModel((_request, call) => {
+      if (call === 1) return answered(`개선안${call}`, '첫 개선', QUESTION, OPTIONS)
+      if (call === 3) return apiError()
+      return answered(`개선안${call}`, `${call}번째 변경`)
+    })
+    await w.start()
+
+    // Original → question. The first success records revision r1 (개선안1).
+    w.setBox(ORIGINAL)
+    expect(await w.submit(ORIGINAL)).toEqual({ drop: DROP_OPTIMIZING })
+    await w.advance(1)
+    await w.waitFor(() => dialogs.length === 1)
+    expect(w.completes).toHaveLength(1)
+    expect(dialogs[0]?.[0]?.question).toBe(QUESTION)
+
+    // Numbered answer → success. The composer answer is captured as decision
+    // d1 with its exact provenance, the request carries that source, and the
+    // second success records r2 (개선안2).
+    w.setBox('1번')
+    expect(await w.submit('1번')).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    await w.advance(1)
+    expect(w.completes).toHaveLength(2)
+    expect(w.completes[0]?.prompt).not.toContain('<user_decisions>')
+    expect(w.completes[1]?.prompt).toContain('<user_decisions>')
+    expect(w.completes[1]?.prompt).toContain('"id":"d1"')
+    expect(w.completes[1]?.prompt).toContain('"selectedOption":{"index":1,"text":"웹 브라우저"}')
+    expect(w.completes[1]?.prompt).toContain(QUESTION)
+    const sources = await w.run('sources')
+    expect(sources).toContain('답변: 1번')
+    expect(sources).toContain('미확정 제안')
+
+    // The held dialog is stale now (the round moved on): releasing it must not
+    // refine again or block the state-only commands below.
+    answerDialog({ result: { questions: [], answers: { [QUESTION]: OPTIONS[0] ?? '' } } })
+    await w.settle()
+
+    // Targeted correction: state only, no call, no revision.
+    expect(await w.run(`correct d1 ${CORRECTED}`)).toContain('결정을 정정했습니다')
+    expect(w.completes).toHaveLength(2)
+
+    // Failed generation: it spends a round and usage, keeps the correction
+    // pending, and records no revision (show still serves 개선안2).
+    expect(await w.run('retry')).toContain('다시 다듬')
+    expect(w.completes).toHaveLength(3)
+    let status = await w.run('status')
+    expect(status).toContain('단계 failed · 3/5회')
+    expect(status).toContain('마지막 오류')
+    expect(await w.run('show')).toContain('현재 개선안:\n개선안2')
+
+    // Successful retry: the correction reaches the request as the active
+    // decision d2 (superseding d1), the numbered answer leaves it, and the
+    // success clears the failure and records r3 (개선안4).
+    expect(await w.run('retry')).toContain('다시 다듬')
+    expect(w.completes).toHaveLength(4)
+    expect(w.completes[3]?.prompt).toContain(CORRECTED)
+    expect(w.completes[3]?.prompt).toContain('"id":"d2"')
+    expect(w.completes[3]?.prompt).toContain('"supersedes":"d1"')
+    expect(w.completes[3]?.prompt).not.toContain('1번')
+    status = await w.run('status')
+    expect(status).toContain('단계 reviewing · 4/5회')
+    expect(status).not.toContain('마지막 오류')
+
+    // Undo: state-only restore of r2. Counters stay, the composer is untouched,
+    // and the corrected decision is gone from the ledger with the draft back.
+    expect(await w.run('undo')).toBe('이전 성공 라운드로 되돌렸습니다. 사용량과 라운드 한도는 유지됩니다.')
+    expect(await w.run('show')).toContain('현재 개선안:\n개선안2')
+    const decisions = await w.run('decisions')
+    expect(decisions).toContain('답변: 1번')
+    expect(decisions).toContain('선택: 1) 웹 브라우저')
+    expect(decisions).not.toContain(CORRECTED)
+    status = await w.run('status')
+    expect(status).toContain('단계 reviewing · 4/5회')
+    expect(status).toContain('이 세션 사용량: 4회 · 입력 40 · 출력 20 · 캐시 읽기 4 · 캐시 쓰기 8')
+    expect(w.fills).toHaveLength(2)
+    expect(await w.run('diff previous')).toContain('+개선안2')
+    expect(await w.run('diff original')).toContain('-로그인 오류를 고쳐줘')
+    expect(await w.run('show previous')).toContain('직전 성공 라운드 개선안:\n개선안1')
+
+    // Another refinement runs on the restored revision: the next request
+    // carries the restored ledger (d1 plus the new answer minted as d3 — the
+    // burned d2 id is never recycled) and none of the undone correction.
+    w.setBox(SUPPLEMENT)
+    expect(await w.submit(SUPPLEMENT)).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    await w.advance(1)
+    expect(w.completes).toHaveLength(5)
+    expect(w.completes[4]?.prompt).toContain('1번')
+    expect(w.completes[4]?.prompt).toContain(SUPPLEMENT)
+    expect(w.completes[4]?.prompt).toContain('"id":"d3"')
+    expect(w.completes[4]?.prompt).not.toContain('"supersedes"')
+    expect(w.completes[4]?.prompt).not.toContain(CORRECTED)
+
+    // Every request repeated the same snapshot baseline — the context and
+    // original collected once — and counted its own round.
+    for (const [index, request] of w.completes.entries()) {
+      expect(request?.prompt).toContain('<original_prompt>')
+      expect(request?.prompt).toContain(ORIGINAL)
+      expect(request?.prompt).toContain('규칙 텍스트')
+      expect(request?.prompt).toContain(`current: ${index + 1}\nmax: 5\nremaining: ${4 - index}`)
+    }
+
+    // Counters: five calls, five rounds, usage summed; nothing has reached the
+    // main session yet.
+    status = await w.run('status')
+    expect(status).toContain('단계 reviewing · 5/5회')
+    expect(status).toContain('이 세션 사용량: 5회 · 입력 50 · 출력 25 · 캐시 읽기 5 · 캐시 쓰기 10')
+    expect(w.submits).toHaveLength(0)
+    expect(w.turns).toBe(0)
+
+    // Accept fills the exact current draft; the person's Enter is the only
+    // delivery, exactly once, with no re-interception.
+    expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+    expect(w.box()).toBe('개선안5')
+    expect(w.fills.map(fill => fill.text)).toEqual(['', '', '', '개선안5'])
+    expect(await w.submit('개선안5')).toEqual({ text: '개선안5' })
+    expect(w.submits.map(submission => submission.text)).toEqual(['개선안5'])
+    expect(w.completes).toHaveLength(5)
+    expect(w.turns).toBe(1)
+    expect(await w.run('status')).toContain('진행 중인 개선 작업: 없음')
+    expect(await w.run('status')).toContain('이 세션 사용량: 5회')
+  })
+
+  test('RV2 · 세션 초기화 뒤 늦은 성공 응답은 새 세션을 바꾸지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    const w = setup($, on)
+    await w.start()
+    let release: (result: ModelCompleteResult) => void = () => undefined
+    w.setModel((_request, call) => call === 1
+      ? answered(`개선안${call}`)
+      : new Promise<ModelCompleteResult>(resolve => { release = resolve }))
+
+    w.setBox(ORIGINAL)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes).toHaveLength(1)
+
+    w.setBox('더 짧게')
+    expect(await w.submit('더 짧게')).toEqual({ drop: '보완 요청을 옵티마이저에 전달했습니다.' })
+    // A detached advance: the round reaches the model, whose promise stays
+    // pending until `release` below.
+    const advancing = w.advance(1)
+    await w.settle()
+    await w.waitFor(() => w.completes.length === 2)
+
+    // The session ends while the completion is still in flight.
+    await w.endSession()
+    await w.restartSession('sess-2')
+    expect(await w.run('status')).toContain('진행 중인 개선 작업: 없음')
+    expect(await w.run('status')).toContain('이 세션 사용량: 0회')
+
+    // The late reply belongs to the ended session: no workflow, no usage, no
+    // composer write. NOTE: the AbortSignal the plugin handed to the
+    // completion never reaches a test hook, so the abort itself is not
+    // observable here; the ignored effect below is.
+    release(answered('늦은 개선안'))
+    await advancing
+    await w.settle()
+    expect(await w.run('status')).toContain('진행 중인 개선 작업: 없음')
+    expect(await w.run('status')).toContain('이 세션 사용량: 0회')
+    expect(w.fills).toHaveLength(2)
+    expect(w.submits).toHaveLength(0)
+
+    // The new session starts a fresh run with fresh counters and none of the
+    // old dialogue.
+    w.setModel((_request, call) => answered(`새 세션 초안${call}`))
+    w.setBox(ORIGINAL)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    expect(w.completes).toHaveLength(3)
+    expect(w.completes[2]?.prompt).toContain('current: 1\nmax: 5')
+    expect(w.completes[2]?.prompt).not.toContain('더 짧게')
+    expect(await w.run('status')).toContain('단계 reviewing · 1/5회')
+    expect(await w.run('status')).toContain('이 세션 사용량: 1회 · 입력 10 · 출력 5 · 캐시 읽기 1 · 캐시 쓰기 2')
+  })
+
+  test('RV3 · undo 뒤 accept는 입력창에 새로 쓴 내용을 덮어쓰지 않는다', { options: { uiMode: 'composer' } }, async ($, on) => {
+    // #28's typed-during-delivery guard lives on a separate, not-yet-merged
+    // branch. This variant asserts only the guarantees present here — accept's
+    // existing draft-conflict protection and undo's state-only (never touches
+    // the composer) rule — and imports nothing from #28.
+    const w = setup($, on)
+    await w.start()
+    w.setModel((_request, call) => answered(`개선안${call}`))
+
+    w.setBox(ORIGINAL)
+    await w.submit(ORIGINAL)
+    await w.advance(1)
+    w.setBox('더 짧게')
+    await w.submit('더 짧게')
+    await w.advance(1)
+    expect(w.completes).toHaveLength(2)
+    const fillsBeforeUndo = w.fills.length
+
+    expect(await w.run('undo')).toBe('이전 성공 라운드로 되돌렸습니다. 사용량과 라운드 한도는 유지됩니다.')
+    expect(await w.run('show')).toContain('현재 개선안:\n개선안1')
+    expect(w.fills).toHaveLength(fillsBeforeUndo)
+
+    // A draft typed after the undo owns the box: accept refuses and keeps it.
+    await w.edit('내가 방금 쓴 요청')
+    expect(w.box()).toBe('내가 방금 쓴 요청')
+    expect(await w.run('accept')).toContain('새로 작성한 내용이 있어 덮어쓰지 않았습니다')
+    expect(w.box()).toBe('내가 방금 쓴 요청')
+    expect(w.fills).toHaveLength(fillsBeforeUndo)
+    expect(w.submits).toHaveLength(0)
+
+    // Once the box is free, accept restores the undone draft and the person's
+    // Enter delivers it once.
+    w.setBox('')
+    expect(await w.run('accept')).toContain('입력창으로 가져왔습니다')
+    expect(w.box()).toBe('개선안1')
+    expect(await w.submit('개선안1')).toEqual({ text: '개선안1' })
+    expect(w.submits.map(submission => submission.text)).toEqual(['개선안1'])
+    expect(w.completes).toHaveLength(2)
+    expect(w.turns).toBe(1)
   })
 })
