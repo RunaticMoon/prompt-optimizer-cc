@@ -26,8 +26,7 @@ const PASS_LABELS: Record<PassReason, string> = {
   'over-limit': '원문 통과 (길이 한도)',
   'no-trigger': '원문 통과 (접두어 없음)',
   pasted: '원문 통과 (붙여넣기 추정)',
-  // #29 adds smart-continuation ('원문 통과 (명확한 승인·이어가기)') here when
-  // the opt-in smart trigger lands; the Record keeps the enum exhaustive.
+  'smart-continuation': '원문 통과 (명확한 승인·이어가기)',
 }
 
 /** How the draft was built, for every reason the composition classifier reports. */
@@ -70,13 +69,14 @@ function compositionLabel(c: PasteClassification): string {
  *
  * Without a stored submission (never classified yet, a session start/end, a
  * classification failure, or a controller from before the diagnostic) the line
- * reads `없음`. A pasted pass adds the one-line recovery route, so the person
- * can optimize this input explicitly without the plugin storing or repeating
- * its text; a prefix trigger or an active dialogue that overrode the paste
- * does not get the route, since the paste is not what decided those.
+ * reads `없음`. A pass the person would likely want optimized anyway — a pasted
+ * draft, or a smart-mode approval reply — adds the one-line recovery route, so
+ * the person can optimize this input explicitly without the plugin storing or
+ * repeating its text; a prefix trigger or an active dialogue that overrode the
+ * paste does not get the route, since the paste is not what decided those.
  *
  * @param submission the controller's stored diagnostic, when it has one
- * @returns one line, plus the recovery line for a pasted pass
+ * @returns one line, plus the recovery line for a passed-through approval
  */
 export function formatSubmissionStatus(submission: Readonly<SubmissionStatus> | null | undefined): string {
   if (submission === null || submission === undefined) return '최근 제출 분류: 없음'
@@ -84,7 +84,7 @@ export function formatSubmissionStatus(submission: Readonly<SubmissionStatus> | 
     ? '미확인'
     : compositionLabel(submission.composition)
   const lines = [`최근 제출 분류: ${decisionLabel(submission)} · 입력: ${input}`]
-  if (submission.kind === 'pass' && submission.passReason === 'pasted') {
+  if (submission.kind === 'pass' && (submission.passReason === 'pasted' || submission.passReason === 'smart-continuation')) {
     lines.push('직접 최적화: /optimize -- <원문>')
   }
   return lines.join('\n')

@@ -120,10 +120,10 @@ function validateKey(key: ConfigKey, raw: unknown): KeyResult {
       return { value: parsed }
     }
     case 'triggerMode': {
-      if (raw === 'always' || raw === 'prefix') return { value: raw }
+      if (raw === 'always' || raw === 'prefix' || raw === 'smart') return { value: raw }
       return {
         value: DEFAULT_CONFIG.triggerMode,
-        warning: `"triggerMode" must be "always" or "prefix"; using default "${DEFAULT_CONFIG.triggerMode}"`,
+        warning: `"triggerMode" must be "always", "prefix" or "smart"; using default "${DEFAULT_CONFIG.triggerMode}"`,
       }
     }
     case 'triggerPrefix':

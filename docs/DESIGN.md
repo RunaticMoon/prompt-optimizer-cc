@@ -138,8 +138,8 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 - release는 `ctrl+u`(커서 위치 무관)다. 그 편집을 소비해 글자를 지우지 않고 모드만 끈다. 꺼진 뒤의 `ctrl+u`는 원래대로 줄 앞부분을 지운다.
 - Backspace@0·Esc·기록 이동(↑↓)·제출 후 비워짐 등 `prompt.edit`가 오지 않는 경로로 입력창이 바뀌면, 다음 편집에서 `e.text`(편집 전 상자)가 기억한 초안과 다른 것으로 감지해 모드를 푼다. 그 감지 전에 Enter하면 모드가 켜진 채 전송될 수 있다.
 - 제출 규칙 순서: eligibility에서 **empty 다음, bypass 앞**에 `rawMode` 규칙을 둔다. 모드가 켜져 있으면 텍스트 비교 없이 `{ kind: 'raw', text }`로 `next`에 그대로 통과시키고, 제출 뒤 모드는 꺼진다. 기존의 제출 시 `rawPrefix` 제거·빈 마커 드롭 규칙은 삭제한다.
-- 전체 제출 규칙 순서: ① 출처 → ② turn·queue → ③ 첨부 → ④ empty → ⑤ raw(rawMode) → ⑥ bypass → ⑦ 슬래시·셸 → ⑧ workflow reply·busy → ⑨ enabled 아님 → ⑩ 6,000자 초과 → ⑪ prefix 트리거 → ⑫ 붙여넣기(pasted) → ⑬ always.
-- 규칙 ⑫ 붙여넣기(pasted): `pasteBypass`가 켜져 있고(`기본 true`) 이 제출의 초안이 붙여넣기·외부 앱 입력만으로 만들어졌으면(`facts.pasted === true`) 다듬지 않고 원문을 `next`로 그대로 보낸다. **prefix 트리거(⑪) 다음, always(⑬) 앞**이라 prefix 모드에서 트리거로 시작하는 붙여넣기는 다듬어진다. ⑫는 `facts`를 주지 않는 호출(예: 초안을 추적하지 않는 경로)에서는 발동하지 않아 기존 동작을 보존한다. 입력 이벤트가 전혀 없는 초안은 붙여넣기로 보지만, 같은 실행에서 composer로 보낸 텍스트를 ↑ 기록에서 다시 불러온 경우에는 그때의 판정을 그대로 쓴다(아래 판별 신호).
+- 전체 제출 규칙 순서: ① 출처 → ② turn·queue → ③ 첨부 → ④ empty → ⑤ raw(rawMode) → ⑥ bypass → ⑦ 슬래시·셸 → ⑧ workflow reply·busy → ⑨ enabled 아님 → ⑩ 6,000자 초과 → ⑪ prefix 트리거 → ⑫ smart 트리거(접두어 → 붙여넣기 → 정확한 승인) → ⑬ 붙여넣기(pasted) → ⑭ always.
+- 규칙 ⑬ 붙여넣기(pasted): `pasteBypass`가 켜져 있고(`기본 true`) 이 제출의 초안이 붙여넣기·외부 앱 입력만으로 만들어졌으면(`facts.pasted === true`) 다듬지 않고 원문을 `next`로 그대로 보낸다. **prefix·smart 트리거(⑪·⑫) 다음, always(⑭) 앞**이라 prefix 모드에서 트리거로 시작하는 붙여넣기는 다듬어지고, smart 모드에서는 ⑫가 접두어·붙여넣기·정확한 승인을 먼저 판정한다. ⑬는 `facts`를 주지 않는 호출(예: 초안을 추적하지 않는 경로)에서는 발동하지 않아 기존 동작을 보존한다. 입력 이벤트가 전혀 없는 초안은 붙여넣기로 보지만, 같은 실행에서 composer로 보낸 텍스트를 ↑ 기록에서 다시 불러온 경우에는 그때의 판정을 그대로 쓴다(아래 판별 신호).
 - 붙여넣기 판별 신호(`hooks/composition.ts`): `Composition`(typed·pastedChars·placeholder·observed)에 관찰을 하나씩 접고 `isPasteOnly`로 판정한다. key 없는 8자 이상 삽입(`PASTE_MIN_CHARS`, 붙여넣기·외부 앱 입력) 또는 `[Pasted text #N …]` 자리표시(`prompt.autocomplete`에서 관찰) 또는 입력 이벤트 없음(`observed === false`: 붙여넣기 직후 Enter가 이벤트 없이 제출)이면 붙여넣기로 본다. key가 있거나 1~7자 key 없는 묶음은 타이핑으로 보고, 타이핑이 한 번이라도 있으면 붙여넣기가 아니다. `hooks/controller.ts`가 `prompt.edit`(진입 시)·`prompt.autocomplete`·plugin `prompt.fill`·제출 시점에 이 값을 갱신·소비한다. 또한 composer 제출마다 텍스트(trim 키)의 pasted 판정을 `recalled` 맵에 기억하고(최대 100개, 오래된 것부터 제거, 세션 시작·종료에도 유지), `observed === false`이고 제출 텍스트가 기억에 있으면 `isPasteOnly` 대신 그 판정을 쓴다: ↑ 기록 불러오기로 같은 실행 중의 프롬프트를 다시 보낼 때 처음 보낼 때의 판정(직접 쓴 것은 최적화, 붙여넣기만 한 것은 통과)을 따른다.
 - 표시: 모드가 켜져 있는 동안 `ui.render`의 `PromptHint` `tail`에 `최적화 끔 ctrl+u 켜기`를 넣고, 상태가 바뀔 때마다 `$.ui.invalidate('ui.render')`를 호출한다.
 
@@ -324,7 +324,7 @@ const result = await $.model.complete(
 ```ts
 interface OptimizerConfig {
   enabled: boolean                 // true
-  triggerMode: 'always' | 'prefix'  // always
+  triggerMode: 'always' | 'prefix' | 'smart'  // always
   triggerPrefix: string             // "?? "
   rawPrefix: string                 // ">> "
   uiMode: 'auto' | 'pane' | 'composer'

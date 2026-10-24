@@ -352,7 +352,7 @@ export function formatStatus(
 ): string {
   const lines: string[] = [
     `프롬프트 옵티마이저: ${config.enabled ? '켜짐' : '꺼짐'}`,
-    `트리거: ${config.triggerMode === 'always' ? '항상' : `접두어 "${config.triggerPrefix}"`} · UI: ${config.uiMode}`,
+    `트리거: ${triggerLabel(config)} · UI: ${config.uiMode}`,
     `옵티마이저 모델: ${config.model} · 최대 토큰: ${config.maxTokens} · 타임아웃: ${config.timeoutMs}ms · 최대 라운드: ${config.maxRounds}`,
     `모델별 지침: ${config.modelGuidance ? '켜짐' : '꺼짐(공통 지침만 사용)'}`,
     `마지막 최적화 대상: ${describeLastTarget(guidance)}`,
@@ -389,6 +389,16 @@ export function formatStatus(
     `이 세션 사용량: ${usage.calls}회 · 입력 ${usage.input} · 출력 ${usage.output} · 캐시 읽기 ${usage.cacheRead} · 캐시 쓰기 ${usage.cacheWrite}`,
   )
   return lines.join('\n')
+}
+
+/**
+ * The value half of the `트리거` status line, per mode. The smart wording names
+ * what the mode actually changed: exact approval replies pass through.
+ */
+function triggerLabel(config: OptimizerConfig): string {
+  if (config.triggerMode === 'always') return '항상'
+  if (config.triggerMode === 'smart') return 'smart (명확한 승인·이어가기 통과)'
+  return `접두어 "${config.triggerPrefix}"`
 }
 
 /**

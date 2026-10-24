@@ -499,6 +499,13 @@ describe('classifySubmission — rule 11: prefix mode', () => {
     ).toEqual({ kind: 'pass', reason: 'no-trigger' })
   })
 
+  test('an approval reply without the trigger still passes as no-trigger', () => {
+    expect(classifySubmission(submit({ text: '응' }), config({ triggerMode: 'prefix' }), state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'no-trigger',
+    })
+  })
+
   test('a configured trigger prefix is honored literally', () => {
     expect(
       classifySubmission(
@@ -533,7 +540,223 @@ describe('classifySubmission — rule 11: prefix mode', () => {
   })
 })
 
-describe('classifySubmission — rule 12: pasted draft', () => {
+describe('classifySubmission — rule 12: smart mode', () => {
+  const smart = config({ triggerMode: 'smart' })
+
+  test('the exact whole-input approvals pass with smart-continuation', () => {
+    for (const text of ['응', '계속', '진행해']) {
+      expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
+        kind: 'pass',
+        reason: 'smart-continuation',
+      })
+    }
+  })
+
+  test('surrounding whitespace still matches, and the decision carries no text change', () => {
+    for (const text of [' 응', '응 ', '  계속  ', '\t진행해\n']) {
+      expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
+        kind: 'pass',
+        reason: 'smart-continuation',
+      })
+    }
+  })
+
+  test('characters trim() removes at the edges still match the approval', () => {
+    // U+FEFF (BOM/zero-width no-break space) and U+00A0 (no-break space) count
+    // as leading/trailing whitespace to trim(), so the plan's trim() contract
+    // passes them; only characters trim() keeps, such as U+200B, block a pass.
+    for (const text of ['응\uFEFF', '응\u00A0', '\uFEFF계속\u00A0']) {
+      expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
+        kind: 'pass',
+        reason: 'smart-continuation',
+      })
+    }
+  })
+
+  test('punctuation, variants and longer sentences conservatively optimize', () => {
+    for (const text of ['응.', '응?', '계속해', '네', 'yes', '응요']) {
+      expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
+        kind: 'optimize',
+        text,
+        trigger: 'auto',
+      })
+    }
+  })
+
+  test('short new requests, negations and mixed approvals are never bypassed', () => {
+    for (const text of ['운영 DB 삭제해', '응, 대신 DB 구조도 바꿔줘', '응 하지마', '아니', '계속\nDB도 변경']) {
+      expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
+        kind: 'optimize',
+        text,
+        trigger: 'auto',
+      })
+    }
+  })
+
+  test('emoji, code, quotes and characters trim() does not remove are not approvals', () => {
+    for (const text of ['응🚀', '`응`', '"응"', '응\u200b']) {
+      expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
+        kind: 'optimize',
+        text,
+        trigger: 'auto',
+      })
+    }
+  })
+
+  test('the explicit trigger prefix still optimizes the stripped remainder', () => {
+    expect(classifySubmission(submit({ text: '?? 응' }), smart, state(), 0)).toEqual({
+      kind: 'optimize',
+      text: '응',
+      trigger: 'prefix',
+    })
+  })
+
+  test('the trigger prefix wins over a pasted draft', () => {
+    expect(classifySubmission(submit({ text: '?? 응' }), smart, state(), 0, { pasted: true })).toEqual({
+      kind: 'optimize',
+      text: '응',
+      trigger: 'prefix',
+    })
+  })
+
+  test('a bare trigger stays a blank raw escape', () => {
+    expect(classifySubmission(submit({ text: '??' }), smart, state(), 0)).toEqual({ kind: 'raw', text: '' })
+    expect(classifySubmission(submit({ text: '??   ' }), smart, state(), 0)).toEqual({ kind: 'raw', text: '' })
+  })
+
+  test('a custom prefix is honored literally', () => {
+    expect(
+      classifySubmission(
+        submit({ text: '## 다듬어줘' }),
+        config({ triggerMode: 'smart', triggerPrefix: '## ' }),
+        state(),
+        0,
+      ),
+    ).toEqual({ kind: 'optimize', text: '다듬어줘', trigger: 'prefix' })
+  })
+
+  test('an empty configured prefix matches nothing instead of everything', () => {
+    const emptyPrefix = config({ triggerMode: 'smart', triggerPrefix: '' })
+    expect(classifySubmission(submit({ text: '응' }), emptyPrefix, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'smart-continuation',
+    })
+    expect(classifySubmission(submit({ text: '그대로' }), emptyPrefix, state(), 0)).toEqual({
+      kind: 'optimize',
+      text: '그대로',
+      trigger: 'auto',
+    })
+  })
+
+  test('a pasted unprefixed approval keeps the paste reason while bypass is on', () => {
+    expect(classifySubmission(submit({ text: '응' }), smart, state(), 0, { pasted: true })).toEqual({
+      kind: 'pass',
+      reason: 'pasted',
+    })
+  })
+
+  test('with pasteBypass off, a pasted approval falls through to smart-continuation', () => {
+    expect(
+      classifySubmission(submit({ text: '응' }), config({ triggerMode: 'smart', pasteBypass: false }), state(), 0, {
+        pasted: true,
+      }),
+    ).toEqual({ kind: 'pass', reason: 'smart-continuation' })
+  })
+
+  test('the higher rules still win under smart mode', () => {
+    const ticket = bypass()
+    const mode = { sessionId: SESSION, draft: '초안' }
+    // origin, turn, queue, attachments, empty
+    expect(classifySubmission(submit({ text: '응', origin: { kind: 'sdk' } }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'not-composer',
+    })
+    expect(classifySubmission(submit({ text: '응', turnId: 't1' }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'mid-turn',
+    })
+    expect(classifySubmission(submit({ text: '응', wait: true }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'queued',
+    })
+    expect(classifySubmission(submit({ text: '응', attachments: [{ type: 'image' }] }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'attachments',
+    })
+    expect(classifySubmission(submit({ text: '   ' }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'empty',
+    })
+    // raw mode and bypass ticket
+    expect(classifySubmission(submit({ text: '응' }), smart, state({ rawMode: mode }), 0)).toEqual({
+      kind: 'raw',
+      text: '응',
+    })
+    expect(classifySubmission(submit({ text: ticket.text }), smart, state({ bypass: ticket }), 0)).toEqual({
+      kind: 'bypass',
+      text: ticket.text,
+      ticket,
+    })
+    // slash and shell
+    expect(classifySubmission(submit({ text: '/clear' }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'slash-command',
+    })
+    expect(classifySubmission(submit({ text: '!ls' }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'shell',
+    })
+    // disabled and over-limit
+    expect(classifySubmission(submit({ text: '응' }), config({ triggerMode: 'smart', enabled: false }), state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'disabled',
+    })
+    expect(classifySubmission(submit({ text: '응'.repeat(6001) }), smart, state(), 0)).toEqual({
+      kind: 'pass',
+      reason: 'over-limit',
+    })
+  })
+
+  test('an active composer dialogue takes the approval as a reply, not a bypass', () => {
+    expect(
+      classifySubmission(
+        submit({ text: '응' }),
+        smart,
+        state({ workflow: workflow({ ui: 'composer', phase: 'reviewing' }) }),
+        0,
+      ),
+    ).toEqual({ kind: 'reply', workflowId: 'wf-1', text: '응' })
+    expect(
+      classifySubmission(
+        submit({ text: '계속' }),
+        smart,
+        state({ workflow: workflow({ ui: 'composer', phase: 'failed' }) }),
+        0,
+      ),
+    ).toEqual({ kind: 'reply', workflowId: 'wf-1', text: '계속' })
+  })
+
+  test('a workflow mid-flight or held by the pane is busy', () => {
+    expect(
+      classifySubmission(
+        submit({ text: '응' }),
+        smart,
+        state({ workflow: workflow({ ui: 'composer', phase: 'generating' }) }),
+        0,
+      ),
+    ).toEqual({ kind: 'busy', workflowId: 'wf-1' })
+    expect(
+      classifySubmission(
+        submit({ text: '응' }),
+        smart,
+        state({ workflow: workflow({ ui: 'pane', phase: 'reviewing' }) }),
+        0,
+      ),
+    ).toEqual({ kind: 'busy', workflowId: 'wf-1' })
+  })
+})
+
+describe('classifySubmission — rule 13: pasted draft', () => {
   test('a pasted-only draft in always mode passes as pasted', () => {
     expect(classifySubmission(submit(), config(), state(), 0, { pasted: true })).toEqual({
       kind: 'pass',
@@ -621,7 +844,7 @@ describe('classifySubmission — rule 12: pasted draft', () => {
   })
 })
 
-describe('classifySubmission — rule 13: always mode', () => {
+describe('classifySubmission — rule 14: always mode', () => {
   test('ordinary text optimizes on the text as typed', () => {
     expect(classifySubmission(submit({ text: '  로그인 오류를 고쳐줘  ' }), config(), state(), 0)).toEqual({
       kind: 'optimize',
@@ -635,6 +858,22 @@ describe('classifySubmission — rule 13: always mode', () => {
     expect(classifySubmission(submit({ text }), config(), state(), 0)).toEqual({
       kind: 'optimize',
       text,
+      trigger: 'auto',
+    })
+  })
+
+  test('always mode still optimizes a typed approval reply', () => {
+    expect(classifySubmission(submit({ text: '응' }), config(), state(), 0)).toEqual({
+      kind: 'optimize',
+      text: '응',
+      trigger: 'auto',
+    })
+  })
+
+  test('always mode keeps its own treatment of prefix text (no stripping)', () => {
+    expect(classifySubmission(submit({ text: '?? 응' }), config(), state(), 0)).toEqual({
+      kind: 'optimize',
+      text: '?? 응',
       trigger: 'auto',
     })
   })

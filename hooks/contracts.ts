@@ -11,9 +11,12 @@ export interface OptimizerConfig {
   enabled: boolean
   /** Whether the main session's model selects model-specific rewrite guidance. */
   modelGuidance: boolean
-  /** `always` intercepts every eligible prompt; `prefix` only prefixed ones. */
+  /** `always` intercepts every eligible prompt; `prefix` only prefixed ones; `smart` also passes exact approval replies through. */
   triggerMode: TriggerMode
-  /** Prefix that starts an optimization when `triggerMode` is `prefix`. */
+  /**
+   * Prefix that starts an optimization when `triggerMode` is `prefix` or
+   * `smart`; in smart mode it also outranks paste classification.
+   */
   triggerPrefix: string
   /** Leading marker stripped before sending the rest of a prompt straight through. */
   rawPrefix: string
@@ -44,7 +47,7 @@ export interface OptimizerConfig {
 export type ConfigKey = keyof OptimizerConfig
 
 /** How a submission qualifies for interception. */
-export type TriggerMode = 'always' | 'prefix'
+export type TriggerMode = 'always' | 'prefix' | 'smart'
 
 /** Which interface holds the improvement dialogue. */
 export type UiMode = 'auto' | 'pane' | 'composer'
@@ -338,6 +341,7 @@ export type PassReason =
   | 'over-limit'
   | 'no-trigger'
   | 'pasted'
+  | 'smart-continuation'
 
 /**
  * How the classifier read the submitted draft's construction

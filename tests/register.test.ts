@@ -739,6 +739,132 @@ describe('register — the wired module', () => {
       expect(opens).toHaveLength(1)
     },
   )
+
+  // Smart mode: an exact approval reply leaves through `next({ ...e, text })`
+  // with no pane, no completion and no text change; a new request next to it
+  // still optimizes.
+  test(
+    'smart mode: an approval passes through without a pane or model call, a new request still optimizes',
+    { options: { triggerMode: 'smart' } },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const opens: string[] = []
+      let completes = 0
+      let box = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => {
+        completes += 1
+        return { value: answered(DRAFT) }
+      })
+      on('ui.open', (_$, e) => {
+        opens.push(e.id)
+        return { value: { isPlaced: true } }
+      })
+      on('ui.close', () => ({ value: undefined }))
+      on('ui.status', () => ({ value: undefined }))
+      on('ui.invalidate', () => ({ value: undefined }))
+      on('ui.log', () => ({ value: undefined }))
+      on('ui.toast', () => ({ value: undefined }))
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.submit', (_$, e) => ({ text: e.text }))
+
+      await $.session.start(SESSION_START)
+
+      await typedEdit($, '응')
+      expect(await $.prompt.submit({ text: '응', origin: { kind: 'composer' }, wait: false }))
+        .toEqual({ text: '응' })
+      expect(opens).toEqual([])
+      expect(completes).toBe(0)
+
+      await typedEdit($, '운영 DB 삭제해')
+      expect(await $.prompt.submit({ text: '운영 DB 삭제해', origin: { kind: 'composer' }, wait: false }))
+        .toEqual({ drop: '프롬프트를 다듬는 중입니다.' })
+      expect(opens).toHaveLength(1)
+      await clock.advance(1)
+      expect(completes).toBe(1)
+    },
+  )
+
+  // The submit hook forwards `{ ...e, text }`, so a passed submission keeps
+  // whatever the engine attached: its context blocks and non-text items ride
+  // along untouched.
+  test(
+    'smart mode: a forwarded submission keeps its context and attachments',
+    { options: { triggerMode: 'smart' } },
+    async ($, on) => {
+      const seen: PromptSubmitInput[] = []
+      let box = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered(DRAFT) }))
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.submit', (_$, e) => {
+        seen.push(e)
+        return { text: e.text }
+      })
+
+      await $.session.start(SESSION_START)
+
+      await typedEdit($, '응')
+      await $.prompt.submit({
+        text: '응',
+        origin: { kind: 'composer' },
+        wait: false,
+        context: ['보존된 문맥 블록'],
+      })
+      await $.prompt.submit({
+        text: '사진 속 오류를 고쳐줘',
+        origin: { kind: 'composer' },
+        wait: false,
+        attachments: [{ type: 'image' }],
+      })
+
+      expect(seen.map(s => s.text)).toEqual(['응', '사진 속 오류를 고쳐줘'])
+      expect(seen[0]?.context).toEqual(['보존된 문맥 블록'])
+      expect(seen[1]?.attachments).toEqual([{ type: 'image' }])
+    },
+  )
+
+  test(
+    'smart mode: status names the smart trigger and verdict, and reading it twice keeps the verdict',
+    { options: { triggerMode: 'smart', uiMode: 'composer' } },
+    async ($, on) => {
+      let box = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered(DRAFT) }))
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.submit', (_$, e) => ({ text: e.text }))
+
+      await $.session.start(SESSION_START)
+      await typedEdit($, '진행해')
+      await $.prompt.submit({ text: '진행해', origin: { kind: 'composer' }, wait: false })
+
+      const first = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+      expect(first.text).toContain('트리거: smart (명확한 승인·이어가기 통과)')
+      expect(first.text).toContain('최근 제출 분류: 원문 통과 (명확한 승인·이어가기) · 입력: 직접 입력')
+      expect(first.text).toContain('직접 최적화: /optimize -- <원문>')
+
+      const second = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+      expect(second.text).toContain('원문 통과 (명확한 승인·이어가기)')
+    },
+  )
 })
 
 describe('wired ui.ask questions', () => {
