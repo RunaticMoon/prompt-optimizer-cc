@@ -846,7 +846,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
         }
         // The reducer folds the usage but accepts the reply only from a live
         // generating run, so a duplicate same-generation completion stores
-        // nothing and must raise no notice or dialog for it either.
+        // nothing and must raise no notice or dialog for it either. The gate
+        // is defense-in-depth: no public path issues a second completion for
+        // one generation (rounds are scheduled only from a matching
+        // consumeAndRun phase snapshot, re-entry into a generating run is
+        // refused synchronously, and undo is refused while generating).
         const live = !stale && state.workflow?.phase === 'generating'
         apply({ type: 'reply', workflowId, generation, sessionId: current.sessionId, reply: result.reply, usage: result.usage })
         if (!live) return
