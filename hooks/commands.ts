@@ -28,9 +28,14 @@ import type {
   OptimizerConfig,
   RuntimeState,
 } from './contracts'
-import { IN_FLIGHT_REASON, type ActionResult } from './controller'
+import {
+  CORRECTION_LIMIT_NOTICE,
+  CORRECTION_NOTICE,
+  IN_FLIGHT_REASON,
+  type ActionResult,
+} from './controller'
 import { formatDecisions } from './decision-view'
-import { workflowRoundLimit } from './state'
+import { canStartRound, workflowRoundLimit } from './state'
 import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
@@ -169,9 +174,10 @@ const HELP_TEXT = [
  * Parses the argument string after `/optimize`.
  *
  * The first whitespace-delimited token, compared case-insensitively, selects a
- * reserved command. `retry` and `model` take the rest as their argument, but
- * every other reserved command takes none: trailing text after it is a usage
- * error rather than silently dropped, and the error points at the `--` escape.
+ * reserved command. `retry` and `model` take the rest as their argument, and
+ * `correct` takes an id plus the rest as its replacement text; every other
+ * reserved command takes none: trailing text after it is a usage error rather
+ * than silently dropped, and the error points at the `--` escape.
  * `model` without an argument, or an unknown shape, becomes an `error`. Any
  * non-reserved first token (or a `--` escape) makes the whole trimmed argument
  * the optimization text, and an empty argument starts from the current
@@ -505,10 +511,15 @@ async function dispatch(
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       const correct = deps.controller.correctDecision
       if (correct === undefined) return { text: '결정 정정을 지원하지 않는 호스트입니다.' }
-      return actionOutcome(
-        correct.call(deps.controller, command.id, command.text),
-        CORRECTION_NOTICE,
-      )
+      const result = correct.call(deps.controller, command.id, command.text)
+      if (!result.ok) return { text: result.reason }
+      // Match the controller's notice: only a round below the limit can apply
+      // the correction directly.
+      return {
+        text: canStartRound(deps.controller.getState(), deps.settings.get().maxRounds)
+          ? CORRECTION_NOTICE
+          : CORRECTION_LIMIT_NOTICE,
+      }
     }
     case 'help':
       return { text: HELP_TEXT }
@@ -563,9 +574,6 @@ async function dispatch(
       }
   }
 }
-
-/** The success line after an explicit decision correction. */
-const CORRECTION_NOTICE = '결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.'
 
 /** A friendly line when a command needs a run and none is active. */
 const NO_WORKFLOW = '진행 중인 개선 작업이 없습니다. `/optimize <텍스트>`로 새로 시작하세요.'

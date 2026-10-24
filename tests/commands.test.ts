@@ -750,6 +750,16 @@ describe('registerCommands — controller intents', () => {
     expect(result.text).toBe('결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.')
   })
 
+  test('a correction at the round limit returns the approval-first line', async ($, on) => {
+    const r = rig({ current: liveState({ workflow: workflow({ rounds: 5 }) }) })
+    wire(on, r)
+    const result = await run($, 'correct d1 로컬')
+    expect(r.calls).toEqual(['correctDecision(d1,로컬)'])
+    expect(result.text).toBe(
+      '결정을 정정했습니다. 라운드 한도에 도달했으니 /optimize more 로 승인한 뒤 /optimize retry 로 반영하세요.',
+    )
+  })
+
   test('correction refusals, no-workflow and invalid shapes never start a run', async ($, on) => {
     const refused = rig({
       results: { correctDecision: { ok: false, reason: '결정 d9을(를) 찾지 못했습니다.' } },

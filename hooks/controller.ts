@@ -26,7 +26,7 @@ import { EMPTY_COMPOSITION, isPasteOnly, noteAutocomplete, noteBox, noteEditInpu
 import type { Composition } from './composition'
 import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
-import { emptyLedger, findDecision, isActiveDecision } from './decisions'
+import { emptyLedger, findDecision, hasPendingCorrection, isActiveDecision } from './decisions'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
@@ -68,7 +68,18 @@ const LIMIT_NOTICE = '개선 횟수 한도에 도달했습니다'
 const EXTEND_APPROVAL = '추가 5회 허용'
 const EXTEND_DECLINE = '현재 개선안 유지'
 const EXTEND_GUIDE = '미해결 질문이 남아 있습니다. 5회를 더 허용하려면 패널에서 선택하거나 /optimize more 를 입력하세요.'
+const CORRECTION_GUIDE = '정정한 결정이 아직 반영되지 않았습니다. 5회를 더 허용하려면 패널에서 선택하거나 /optimize more 를 입력하세요.'
+/** The correction succeeded and a normal retry can apply it. */
+export const CORRECTION_NOTICE = '결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.'
+/** The correction succeeded but needs an approved round before retry. */
+export const CORRECTION_LIMIT_NOTICE =
+  '결정을 정정했습니다. 라운드 한도에 도달했으니 /optimize more 로 승인한 뒤 /optimize retry 로 반영하세요.'
 const ACCEPT_NOTICE = '개선안을 입력창에 넣었습니다. Enter 로 전송하세요.'
+
+/** The limit guidance that matches why another round would still help. */
+function extensionGuide(workflow: Readonly<Workflow> | null | undefined): string {
+  return hasPendingCorrection(workflow) ? CORRECTION_GUIDE : EXTEND_GUIDE
+}
 /** Result reason for an action refused while its run is mid-flight. */
 export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
 
@@ -323,13 +334,17 @@ export function createController(deps: ControllerDeps): OptimizerController {
   /** One permission dialog per exhausted round; never itself calls the model. */
   function askRoundExtension(ports: EnginePorts): void {
     const asked = state.workflow
-    if (!asked || asked.phase !== 'reviewing' || !asked.question?.trim()
+    if (!asked || asked.phase !== 'reviewing'
       || canStartRound(state, deps.getConfig().maxRounds) || asked.limitAsk || pendingAsk) return
+    // A correction accepted at the limit clears its answered question but still
+    // needs a round, so it gets the same explicit approval path.
+    const pendingCorrection = hasPendingCorrection(asked)
+    if (!asked.question?.trim() && !pendingCorrection) return
     const mark = (status: 'pending' | 'closed' | 'declined'): void =>
       apply({ type: 'limit-ask', workflowId: asked.id, round: asked.rounds, status })
     if (!ports.ui.ask) {
       mark('closed')
-      notify(EXTEND_GUIDE)
+      notify(extensionGuide(asked))
       return
     }
     const current = (): boolean => sameQuestion(asked)
@@ -338,7 +353,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
     mark('pending')
     try {
       void ports.ui.ask(
-        `${workflowRoundLimit(asked, deps.getConfig().maxRounds)}회 한도에 도달했지만 미해결 질문이 남아 있습니다. 이번 개선 작업에 5회를 더 허용할까요?`,
+        pendingCorrection
+          ? `${workflowRoundLimit(asked, deps.getConfig().maxRounds)}회 한도에 도달했지만 정정한 결정이 아직 반영되지 않았습니다. 이번 개선 작업에 5회를 더 허용할까요?`
+          : `${workflowRoundLimit(asked, deps.getConfig().maxRounds)}회 한도에 도달했지만 미해결 질문이 남아 있습니다. 이번 개선 작업에 5회를 더 허용할까요?`,
         { options: [EXTEND_APPROVAL, EXTEND_DECLINE], header: '라운드 연장' },
       ).then(async answer => {
         if (pendingAsk === asked) pendingAsk = null
@@ -360,13 +377,13 @@ export function createController(deps: ControllerDeps): OptimizerController {
         if (pendingAsk === asked) pendingAsk = null
         const wasCurrent = current()
         mark('closed')
-        if (wasCurrent) notify(EXTEND_GUIDE)
+        if (wasCurrent) notify(extensionGuide(asked))
         else askQuestion(ports)
       })
     } catch {
       if (pendingAsk === asked) pendingAsk = null
       mark('closed')
-      notify(EXTEND_GUIDE)
+      notify(extensionGuide(asked))
     }
   }
 
@@ -380,11 +397,16 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return { ok: false, reason: '열린 선택 창에서 추가 라운드 허용 여부를 선택하세요.' }
     }
     const maxRounds = workflowRoundLimit(workflow, deps.getConfig().maxRounds)
-    if (workflow.rounds < maxRounds || !workflow.question?.trim()) {
-      return { ok: false, reason: '한도에 도달하고 미해결 질문이 남아 있을 때만 연장할 수 있습니다.' }
+    const pendingCorrection = hasPendingCorrection(workflow)
+    if (workflow.rounds < maxRounds || (!workflow.question?.trim() && !pendingCorrection)) {
+      return { ok: false, reason: '한도에 도달하고 미해결 질문이나 반영할 정정이 남아 있을 때만 연장할 수 있습니다.' }
     }
     apply({ type: 'limit-extended', workflowId: workflow.id, round: workflow.rounds, maxRounds: maxRounds + 5 })
-    notify(`이번 개선 작업의 한도를 ${maxRounds + 5}회로 늘렸습니다. 남은 질문에 답하거나 보완 내용을 입력하세요.`)
+    notify(
+      pendingCorrection
+        ? `이번 개선 작업의 한도를 ${maxRounds + 5}회로 늘렸습니다. /optimize retry로 정정한 결정을 반영하세요.`
+        : `이번 개선 작업의 한도를 ${maxRounds + 5}회로 늘렸습니다. 남은 질문에 답하거나 보완 내용을 입력하세요.`,
+    )
     askQuestion(ports)
     return { ok: true }
   }
@@ -934,7 +956,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
         if (workflow === null) return { action: 'drop', reason: BUSY_NOTICE }
         if (!canStartRound(state, deps.getConfig().maxRounds)) {
           askRoundExtension(ports)
-          return { action: 'drop', reason: `${LIMIT_NOTICE}. ${EXTEND_GUIDE}` }
+          return { action: 'drop', reason: `${LIMIT_NOTICE}. ${extensionGuide(workflow)}` }
         }
         try {
           scheduleTask(
@@ -1086,7 +1108,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
     if (text.trim() === '') return refuseCorrection('정정할 내용을 입력하세요.')
 
     apply({ type: 'decision-corrected', workflowId: workflow.id, targetId: id, text })
-    notify('결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.')
+    // The notice has to be actionable: at the limit a retry would be refused
+    // before it could apply the correction, so name the approval step first.
+    notify(canStartRound(state, deps.getConfig().maxRounds) ? CORRECTION_NOTICE : CORRECTION_LIMIT_NOTICE)
     return { ok: true }
   }
 

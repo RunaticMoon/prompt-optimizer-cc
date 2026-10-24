@@ -24,6 +24,7 @@ import type {
   Workflow,
 } from './contracts'
 import { appendAnswer, appendCorrection, emptyLedger, isActiveDecision, questionIdFor } from './decisions'
+import { REQUEST_BUDGET_NOTICE } from './model'
 
 /**
  * The only legal `phase` moves. Everything else — including a move to the same
@@ -192,11 +193,14 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       }
       const entry = dialogueEntry(event.reply)
       if (entry !== null) updated.dialogue = [...current.dialogue, entry]
-      // A recovery reply clears the failure that preceded it.
+      // A recovery reply clears the failure that preceded it, and a successful
+      // draft applies any correction recorded before it. `false` (not a
+      // deletion) records that even when the reply adds no dialogue entry.
       delete updated.lastError
       delete updated.budgetError
       delete updated.questionAsk
       delete updated.limitAsk
+      if (current.correctionPending === true) updated.correctionPending = false
       return { ...base, usage, workflow: updated }
     }
 
@@ -256,24 +260,24 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       if (event.sessionId !== base.sessionId) return base
       const current = matchWorkflow(base, event.workflowId, event.generation)
       if (current === null || current.phase !== 'generating') return base
-      return {
-        ...base,
-        workflow: {
-          ...current,
-          phase: 'failed',
-          progress: undefined,
-          // The actual counts stay in status details; the visible line names
-          // the configured limit without blaming decision text alone.
-          lastError:
-            `확정 결정과 필수 입력이 요청 한도(${event.limitChars}자)를 초과했습니다. `
-            + '결정을 정정하거나 새 작업으로 나눠 주세요. 모델은 호출하지 않았습니다.',
-          budgetError: {
-            requiredChars: event.requiredChars,
-            limitChars: event.limitChars,
-            decisionIds: [...event.decisionIds],
-          },
+      const updated: Workflow = {
+        ...current,
+        phase: 'failed',
+        progress: undefined,
+        // The actual counts stay in status details; the visible line names
+        // the configured limit without blaming decision text alone.
+        lastError: REQUEST_BUDGET_NOTICE,
+        budgetError: {
+          requiredChars: event.requiredChars,
+          limitChars: event.limitChars,
+          decisionIds: [...event.decisionIds],
         },
       }
+      // A refused round ends review like a generic failure. A lingering
+      // question marker would reject its close and keep correction blocked.
+      delete updated.questionAsk
+      delete updated.limitAsk
+      return { ...base, workflow: updated }
     }
 
     case 'usage': {
@@ -349,6 +353,9 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
             ...current.dialogue,
             { role: 'user', text: event.text, decisionId: corrected.decision.id },
           ],
+          // A limit extension and retry must still be possible after the
+          // answered question is gone; only a successful reply clears this.
+          correctionPending: true,
           // The old question belonged to the replaced value; a later retry
           // must not answer it by accident.
           question: null,

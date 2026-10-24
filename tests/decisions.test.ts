@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import type { AnswerSource, DecisionLedger, UserDecision } from '../hooks/contracts'
+import type { AnswerSource, DecisionLedger, UserDecision, Workflow } from '../hooks/contracts'
 import {
   activeDecisions,
   appendAnswer,
@@ -8,6 +8,7 @@ import {
   decisionIdFor,
   emptyLedger,
   findDecision,
+  hasPendingCorrection,
   isActiveDecision,
   ledgerOf,
   questionIdFor,
@@ -164,5 +165,58 @@ describe('supersession and active decisions', () => {
     })).ledger
     const corrected = appendCorrection(second, second.entries[0] as UserDecision, '서버에서 처리')
     expect(activeDecisions(corrected.ledger).map(entry => entry.id)).toEqual(['d2', 'd3'])
+  })
+})
+
+describe('hasPendingCorrection', () => {
+  function workflowWith(
+    entries: readonly UserDecision[],
+    dialogue: Workflow['dialogue'],
+  ): Workflow {
+    return { decisions: ledger(entries), dialogue } as Workflow
+  }
+
+  test('is true only when the latest correction is not followed by an optimizer turn', () => {
+    const corrected = decision({ id: 'd2', text: '로컬', supersedes: 'd1' })
+    const stale = workflowWith([decision(), corrected], [
+      { role: 'optimizer', text: '이전 응답' },
+      { role: 'user', text: '로컬', decisionId: 'd2' },
+    ])
+    expect(hasPendingCorrection(stale)).toBe(true)
+
+    const applied = workflowWith([decision(), corrected], [
+      { role: 'user', text: '로컬', decisionId: 'd2' },
+      { role: 'optimizer', text: '정정을 반영한 응답' },
+    ])
+    expect(hasPendingCorrection(applied)).toBe(false)
+  })
+
+  test('a later correction becomes pending even after an earlier one was applied', () => {
+    const base = [decision({ id: 'd1' })]
+    const second = appendCorrection(ledger(base), base[0] as UserDecision, '두 번째')
+    const third = appendCorrection(second.ledger, second.ledger.entries[1] as UserDecision, '세 번째')
+    const workflow = workflowWith(third.ledger.entries, [
+      { role: 'optimizer', text: 'R2' },
+      { role: 'user', text: '두 번째', decisionId: 'd2' },
+      { role: 'optimizer', text: 'R3' },
+      { role: 'user', text: '세 번째', decisionId: 'd3' },
+    ])
+    expect(hasPendingCorrection(workflow)).toBe(true)
+  })
+
+  test('a ledger without corrections, or no ledger at all, is not pending', () => {
+    expect(hasPendingCorrection(workflowWith([decision()], [
+      { role: 'user', text: '값', decisionId: 'd1' },
+    ]))).toBe(false)
+    expect(hasPendingCorrection(undefined)).toBe(false)
+    expect(hasPendingCorrection({ dialogue: [] } as Workflow)).toBe(false)
+  })
+
+  test('the reducer flag outranks the dialogue fallback, including an empty reply', () => {
+    const corrected = workflowWith([decision(), decision({ id: 'd2', supersedes: 'd1' })], [
+      { role: 'user', text: '로컬', decisionId: 'd2' },
+    ])
+    expect(hasPendingCorrection({ ...corrected, correctionPending: false })).toBe(false)
+    expect(hasPendingCorrection({ ...corrected, correctionPending: true })).toBe(true)
   })
 })

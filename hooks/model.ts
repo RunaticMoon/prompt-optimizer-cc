@@ -194,8 +194,8 @@ function pendingQuestionSection(workflow: Readonly<Workflow>): string | null {
 /**
  * The dialogue turns that may still be sent. A captured answer whose decision
  * was superseded never appears as operative dialogue; once the ledger records
- * a correction, optimizer turns up to that correction are omitted too, since
- * they can repeat the replaced value.
+ * a correction, optimizer turns up to the LATEST correction are omitted too,
+ * since an earlier turn can repeat a value the person has since replaced.
  */
 function operativeDialogue(
   dialogue: readonly OptimizerMessage[],
@@ -205,14 +205,14 @@ function operativeDialogue(
   const correctionIds = new Set(
     ledger.entries.filter(entry => entry.supersedes !== undefined).map(entry => entry.id),
   )
-  const firstCorrection = dialogue.findIndex(
+  const lastCorrection = dialogue.findLastIndex(
     message => message.decisionId !== undefined && correctionIds.has(message.decisionId),
   )
   return dialogue.filter((message, index) => {
     if (message.role === 'user' && message.decisionId !== undefined && replaced.has(message.decisionId)) {
       return false
     }
-    if (firstCorrection !== -1 && index <= firstCorrection && message.role === 'optimizer') return false
+    if (lastCorrection !== -1 && index <= lastCorrection && message.role === 'optimizer') return false
     return true
   })
 }

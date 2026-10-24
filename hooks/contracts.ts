@@ -81,7 +81,7 @@ export interface AnswerSource {
   question: string | null
   /** The answer choices exactly as offered, empty when there were none. */
   options: readonly string[]
-  /** Successful rounds recorded when the answer arrived. */
+  /** Round count at the time (a failed attempt is still recorded as a round). */
   answeredAfterRound: number
 }
 
@@ -149,6 +149,12 @@ export interface Workflow {
   questionAsk?: 'pending' | 'closed'
   /** Recorded user-authored answers with their exact question/option provenance. */
   decisions?: DecisionLedger
+  /**
+   * A correction recorded after the newest successful draft has not been
+   * applied yet; the next successful reply clears it. Failures and budget
+   * refusals keep it, so an extension can still approve the applying round.
+   */
+  correctionPending?: boolean
   /** Id of the question awaiting an answer; minted by a successful reply, null when none. */
   questionId?: string | null
   /** Last preflight refusal whose protected evidence exceeded the request budget. */

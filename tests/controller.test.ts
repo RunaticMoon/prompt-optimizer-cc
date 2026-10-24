@@ -20,7 +20,7 @@ import {
   type ControllerDeps,
   type OptimizerController,
 } from '../hooks/controller'
-import { activeDecisions } from '../hooks/decisions'
+import { activeDecisions, hasPendingCorrection } from '../hooks/decisions'
 import { REQUEST_BUDGET_NOTICE } from '../hooks/model'
 import type { RawEditFacts } from '../hooks/raw-mode'
 
@@ -1437,6 +1437,28 @@ describe('preflight request budget', () => {
     expect(accepted.ok).toBe(true)
     expect(h.fills.at(-1)?.text).toBe(before.workflow?.draft)
   })
+
+  test('a budget refusal still allows the oversized decision to be corrected, and retry applies it', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    await h.controller.refine(h.ports, 'X'.repeat(17000))
+    expect(h.controller.getState().workflow?.phase).toBe('failed')
+    expect(h.controller.getState().workflow?.budgetError?.decisionIds).toEqual(['d1'])
+    const before = h.calls.complete
+
+    const corrected = h.controller.correctDecision('d1', '짧은 결정')
+    expect(corrected).toEqual({ ok: true })
+    expect(h.calls.complete).toBe(before)
+    expect(h.controller.getState().workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(before + 1)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('짧은 결정')
+    expect(prompt).not.toContain('X'.repeat(1000))
+  })
 })
 
 describe('failure handling', () => {
@@ -2531,6 +2553,31 @@ describe('explicit decision correction', () => {
     expect(prompt).not.toContain('외부 서비스 사용')
   })
 
+  test('a second correction cuts the retry dialogue that reasoned from the replaced value', async () => {
+    const h = harness({
+      complete: async (_request, _signal, call) => {
+        if (call === 1) return answered('개선안 1', 'R1-QUESTION', ASK_QUESTION, ASK_OPTIONS)
+        if (call === 2) return answered('개선안 2', 'R2-INTERMEDIATE')
+        if (call === 3) return answered('개선안 3', 'R3-FOR-D2')
+        return answered('개선안 4', 'R4-FINAL')
+      },
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '외부 서비스 사용')
+    expect(h.controller.correctDecision('d1', '로컬에서만 처리').ok).toBe(true)
+    await h.controller.retry(h.ports)
+    expect(h.controller.correctDecision('d2', '로컬 전용, 외부 호출 금지').ok).toBe(true)
+
+    await h.controller.retry(h.ports)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('로컬 전용, 외부 호출 금지')
+    for (const stale of ['R1-QUESTION', 'R2-INTERMEDIATE', 'R3-FOR-D2']) {
+      expect(prompt).not.toContain(stale)
+    }
+    expect(prompt).not.toContain('user: 로컬에서만 처리')
+    expect(prompt).not.toContain('"id":"d2"')
+  })
+
   test('a correction is allowed at the exhausted round limit and leaves unrelated decisions active', async () => {
     const h = harness({
       config: { maxRounds: 3 },
@@ -2548,6 +2595,22 @@ describe('explicit decision correction', () => {
     expect(h.controller.getState().workflow?.rounds).toBe(3)
     const active = activeDecisions(h.controller.getState().workflow?.decisions ?? { entries: [], nextId: 1 })
     expect(active.map(entry => entry.text)).toEqual(['둘째 결정', '첫 결정 정정'])
+    // At the limit the notice names the approval step; the bare retry below
+    // cannot apply the correction until /optimize more approves a round.
+    expect(h.notices).toContain(
+      '결정을 정정했습니다. 라운드 한도에 도달했으니 /optimize more 로 승인한 뒤 /optimize retry 로 반영하세요.',
+    )
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(before)
+
+    expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow?.roundLimit).toBe(8)
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(before + 1)
+    expect(hasPendingCorrection(h.controller.getState().workflow)).toBe(false)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('첫 결정 정정')
+    expect(prompt).not.toContain('"id":"d1"')
   })
 
   test('an open host choice dialog blocks correction instead of clearing its marker', async () => {

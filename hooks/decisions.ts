@@ -118,6 +118,32 @@ export function isActiveDecision(ledger: Readonly<DecisionLedger>, id: string): 
 }
 
 /**
+ * Whether the newest explicit correction has not been applied to a draft yet:
+ * its user turn exists in the dialogue but no optimizer turn follows it. A
+ * correction clears the answered question, so the usual "unresolved question"
+ * test cannot decide whether another round would still change the draft.
+ */
+export function hasPendingCorrection(workflow: Readonly<Workflow> | null | undefined): boolean {
+  if (workflow === null || workflow === undefined) return false
+  // The reducer records the ledger-vs-last-successful-reply relation directly:
+  // an empty optimizer turn adds no dialogue entry, so the fallback below could
+  // not see that the correction was already applied.
+  if (workflow.correctionPending !== undefined) return workflow.correctionPending
+  if (workflow.decisions === undefined) return false
+  const correctionIds = new Set(
+    workflow.decisions.entries
+      .filter(entry => entry.supersedes !== undefined)
+      .map(entry => entry.id),
+  )
+  if (correctionIds.size === 0) return false
+  const lastCorrection = workflow.dialogue.findLastIndex(
+    message => message.decisionId !== undefined && correctionIds.has(message.decisionId),
+  )
+  if (lastCorrection === -1) return false
+  return !workflow.dialogue.slice(lastCorrection + 1).some(message => message.role === 'optimizer')
+}
+
+/**
  * Appends an explicit correction of one active decision. The new entry keeps
  * the replaced decision's exact source and names it in `supersedes`; the old
  * entry stays in the ledger as inspectable history.

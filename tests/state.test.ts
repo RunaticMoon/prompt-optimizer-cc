@@ -1026,6 +1026,7 @@ describe('reduce — budget refusal', () => {
         question: '보존할 질문?',
         options: ['A', 'B'],
         questionAsk: 'pending',
+        limitAsk: 'pending',
       }),
       usage: totals({ calls: 2, input: 9, updatedAt: 4 }),
     })
@@ -1062,7 +1063,11 @@ describe('reduce — budget refusal', () => {
     expect(next.workflow?.decisions).toBe(current.workflow?.decisions)
     expect(next.workflow?.question).toBe('보존할 질문?')
     expect(next.workflow?.options).toEqual(['A', 'B'])
-    expect(next.workflow?.questionAsk).toBe('pending')
+    // A refused round ends review, so neither dialog marker may stay pending:
+    // the engine's later close would be dropped and correction would stay
+    // blocked until cancel.
+    expect(next.workflow?.questionAsk).toBeUndefined()
+    expect(next.workflow?.limitAsk).toBeUndefined()
     expect(next.workflow?.rounds).toBe(2)
     expect(next.workflow?.roundLimit).toBe(7)
     expect(next.workflow?.usage).toBe(current.workflow?.usage)
@@ -1155,6 +1160,24 @@ describe('reduce — explicit decision correction', () => {
     expect(next.workflow?.options).toEqual([])
     expect(next.workflow?.draft).toBe('보존할 초안')
     expect(next.workflow?.rounds).toBe(1)
+    expect(next.workflow?.correctionPending).toBe(true)
+  })
+
+  test('a successful reply applies the correction, while a failure keeps it pending', () => {
+    const corrected = reduce(reviewed(), {
+      type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '로컬 유지',
+    }, 2)
+    const replied = reduce(corrected, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '정정 반영 초안', message: '' }), usage: usage(),
+    }, 3)
+    expect(replied.workflow?.correctionPending).toBe(false)
+    expect(replied.workflow?.dialogue).toEqual(corrected.workflow?.dialogue)
+
+    const failed = reduce(corrected, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 3)
+    expect(failed.workflow?.correctionPending).toBe(true)
   })
 
   test('unknown, replaced, blank or in-flight corrections are ignored', () => {
