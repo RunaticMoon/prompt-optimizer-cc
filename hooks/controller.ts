@@ -969,10 +969,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
       decision = classifySubmission(e, deps.getConfig(), state, deps.now(), classification)
     } catch {
       // Classification itself failing must not trap the person: pass through.
-      // The diagnostic is cleared rather than left showing a verdict the
-      // classifier never reached. The mode is still one-shot, so clear it
-      // before returning, and a composer draft is consumed for the same reason.
-      lastSubmissionStatus = null
+      // Only a composer submission would have been recorded, so only that one
+      // clears the diagnostic rather than leaving a verdict the classifier
+      // never reached. The mode is still one-shot, so clear it before
+      // returning, and a composer draft is consumed for the same reason.
+      if (classification !== undefined) lastSubmissionStatus = null
       if (e.origin.kind === 'composer') composition = EMPTY_COMPOSITION
       if (state.rawMode !== null) apply({ type: 'raw-mode-cleared', sessionId: state.sessionId })
       return { action: 'next', text: e.text }

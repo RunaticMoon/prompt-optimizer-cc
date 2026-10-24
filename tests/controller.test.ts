@@ -1400,17 +1400,30 @@ describe('the last-submission diagnostic for /optimize status', () => {
   })
 
   test('a classification failure clears the diagnostic but keeps the recall memory', async () => {
+    let fail = false
     const h = harness({
       simulateTyping: false,
       deps: {
         getConfig: () => {
-          throw new Error('config unreadable')
+          if (fail) throw new Error('config unreadable')
+          return { ...DEFAULT_CONFIG }
         },
       },
     })
     h.controller.onSessionStart('sess-1')
-    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '분류가 실패한 원문' })
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '직접 쓴 프롬프트' })
+    await h.controller.onSubmit(h.ports, submit('직접 쓴 프롬프트'), 'pane')
+    expect(h.controller.getSubmissionStatus()).toEqual({
+      kind: 'optimize',
+      trigger: 'auto',
+      composition: { pasted: false, reason: 'typed' },
+    })
 
+    // The next classification throws: the diagnostic must fall back to null
+    // instead of keeping the previous submission's verdict, while the
+    // person's text still passes through unchanged.
+    fail = true
+    h.controller.observeEditInput({ inputText: '분류가 실패한 원문' })
     const outcome = await h.controller.onSubmit(h.ports, submit('분류가 실패한 원문'), 'pane')
     expect(outcome).toEqual({ action: 'next', text: '분류가 실패한 원문' })
     expect(h.controller.getSubmissionStatus()).toBeNull()
@@ -1419,9 +1432,61 @@ describe('the last-submission diagnostic for /optimize status', () => {
     // same text still reuses it.
     h.controller.onSessionStart('sess-2')
     expect(h.controller.submissionFacts('분류가 실패한 원문')).toEqual({
-      pasted: false,
+      pasted: true,
       reason: 'history',
-      previousReason: 'typed',
+      previousReason: 'keyless-long-insert',
+    })
+  })
+
+  test('a non-composer classification failure never clears the diagnostic', async () => {
+    let fail = false
+    const h = harness({
+      simulateTyping: false,
+      deps: {
+        getConfig: () => {
+          if (fail) throw new Error('config unreadable')
+          return { ...DEFAULT_CONFIG }
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '직접 쓴 프롬프트' })
+    await h.controller.onSubmit(h.ports, submit('직접 쓴 프롬프트'), 'pane')
+    const before = h.controller.getSubmissionStatus()
+    expect(before).not.toBeNull()
+
+    // A submission of another origin was never recorded, so its failure must
+    // not wipe the composer diagnostic either.
+    fail = true
+    const outcome = await h.controller.onSubmit(h.ports, submit('외부에서 온 제출', { origin: { kind: 'sdk' } }), 'pane')
+    expect(outcome).toEqual({ action: 'next', text: '외부에서 온 제출' })
+    expect(h.controller.getSubmissionStatus()).toBe(before)
+  })
+
+  test('a recalled submission records the history reason with its base verdict', async () => {
+    const h = harness({ simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '직접 쓴 프롬프트' })
+    await h.controller.onSubmit(h.ports, submit('직접 쓴 프롬프트'), 'pane')
+    h.controller.observeEditInput({ inputText: '붙여넣기만 한 프롬프트' })
+    await h.controller.onSubmit(h.ports, submit('붙여넣기만 한 프롬프트'), 'pane')
+
+    // A ↑ recall has no events of its own; the diagnostic shows the history
+    // reason together with the verdict the text got when it was first sent.
+    h.controller.onSessionStart('sess-2')
+    await h.controller.onSubmit(h.ports, submit('직접 쓴 프롬프트'), 'pane')
+    expect(h.controller.getSubmissionStatus()).toEqual({
+      kind: 'optimize',
+      trigger: 'auto',
+      composition: { pasted: false, reason: 'history', previousReason: 'typed' },
+    })
+
+    h.controller.onSessionStart('sess-3')
+    await h.controller.onSubmit(h.ports, submit('붙여넣기만 한 프롬프트'), 'pane')
+    expect(h.controller.getSubmissionStatus()).toEqual({
+      kind: 'pass',
+      passReason: 'pasted',
+      composition: { pasted: true, reason: 'history', previousReason: 'keyless-long-insert' },
     })
   })
 })
