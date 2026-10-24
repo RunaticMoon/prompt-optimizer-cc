@@ -1887,6 +1887,87 @@ describe('startExplicit and lifecycle', () => {
 
     expect(h.notices).toContain('이미 개선 작업이 진행 중입니다.')
     expect(h.calls.complete).toBe(0)
+    expect(h.controller.getState().workflow?.original).toBe('첫')
+  })
+
+  test('rolls a failed explicit start back and frees the next submission', async () => {
+    const draft = '창에 있던 초안'
+    const h = harness({
+      box: draft,
+      deps: {
+        schedule: () => {
+          throw new Error('clock unavailable')
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.startExplicit(h.ports, '원문', 'pane')
+
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.notices).toContain('개선을 시작하지 못했습니다: clock unavailable')
+    expect(h.calls.complete).toBe(0)
+    expect(h.calls.submit).toBe(0)
+    expect(h.fills).toEqual([])
+    expect(await h.ports.prompt.read()).toEqual({ text: draft, cursor: draft.length })
+    const outcome = await h.controller.onSubmit(h.ports, submit('다음 요청'), 'composer')
+    expect(outcome).toEqual({ action: 'next', text: '다음 요청' })
+  })
+
+  test('still reports the failure when the rollback repaint throws', async () => {
+    const notices: Array<string | undefined> = []
+    let armed = false
+    const h = harness({
+      deps: {
+        schedule: () => {
+          armed = true
+          throw new Error('clock unavailable')
+        },
+        onChange: (state, notice) => {
+          notices.push(notice)
+          if (armed && state.workflow === null && notice === undefined) {
+            armed = false
+            throw new Error('repaint failed')
+          }
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.startExplicit(h.ports, '원문', 'pane')
+
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(notices).toContain('개선을 시작하지 못했습니다: clock unavailable')
+  })
+
+  test('an explicit retry after a failed start is not refused as busy', async () => {
+    const h = harness({
+      deps: {
+        schedule: () => {
+          throw new Error('clock unavailable')
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.startExplicit(h.ports, '원문', 'pane')
+
+    await h.controller.startExplicit(h.ports, '다시 시도', 'pane')
+
+    expect(h.notices).not.toContain('이미 개선 작업이 진행 중입니다.')
+    expect(h.notices.filter(n => n === '개선을 시작하지 못했습니다: clock unavailable')).toHaveLength(2)
+    expect(h.controller.getState().workflow).toBeNull()
+  })
+
+  test('a scheduled explicit start still creates and runs the workflow', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.startExplicit(h.ports, '원문', 'pane')
+    await h.flush()
+
+    expect(h.controller.getState().workflow?.original).toBe('원문')
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+    expect(h.calls.complete).toBe(1)
   })
 
   test('clears the run and permit on session end', async () => {
