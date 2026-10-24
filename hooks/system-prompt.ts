@@ -16,8 +16,13 @@
  * contract are always the last word and nothing before them can override them.
  */
 
-import type { GuidanceProfile } from './contracts'
-import { COMMON_GUIDANCE, MODEL_GUIDANCE } from './model-guidance'
+import type { GuidanceProfile, RefinementLevel } from './contracts'
+import {
+  COMMON_GUIDANCE,
+  MODEL_GUIDANCE,
+  QUICK_GUIDANCE,
+  STANDARD_GUIDANCE,
+} from './model-guidance'
 
 /**
  * The role limits and JSON output contract, restated after any other text.
@@ -73,19 +78,79 @@ export const BASE_SYSTEM_PROMPT = [
   '출력은 마지막 고정 계약의 JSON 객체 하나다("lang", "checks", "draft", "message", "question", "options").',
 ].join('\n')
 
+/** The role limits every refinement level shares with the deep baseline. */
+const LEVEL_ROLE_LINES = [
+  '당신은 Claude Code에 보낼 사용자 요청의 요구사항을 구체화하는 편집자다.',
+  '요청을 실행하거나 사용자의 본래 작업에 답하지 않는다.',
+  '',
+  '대상 모델 지침은 표현을 조정할 뿐, 공통 요구사항 구체화 절차를 생략하지 않는다.',
+]
+
+/** The change note rule every level shares; it never claims execution. */
+const LEVEL_MESSAGE_RULE =
+  'message에는 이번에 구체화한 핵심과 남은 결정만 짧게 적는다. 코드 탐색·검증·구현을 수행했다고 주장하지 않는다. draft는 이전 대화 없이도 실행 에이전트가 이해할 수 있어야 한다. 선택지가 있으면 question 본문에 (1)(2)… 같은 목록을 반복하지 않는다.'
+
+/** The JSON-key reminder every level ends its base prompt with. */
+const LEVEL_OUTPUT_LINE =
+  '출력은 마지막 고정 계약의 JSON 객체 하나다("lang", "checks", "draft", "message", "question", "options").'
+
+/** Quick: tidy wording, keep scope, ask only a decision that changes the outcome or safety. */
+const QUICK_SECTIONS = [
+  '[보완 수준: quick]',
+  '[라운드와 출력]',
+  '<refinement_round>의 remaining은 이번 응답 이후 승인된 라운드 수다. 빠른 정리는 원문 언어·목적·범위·작업 종류·제약과 모든 대상을 유지하며 표현과 제약을 정리한다. 결과·범위·API 계약·요청 동작의 안전을 실제로 바꾸는 결정만 가장 중요한 질문 하나로 확인한다. 그 밖의 세부는 draft에 미결정·제안으로 남기고 합의로 쓰지 않는다. 저장소에서 확인할 사실은 질문 대신 draft의 조사 항목으로 남긴다. 질문할 중대한 미결정이 없으면 question은 null, options는 []이고 draft는 사용자가 직접 받아들일 수 있게 남긴다(자동 전송하지 않는다). remaining이 0이어도 답을 임의로 만들지 않으며, 질문 자격이 있는 미결정은 question·options와 이유·다음 확인 방법을 유지한다. question이 null이어도 모든 세부가 합의됐다는 뜻은 아니다. 연장 승인은 모델 출력 밖의 옵티마이저가 받는다.',
+  LEVEL_MESSAGE_RULE,
+  '',
+  '[빠른 정리 예시]',
+  '“이 문장을 더 자연스럽게 다듬어줘”는 표현만 정리하는 요청이다. 구현 아키텍처·체크리스트를 새로 만들지 않고, 중대한 미결정이 없으면 한 번의 draft와 question null로 끝낸다.',
+  '“기존 image 기준으로 diff API를 정리해줘”처럼 비교 기준이 결과를 바꾸면 기준을 임의로 정하지 않고 질문 하나로 확인한다.',
+]
+
+/** Standard: resolve consequential decisions in order, leave optional detail proposed. */
+const STANDARD_SECTIONS = [
+  '[보완 수준: standard]',
+  '[라운드와 출력]',
+  '<refinement_round>의 remaining은 이번 응답 이후 승인된 라운드 수다. 일반 보완은 원문 언어·목적·범위·작업 종류·제약과 모든 대상을 유지한다. 결과·범위·인터페이스·입출력·오류 계약·비교 기준을 바꾸는 사용자 결정을 의존성 순서로 하나씩 묻는다. 저장소에서 찾을 수 있거나 실행 에이전트가 확인할 사실은 사용자에게 묻지 않고 draft의 조사 항목으로 남긴다. 선택적인 이름·형식·정렬·반올림은 명시적으로 요구됐거나 계약에 영향을 줄 때만 묻고, 그 밖의 세부는 draft에 미결정·제안으로 남긴다. 남은 중대한 사용자 결정이 없으면 question은 null이다. remaining이 0이어도 답을 임의로 만들지 않으며, 질문 자격이 있는 미결정은 question·options와 이유·다음 확인 방법을 유지한다. question이 null이어도 모든 세부가 합의됐다는 뜻은 아니다. 연장 승인은 모델 출력 밖의 옵티마이저가 받는다.',
+  LEVEL_MESSAGE_RULE,
+  '',
+  '[일반 보완 예시]',
+  '“노드별 property와 image diff API를 정리해줘”는 비교 기준과 diff의 의미가 결과를 바꾸므로 먼저 하나씩 묻고, 저장소에서 확인할 경로·문서 위치는 질문 대신 조사 항목으로 남긴다.',
+  '표시 이름·정렬처럼 결과 계약을 바꾸지 않는 세부는 추천안으로 draft에 남기고 묻지 않는다.',
+]
+
+/** Builds a non-deep base prompt; `deep` stays the untouched literal above. */
+function buildLevelBase(level: Exclude<RefinementLevel, 'deep'>): string {
+  const guidance = level === 'quick' ? QUICK_GUIDANCE : STANDARD_GUIDANCE
+  const sections = level === 'quick' ? QUICK_SECTIONS : STANDARD_SECTIONS
+  return [
+    ...LEVEL_ROLE_LINES,
+    '',
+    guidance,
+    '',
+    ...sections,
+    '',
+    LEVEL_OUTPUT_LINE,
+  ].join('\n')
+}
+
 /**
  * Composes the system prompt for one optimizer round.
  *
- * The sections are ordered: {@link BASE_SYSTEM_PROMPT} (which already carries
- * {@link COMMON_GUIDANCE}) → the selected profile's add-on block (omitted when
- * `profile` is `common` or its block is empty) → the user's extra instructions
- * (only when non-blank, trimmed, under a `[추가 지침]` heading) →
- * {@link FIXED_CONTRACT}. The fixed contract is appended even when `extra` is
- * empty, so it is always the last section. No raw model string is ever added;
- * the model section names only the `GuidanceProfile` enum value.
+ * The sections are ordered: the selected level's base prompt (which carries
+ * its level guidance and round policy; `deep` is {@link BASE_SYSTEM_PROMPT}) →
+ * the selected profile's add-on block (omitted when `profile` is `common` or
+ * its block is empty) → the user's extra instructions (only when non-blank,
+ * trimmed, under a `[추가 지침]` heading) → {@link FIXED_CONTRACT}. The fixed
+ * contract is appended even when `extra` is empty, so it is always the last
+ * section. No raw model string is ever added; the model section names only the
+ * `GuidanceProfile` enum value. Omitting `level` keeps the deep behavior.
  */
-export function composeSystemPrompt(extra: string, profile: GuidanceProfile = 'common'): string {
-  const sections: string[] = [BASE_SYSTEM_PROMPT]
+export function composeSystemPrompt(
+  extra: string,
+  profile: GuidanceProfile = 'common',
+  level: RefinementLevel = 'deep',
+): string {
+  const sections: string[] = [level === 'deep' ? BASE_SYSTEM_PROMPT : buildLevelBase(level)]
 
   const modelGuidance = profile === 'common' ? '' : MODEL_GUIDANCE[profile]
   if (modelGuidance !== '') {

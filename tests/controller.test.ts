@@ -12,7 +12,13 @@ import type {
 } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import type { EnginePorts, ModelUsage, OptimizerConfig, RuntimeState } from '../hooks/contracts'
+import type {
+  EnginePorts,
+  ModelUsage,
+  OptimizerConfig,
+  RefinementLevel,
+  RuntimeState,
+} from '../hooks/contracts'
 import { DEFAULT_CONFIG, MAX_REQUEST_CHARS } from '../hooks/contracts'
 import {
   createController,
@@ -3935,6 +3941,103 @@ describe('restore — a submission racing the fill', () => {
     await running
     expect(h.controller.getState().workflow).toBeNull()
     expect(h.controller.getState().bypass).toBeNull()
+    expect(h.calls.complete).toBe(1)
+  })
+})
+
+describe('refinement levels — controller selection', () => {
+  const LEVELS: readonly RefinementLevel[] = ['quick', 'standard', 'deep']
+
+  for (const level of LEVELS) {
+    test(`${level} reaches the captured model request`, async () => {
+      const h = harness({ model: () => 'claude-opus-5-5', config: { refinementLevel: level } })
+      h.controller.onSessionStart('sess-1')
+
+      await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+      await h.flush()
+
+      expect(h.calls.complete).toBe(1)
+      const system = requestText(h.completes[0]?.system)
+      if (level === 'deep') {
+        expect(system).not.toContain('[보완 수준:')
+        expect(system).toContain('remaining이 0보다 크면 사용자가 정할 미결정을')
+      } else {
+        expect(system).toContain(`[보완 수준: ${level}]`)
+        expect(system).not.toContain('remaining이 0보다 크면 사용자가 정할 미결정을')
+      }
+      expect(system).toContain('[고정 계약]')
+    })
+  }
+
+  test('levels change only the policy, not the model, caps, timeout, effort, or rounds', async () => {
+    for (const level of LEVELS) {
+      const h = harness({ config: { refinementLevel: level } })
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+      await h.flush()
+
+      const request = h.completes[0]!
+      expect(request.model).toBe('sonnet')
+      expect(request.maxTokens).toBe(2048)
+      expect(request.timeoutMs).toBe(30000)
+      expect(request.effort).toBe('low')
+      expect(requestText(request.prompt)).toContain('max: 5')
+    }
+  })
+
+  test('a mid-flight level change keeps the current request and applies to the next round', async () => {
+    let config: OptimizerConfig = { ...DEFAULT_CONFIG, refinementLevel: 'quick' }
+    const firstCompletion = deferred<ModelCompleteResult>()
+    let completions = 0
+    const h = harness({
+      model: () => 'claude-opus-5-5',
+      deps: { getConfig: () => config },
+      complete: () => {
+        completions += 1
+        return completions === 1
+          ? firstCompletion.promise
+          : Promise.resolve(answered('두 번째 개선안', '다듬었습니다'))
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => h.calls.complete === 1)
+
+    expect(requestText(h.completes[0]?.system)).toContain('[보완 수준: quick]')
+    config = { ...config, refinementLevel: 'standard' }
+    firstCompletion.resolve(answered('첫 번째 개선안', '다듬었습니다'))
+    await running
+
+    // The captured round-start snapshot still owns the first request.
+    expect(requestText(h.completes[0]?.system)).toContain('[보완 수준: quick]')
+    expect(requestText(h.completes[0]?.system)).not.toContain('[보완 수준: standard]')
+
+    await h.controller.refine(h.ports, '조금 더 짧게')
+    expect(h.calls.complete).toBe(2)
+    expect(requestText(h.completes[1]?.system)).toContain('[보완 수준: standard]')
+    expect(requestText(h.completes[1]?.system)).not.toContain('[보완 수준: quick]')
+  })
+
+  test('quick keeps the unresolved-question approval and manual accept path', async () => {
+    const approval = questionDialog()
+    const h = harness({
+      config: { refinementLevel: 'quick', maxRounds: 1 },
+      ui: { ask: approval.ask },
+      complete: async () => questionReply(),
+    })
+    await startQuestion(h)
+
+    expect(h.controller.getState().workflow?.limitAsk).toBe('pending')
+    expect(approval.calls).toHaveLength(1)
+    expect(approval.calls[0]?.question).toContain('5회')
+    expect(h.submits).toHaveLength(0)
+
+    approval.reject(new Error('dismissed'))
+    await h.waitFor(() => h.controller.getState().workflow?.limitAsk === 'closed')
+    expect((await h.controller.accept(h.ports)).ok).toBe(true)
+    expect(h.fills).toHaveLength(1)
+    expect(h.submits).toHaveLength(0)
     expect(h.calls.complete).toBe(1)
   })
 })

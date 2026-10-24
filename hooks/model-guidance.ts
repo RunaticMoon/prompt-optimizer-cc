@@ -10,6 +10,11 @@
  */
 import type { GuidanceProfile } from './contracts'
 
+// The one policy line that differs by refinement level. The shared text stays
+// byte-identical so `deep` keeps the policy users already have.
+const OPTIONAL_DETAIL_RULE =
+  '- 표시 형식·이름·정렬·반올림·입력 검증 같은 세부는 추천안을 제안으로 draft에 적고, 결과를 더 크게 바꾸는 미결정이 없을 때만 묻는다.'
+
 // All profiles inherit this policy; model-specific blocks only adjust presentation.
 export const COMMON_GUIDANCE: string = [
   '[요구사항 구체화 지침]',
@@ -18,7 +23,7 @@ export const COMMON_GUIDANCE: string = [
   '- 미결정은 원문을 대상·동작·기준·범위·산출물로 나눠 각각이 원문·근거·답변 중 무엇으로 정해졌는지 확인해 찾는다. 어느 것으로도 정해지지 않았는데 결과가 달라지면 미결정이다. 한 문장에 대상이 여럿이면 각 대상에 어떤 동작(표시·비교·변경 등)이 걸리는지 따로 본다. “A와 B가 C와 얼마나 달라졌는지”는 A를 표시만 하는지 함께 비교하는지가 갈린다. 요청한 산출물을 저장소의 기존 방식(생성기·등록 목록·명령 구조)으로 그대로 만들 수 없으면 그 차이와 반영 방식도 미결정이다.',
   '- 제공된 코드·문서·대화에서 답을 먼저 찾고 이미 확인된 사실을 다시 묻지 않는다. 저장소 자료가 부족하면 실행 에이전트가 확인할 대상과 목적을 draft에 남긴다. 사용자에게 코드 위치나 저장소에서 찾을 사실을 대신 조사하게 하지 않는다. 단, 원문의 해석은 사실이 아니라 사용자 결정이며 용어집·문서 정의는 추천 근거로만 쓴다.',
   '- 결과·범위·계약이 크게 달라지는 사용자 결정이 남으면 question에 가장 중요한 질문 하나만 쓴다. 한 질문에 여러 결정을 묶지 않는다. 가능하면 선택지 2~3개와 근거 있는 추천·이유·차이를 짧게 제시하고 직접 답도 허용한다. 추천은 확정된 선택이 아니다. 추천 이유는 원문과 근거에서 가져오며, 발췌에 보이지 않는 것을 없다는 근거로 쓰거나 원문보다 좁은 해석을 근거 없이 추천하지 않는다.',
-  '- 표시 형식·이름·정렬·반올림·입력 검증 같은 세부는 추천안을 제안으로 draft에 적고, 결과를 더 크게 바꾸는 미결정이 없을 때만 묻는다.',
+  OPTIONAL_DETAIL_RULE,
   '- 매 답변 뒤 합의된 선택과 이유를 draft에 누적하고 관련 요구사항·미결정의 우선순위를 다시 계산한다. 기존 초안의 가정은 사실이나 사용자 동의가 아니다. 합의된 결정에는 사용자가 답했거나 원문이 명시한 것만 적는다. 원문의 각 대상이 어떤 동작에 걸리는지 둘 이상으로 읽히면 명시된 것이 아니므로 묻는다. 언급된 대상을 빼는 일도 묻는다. 미결정은 사용자가 답했거나 근거로 정해졌을 때만 지우고, 묻지 못한 미결정을 추천안으로 확정하지 않는다. 중요한 미결정이 없으면 question은 null이다.',
   '- 원인 진단·조사 요청에는 증상·환경을 캐묻는 인터뷰를 붙이지 않는다. 사용자만 아는 사실이 조사 대상 자체를 바꿀 때만 묻고, 나머지는 실행 에이전트가 확인할 항목으로 남긴다.',
   '- 복합 요청의 draft는 목표 / 근거·맥락 / 합의된 결정 / 범위·계약 / 완료 기준 / 미결정으로 구성하되 빈 절은 생략한다. 입력·출력·오류·상태 변화·경계 사례와 대상 간 일관성을 필요한 만큼 명시한다. 단순하고 명확한 요청은 짧게 유지한다.',
@@ -27,6 +32,24 @@ export const COMMON_GUIDANCE: string = [
   '- 완료 기준은 관찰 가능한 동작·결과와 중요한 정상·경계·실패 사례로 쓴다. 검증 명령을 모르면 저장소에서 적절한 명령을 확인하게 한다. 조사에는 출처를, 글쓰기에는 알려진 독자·형식·분량을 반영하고 긴 산출물을 요약본으로 축소하지 않는다.',
   '- 실행 에이전트도 Project rules를 받으므로 draft에 규칙 절이나 목록으로 옮기지 않는다. 특정 결정을 막거나 바꾸는 규칙만 그 결정의 근거로 한 번 언급한다. 무관한 절차·위임·승인·개선을 추가하지 않는다. effort 문구나 사고 설정·내부 추론 공개 지시를 추가하지 않는다. 가이드 자체나 모델 이름을 초안에 붙이지 않는다.',
 ].join('\n')
+
+// Quick keeps the shared non-negotiables but asks only about decisions that
+// materially change the outcome, scope, contract, or safety; optional detail is
+// left as a proposal, never recorded as agreed.
+const QUICK_DETAIL_RULE =
+  '- 빠른 정리에서는 결과·범위·API 계약·요청 동작의 안전을 실제로 바꾸는 사용자 결정만 가장 중요한 질문 하나로 확인한다. 그 밖의 세부는 추천안·미결정으로 draft에 남기고 합의로 쓰지 않는다. 구현 구조·아키텍처·체크리스트로 임의 확장하지 않는다.'
+
+// Standard asks about decisions that change the outcome, scope, interface, or
+// input/output/error contract, one dependent question at a time; optional
+// naming/format/sort/rounding choices stay proposed unless they affect it.
+const STANDARD_DETAIL_RULE =
+  '- 일반 보완에서는 결과·범위·인터페이스·입출력·오류 계약·비교 기준을 바꾸는 사용자 결정을 의존성 순서로 하나씩 묻는다. 명시적으로 요구됐거나 계약에 영향을 주는 이름·형식·정렬·반올림이 아니면 묻지 않고 추천안·미결정으로 draft에 남긴다.'
+
+/** Shared policy with the quick-only decision rule. */
+export const QUICK_GUIDANCE: string = COMMON_GUIDANCE.replace(OPTIONAL_DETAIL_RULE, QUICK_DETAIL_RULE)
+
+/** Shared policy with the standard-only decision rule. */
+export const STANDARD_GUIDANCE: string = COMMON_GUIDANCE.replace(OPTIONAL_DETAIL_RULE, STANDARD_DETAIL_RULE)
 
 // 근거: DESIGN-model-guidance §4.2 — F51 「작문 밀도」·「채팅에서의 서식」·「검색된 출처 인용하기」·「낮은 effort에서의 검색 트리거」·「파일 전체 재작성보다 부분 편집 선호하기」·「변경 사항과 테스트를 작업이 요구하는 범위로 제한하기」·「xhigh 및 max effort에서 긴 출력을 위한 여유 확보하기」·「전체 작업 완료하기」.
 const FABLE_5_1_GUIDANCE = [

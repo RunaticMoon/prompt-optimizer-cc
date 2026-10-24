@@ -474,6 +474,39 @@ describe('register — the wired module', () => {
   })
 
   test(
+    'config.set: refinementLevel defaults to deep, takes quick, and keeps it on invalid input',
+    { options: {} },
+    async ($, on) => {
+      const toasts: string[] = []
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+      on('config.set', (_$, e) => ({ value: e.value }))
+      on('ui.toast', (_$, e) => {
+        toasts.push(e.text)
+        return { value: undefined }
+      })
+
+      await $.session.start(SESSION_START)
+      // The older options object omits refinementLevel; the loader resolves deep.
+      const initial = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+      expect(initial.text).toContain('보완 수준: deep (심층 구체화)')
+
+      const set = await $.config.set(configChange('prompt-optimizer.refinementLevel', 'quick'))
+      expect(set).toEqual({ value: 'quick' })
+      const quick = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+      expect(quick.text).toContain('보완 수준: quick (빠른 정리)')
+
+      const invalid = await $.config.set(configChange('prompt-optimizer.refinementLevel', 'turbo'))
+      expect(invalid).toEqual({ value: 'turbo' })
+      expect(toasts).toEqual([
+        'prompt-optimizer: refinementLevel 값이 올바르지 않아 이전 값을 유지합니다: "refinementLevel" must be "quick", "standard" or "deep"; using default "deep"',
+      ])
+      const kept = await $.command.run({ ...COMMAND_RUN, args: 'status' })
+      expect(kept.text).toContain('보완 수준: quick (빠른 정리)')
+    },
+  )
+
+  test(
     'prompt.fill: a refused foreign fill leaves the restored draft bypassing',
     { options: { uiMode: 'composer' }, plugins: [FOREIGN_FILL] },
     async ($, on) => {

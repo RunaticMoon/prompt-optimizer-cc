@@ -305,3 +305,48 @@ mock 방법: A(model.complete) 또는 B(HTTP + ANTHROPIC_BASE_URL) + 기동 명�
 - 활성 보완 답변(composer 질문 답변), `>> ` 원문 우회, 복원 우회 허가, 첨부가 붙은 제출, 진행 중 턴(`turnId`), 대기 제출(`wait=true`)이 붙여넣기 판정보다 먼저 적용되는지 확인한다.
 
 모델 호출은 1.2의 mock으로만 두고 실제 모델·API 호출은 하지 않는다. 메인 턴으로 실제 전송되는 텍스트는 검증용 무해한 합성 문장으로 한다.
+
+## 5. 보완 수준 비교 절차 (#30)
+
+이 절차는 `refinementLevel`의 **의미**를 확인하기 위한 것이다. mock 완성은 질문 수·초안 품질을 검증하지 못하므로, 여기서는 #37 평가 실행이나 **별도로 승인된** 실제 모델 스모크만 사용한다. 현재 구현·자동 테스트 단계에서는 실제 모델/API 호출을 하지 않으며, 아래 측정값은 `not run`으로 둔다.
+
+### 5.1 준비
+
+- 같은 원문·문맥·모델·`maxTokens`·`maxRounds`·`timeoutMs`·effort를 고정하고 `refinementLevel`만 `quick` / `standard` / `deep`으로 바꾼다.
+- 원문·문맥은 `tests/fixtures/refinement-level-cases.ts`의 합성 사례를 쓴다. 실제 사용자 프롬프트나 비공개 저장소 내용을 기록하지 않는다.
+- 사례 ID: `rename-known-symbol`, `short-wording-cleanup`, `undefined-comparison-baseline`, `optional-report-format`, `investigate-only`, `english-planning-length`.
+- 측정 전에 `docs/smoke.md` 2.2의 고정 JSON·mock 절차와 구분한다. 이 절차의 비교 표는 실제 모델 응답을 읽고 채운다.
+- 각 수준·사례 조합을 최소 3회, 가능하면 5회 반복해 변동성을 함께 적는다.
+
+### 5.2 실행
+
+1. 플러그인을 로드하고 `/config`에서 `prompt-optimizer.refinementLevel`을 한 값으로 맞춘다.
+2. 픽스처의 `original`을 제출하고, 질문이 `null`이 될 때까지 또는 `maxRounds`에 도달할 때까지 답한다. 답은 픽스처의 `context` 범위에서만 하고, 새로운 요구사항을 만들지 않는다.
+3. 매 라운드의 `question` 유무, `draft`, `message`, 사용량을 기록한다. `question`이 `null`이어도 미결정이 초안에 남아 있는지 확인한다.
+4. 사례의 `requiredPreserved`가 초안에 남았는지, `forbiddenChanges`가 들어가지 않았는지 확인한다. 근거 없는 결정·파일·기준을 만들었으면 실패로 적는다.
+5. 같은 절차를 나머지 두 수준에서 반복한다. 수준별로 달라져야 하는 것은 질문 기준·초안 범위이며, 원문 언어·작업 종류·금지 사항·모델·라운드 한도는 같아야 한다.
+
+### 5.3 기록 표
+
+```text
+사례 ID:
+보완 수준: quick | standard | deep
+원문 언어 / 작업 종류:
+모델·설정: model / effort / maxTokens / maxRounds / timeoutMs
+반복 회차:
+실제 질문 수:        (not run)
+초안 범위:           (not run)
+requiredPreserved:   pass | fail — 근거 문장
+forbiddenChanges:    pass | fail — 위반 문장
+미결정 처리:         null | question 유지 | 임의 확정
+원문 언어·금지 사항 보존: pass | fail
+메모:
+```
+
+### 5.4 기대와 결과의 구분
+
+- 픽스처의 `expected.questionTarget`·`expected.draftScope`는 **기대값**이다. 실제 측정값과 같은 표에 섞지 말고, 측정 전에는 `not run`으로 남긴다.
+- `undefined-comparison-baseline`은 세 수준 모두 최소 1개의 비교 기준 질문을 기대한다. `optional-report-format`은 quick·standard에서 선택적 정렬·반올림을 묻지 않고, deep은 기존 정책에 따라 물을 수 있다(엄격한 횟수를 강제하지 않는다).
+- `rename-known-symbol`·`short-wording-cleanup`·`investigate-only`·`english-planning-length`는 불필요한 인터뷰 없이 좁은 초안을 기대한다.
+- 실제 모델이 기대와 다르게 답했다고 해서 자동 테스트를 “통과”로 바꾸지 않는다. 이 표의 결과는 #37 평가 또는 승인된 스모크 기록으로만 남긴다.
+- mock 기반 `npm test`가 보장하는 것은 프롬프트 조립·설정 경로·초안 보존·상한 회귀뿐이다. 실제 질문 수·초안 품질·모델 준수는 이 절차 전까지 미검증이다.

@@ -255,6 +255,7 @@ The source of truth for configuration is `userConfig` in `plugin.json`, and the 
 | `triggerPrefix` | string | `?? ` | reverts to the default in prefix mode when empty | Trigger prefix for prefix mode. Smart mode also recognizes the same prefix as an explicit improvement; when empty, smart mode's prefix shortcut is off |
 | `rawPrefix` | string | `>> ` | — | Typed at the start of the prompt box, turns the optimizer-off mode on (an empty string disables it) |
 | `uiMode` | string | `auto` | `auto` \| `pane` \| `composer` | `auto`·`pane` try the pane and fall back to prompt-box dialogue when it cannot be laid out; `composer` always uses the prompt box |
+| `refinementLevel` | string | `deep` | `quick` \| `standard` \| `deep` | Refinement strength. `quick` tidies wording and asks only about major decisions, `standard` prioritizes decisions that change the outcome, and `deep` keeps the existing stepwise interview (5.5) |
 | `model` | string | `sonnet` | non-empty string | Model alias/id used for the optimizer completions |
 | `maxTokens` | number | `2048` | 128–2048 | Output cap for one completion |
 | `timeoutMs` | number | `30000` | 1000–30000 | Time limit for one completion (ms) |
@@ -268,6 +269,8 @@ The source of truth for configuration is `userConfig` in `plugin.json`, and the 
 
 > **Migration**: the `prompt-optimizer.memoryContext` setting, which used to let the optimizer read the long-term memory injected by other plugins, has been removed. If a value remains in your settings it is ignored without warning and can be deleted. There is no replacement setting that makes the optimizer read that memory again.
 
+> **Refinement-level migration**: an existing configuration without `refinementLevel` is interpreted as `deep` without a warning. Neither existing users nor new installs get a silently changed refinement policy from updating alone. `quick` and `standard` apply only when the user explicitly selects them in `/config`.
+
 ### 5.1 `/config` rows
 
 The `config.set` handler in `register.ts` handles keys starting with the `<plugin>.<key>` prefix, i.e. `prompt-optimizer.`. The `/config` menu shows the following rows.
@@ -279,6 +282,7 @@ prompt-optimizer.triggerMode
 prompt-optimizer.triggerPrefix
 prompt-optimizer.rawPrefix
 prompt-optimizer.uiMode
+prompt-optimizer.refinementLevel
 prompt-optimizer.model
 prompt-optimizer.maxTokens
 prompt-optimizer.timeoutMs
@@ -362,7 +366,7 @@ Right after a setting change, the current toggle and the last round's applied va
 
 `composeSystemPrompt` in `hooks/system-prompt.ts` assembles the final text in this order.
 
-1. The built-in prompt (`BASE_SYSTEM_PROMPT`, which already contains the common editing guidance)
+1. The selected refinement level's built-in prompt (which carries that level's editing guidance and round policy). `deep` is byte-for-byte identical to the existing `BASE_SYSTEM_PROMPT` (5.5).
 2. The target model's add-on block — omitted when the profile is `common`. Its heading names only the code-defined profile, e.g. `[대상 모델 편집 지침: opus-5-5]` ("[Target-model editing guidance: opus-5-5]"); no raw model string is added.
 3. The user's extra instructions (`systemPromptFile`, 5.3) — added under `[추가 지침]` ("[Additional instructions]") only when non-blank after trimming.
 4. The fixed contract (`[고정 계약]`, "[Fixed contract]") — always last. It restates the role limits and the JSON output contract, and no additional instruction can override it.
@@ -375,6 +379,23 @@ Turning `modelGuidance` off still keeps the common editing guidance, and the fix
 - The request classification, the four-field goal/context/scope/done-criteria structure, and the idea of resolving referents came from the `fable-prompt` skill in [oh-my-fable](https://github.com/Junhan2/oh-my-fable) (MIT). That skill's "execute after improving" procedure and its rule of copying the blocks verbatim are not adopted.
 - Requirements clarification draws on [grill-me](https://github.com/mattpocock/skills/blob/main/skills/productivity/grill-me/SKILL.md), [grill-with-docs](https://github.com/mattpocock/skills/blob/main/skills/engineering/grill-with-docs/SKILL.md), and [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md): decision dependencies and the distinction between discoverable facts and user choices. This adaptation uses one question in the existing UI and a bounded read-only snapshot instead of a full frontier of questions and sub-agent exploration.
 - Terminology and decision rationale draw on [domain-modeling](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md), the [ADR format](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/ADR-FORMAT.md), and the [glossary format](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/GLOSSARY-FORMAT.md). Agreed terms and significant trade-offs go in the draft; these skills are not executed and document files are not created automatically.
+
+### 5.5 Refinement levels
+
+`refinementLevel` sets the requirements-refinement strength for a job. It is separate from the model, max tokens, max rounds, and timeout; changing the level neither uses a new model nor changes the round limit automatically.
+
+| Value | Policy | Question rule |
+|---|---|---|
+| `quick` | Preserves the original language, goal, scope, work type, constraints, and every target while tidying wording and constraints. Never expands into implementation structure, architecture, or a checklist. | Confirms only the decision that actually changes the outcome, scope, API contract, or safety as the single most important question. Every other detail stays in the draft as undecided or proposed. |
+| `standard` | Concretizes around the outcome, scope, interface, input/output, error contract, and comparison baseline. | Asks about the user decisions that change those contracts one at a time in dependency order. Facts discoverable in the repository or checkable by the execution agent are never asked and are recorded as investigation items; optional naming/format/sort/rounding details are asked only when explicitly required or contract-affecting. |
+| `deep` | Keeps the existing policy. While rounds remain it asks about the undecided choices the user must make, step by step, and leaves them in the draft even on the last round. | Same as the current behavior (default). |
+
+- **The default is `deep`.** Existing settings without a value and new installs keep the current behavior. An invalid value falls back to `deep` with a warning, and a rejected `/config` change during a run keeps the previous value.
+- **It applies from the next round.** The configuration is read and the request assembled at the start of a round, so changing the value while generating does not alter a request already sent; the next round uses the new level.
+- **`question` being `null` does not mean every detail is agreed.** Each level leaves unanswered decisions in the draft as undecided or proposed and never invents an answer when the rounds reach 0.
+- **Round extension follows the existing user-approval flow.** No automatic send, send button, or automatic round increase is added.
+- **Status**: the `보완 수준:` line of `/optimize status` shows the current selection among `quick (빠른 정리)`, `standard (일반 보완)`, and `deep (심층 구체화)`.
+- **Semantic evaluation is separate.** Comparing the actual question counts and draft quality per level for the same input is done by a #37 evaluation run or a separately approved real-model smoke, not by the mock tests. The deterministic tests verify only policy assembly, the configuration path, and draft retention; the comparison procedure is in section 4 of `docs/smoke.md`.
 
 ## 6. Cost and privacy
 

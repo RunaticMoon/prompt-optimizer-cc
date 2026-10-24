@@ -150,6 +150,72 @@ describe('resolveConfig — enums', () => {
   })
 })
 
+describe('resolveConfig — refinementLevel', () => {
+  test('defaults to deep (matching the manifest default)', () => {
+    expect(DEFAULT_CONFIG.refinementLevel).toBe('deep')
+    expect(resolveConfig({}).config.refinementLevel).toBe('deep')
+    expect(resolveConfig(undefined).config.refinementLevel).toBe('deep')
+  })
+
+  test('a missing option and an older options object resolve to deep without warnings', () => {
+    const older = {
+      enabled: true,
+      modelGuidance: true,
+      triggerMode: 'always',
+      triggerPrefix: '?? ',
+      rawPrefix: '>> ',
+      uiMode: 'auto',
+      model: 'sonnet',
+      maxTokens: 2048,
+    }
+    for (const options of [{}, older]) {
+      const { config, warnings } = resolveConfig(options)
+      expect(config.refinementLevel).toBe('deep')
+      expect(warnings).toEqual([])
+    }
+  })
+
+  test('accepts each exact lowercase value', () => {
+    for (const value of ['quick', 'standard', 'deep'] as const) {
+      const { config, warnings } = resolveConfig({ refinementLevel: value })
+      expect(config.refinementLevel).toBe(value)
+      expect(warnings).toEqual([])
+    }
+  })
+
+  test('falls back on invalid values with the exact warning', () => {
+    const warning = '"refinementLevel" must be "quick", "standard" or "deep"; using default "deep"'
+    for (const value of ['Quick', 'STANDARD', 'medium', '', true, false, null, 1, ['quick']]) {
+      const { config, warnings } = resolveConfig({ refinementLevel: value })
+      expect(config.refinementLevel).toBe(DEFAULT_CONFIG.refinementLevel)
+      expect(warnings).toEqual([warning])
+    }
+  })
+
+  test('a runtime change accepts each valid value and rejects invalid ones', () => {
+    for (const value of ['quick', 'standard', 'deep'] as const) {
+      expect(validateConfigChange('refinementLevel', value)).toEqual({
+        ok: true,
+        key: 'refinementLevel',
+        value,
+      })
+    }
+    for (const value of ['Quick', 'medium', '', true, null, 1]) {
+      expect(validateConfigChange('refinementLevel', value)).toEqual({
+        ok: false,
+        error: '"refinementLevel" must be "quick", "standard" or "deep"; using default "deep"',
+      })
+    }
+  })
+
+  test('leaves the existing model, token, timeout and round defaults unchanged', () => {
+    expect(DEFAULT_CONFIG.model).toBe('sonnet')
+    expect(DEFAULT_CONFIG.maxTokens).toBe(2048)
+    expect(DEFAULT_CONFIG.timeoutMs).toBe(30000)
+    expect(DEFAULT_CONFIG.maxRounds).toBe(5)
+  })
+})
+
 describe('resolveConfig — model', () => {
   test('trims surrounding whitespace', () => {
     expect(resolveConfig({ model: '  opus  ' }).config.model).toBe('opus')
@@ -357,6 +423,11 @@ describe('validateConfigChange', () => {
     expect(validateConfigChange('maxTokens', '2048')).toEqual({ ok: true, key: 'maxTokens', value: 2048 })
     expect(validateConfigChange('maxTokens', 128)).toEqual({ ok: true, key: 'maxTokens', value: 128 })
     expect(validateConfigChange('triggerMode', 'smart')).toEqual({ ok: true, key: 'triggerMode', value: 'smart' })
+    expect(validateConfigChange('refinementLevel', 'standard')).toEqual({
+      ok: true,
+      key: 'refinementLevel',
+      value: 'standard',
+    })
   })
 
   test('rejects an unknown key', () => {
@@ -373,6 +444,7 @@ describe('validateConfigChange', () => {
       ['pasteBypass', 'maybe'],
       ['pasteBypass', 2],
       ['triggerMode', 'sometimes'],
+      ['refinementLevel', 'medium'],
       ['triggerPrefix', '/x'],
       ['rawPrefix', '!x'],
     ] as const) {

@@ -18,6 +18,8 @@ export interface OptimizerConfig {
    * `smart`; in smart mode it also outranks paste classification.
    */
   triggerPrefix: string
+  /** How much requirements refinement one workflow asks for. */
+  refinementLevel: RefinementLevel
   /** Leading marker stripped before sending the rest of a prompt straight through. */
   rawPrefix: string
   /** Which interface holds the improvement dialogue. */
@@ -48,6 +50,9 @@ export type ConfigKey = keyof OptimizerConfig
 
 /** How a submission qualifies for interception. */
 export type TriggerMode = 'always' | 'prefix' | 'smart'
+
+/** How much requirements refinement the optimizer asks for. */
+export type RefinementLevel = 'quick' | 'standard' | 'deep'
 
 /** Which interface holds the improvement dialogue. */
 export type UiMode = 'auto' | 'pane' | 'composer'
@@ -559,6 +564,7 @@ export const DEFAULT_CONFIG: OptimizerConfig = {
   modelGuidance: true,
   triggerMode: 'always',
   triggerPrefix: '?? ',
+  refinementLevel: 'deep',
   rawPrefix: '>> ',
   uiMode: 'auto',
   model: 'sonnet',
