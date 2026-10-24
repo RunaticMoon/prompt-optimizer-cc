@@ -2,7 +2,12 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { GuidanceProfile } from '../hooks/contracts'
 import { COMMON_GUIDANCE_MAX_CHARS, MODEL_GUIDANCE_MAX_CHARS } from '../hooks/contracts'
-import { COMMON_GUIDANCE, MODEL_GUIDANCE } from '../hooks/model-guidance'
+import {
+  COMMON_GUIDANCE,
+  MODEL_GUIDANCE,
+  QUICK_GUIDANCE,
+  STANDARD_GUIDANCE,
+} from '../hooks/model-guidance'
 
 /** Every profile the design's §5 mapping can produce, in §4 order. */
 const PROFILES: readonly GuidanceProfile[] = [
@@ -151,4 +156,69 @@ describe('model guidance data', () => {
       expect(text).toContain(DESIGN_PHRASE[profile])
     })
   }
+})
+
+/** The deep optional-detail rule quick and standard must replace, not append to. */
+const DEEP_OPTIONAL_DETAIL =
+  '표시 형식·이름·정렬·반올림·입력 검증 같은 세부는 추천안을 제안으로 draft에 적고, 결과를 더 크게 바꾸는 미결정이 없을 때만 묻는다.'
+
+/** Rules every level must keep from the shared policy. */
+const SHARED_RULES = [
+  '사용자의 언어·제약·확신 수준과 원래 작업 종류를 보존한다',
+  '진단·조사·계획·글쓰기를 실행 요청으로 바꾸지 않는다',
+  '합의된 결정에는 사용자가 답했거나 원문이 명시한 것만 적는다',
+  '한 질문에 여러 결정을 묶지 않는다',
+  '문맥에 없는 목적·요구사항을 합의된 것으로 쓰지 않는다',
+]
+
+describe('refinement level guidance', () => {
+  test('quick and standard are non-empty, distinct from deep, and within the common cap', () => {
+    for (const text of [QUICK_GUIDANCE, STANDARD_GUIDANCE]) {
+      expect(text.length).toBeGreaterThan(0)
+      expect(text.length).toBeLessThanOrEqual(COMMON_GUIDANCE_MAX_CHARS)
+      expect(text).not.toBe(COMMON_GUIDANCE)
+    }
+    expect(QUICK_GUIDANCE).not.toBe(STANDARD_GUIDANCE)
+  })
+
+  test('non-deep blocks replace the deep optional-detail interview rule', () => {
+    expect(COMMON_GUIDANCE).toContain(DEEP_OPTIONAL_DETAIL)
+    for (const text of [QUICK_GUIDANCE, STANDARD_GUIDANCE]) {
+      expect(text).not.toContain(DEEP_OPTIONAL_DETAIL)
+    }
+  })
+
+  test('quick asks only for decisions that change the outcome, contract, or safety', () => {
+    for (const rule of [
+      '빠른 정리에서는 결과·범위·API 계약·요청 동작의 안전을 실제로 바꾸는 사용자 결정만',
+      '추천안·미결정으로 draft에 남기고 합의로 쓰지 않는다',
+      '구현 구조·아키텍처·체크리스트로 임의 확장하지 않는다',
+    ]) {
+      expect(QUICK_GUIDANCE).toContain(rule)
+    }
+  })
+
+  test('standard resolves consequential contracts and leaves optional detail proposed', () => {
+    for (const rule of [
+      '결과·범위·인터페이스·입출력·오류 계약·비교 기준을 바꾸는 사용자 결정을 의존성 순서로 하나씩 묻는다',
+      '명시적으로 요구됐거나 계약에 영향을 주는 이름·형식·정렬·반올림이 아니면 묻지 않고',
+    ]) {
+      expect(STANDARD_GUIDANCE).toContain(rule)
+    }
+  })
+
+  test('both levels retain the shared language, evidence, and one-question rules', () => {
+    for (const text of [QUICK_GUIDANCE, STANDARD_GUIDANCE]) {
+      for (const rule of SHARED_RULES) expect(text).toContain(rule)
+    }
+  })
+
+  test('both levels carry no raw model id or design-source abbreviation', () => {
+    for (const text of [QUICK_GUIDANCE, STANDARD_GUIDANCE]) {
+      expect(text.toLowerCase()).not.toContain('claude')
+      for (const abbreviation of SOURCE_ABBREVIATIONS) expect(text).not.toContain(abbreviation)
+      expect(text).not.toContain('effort:')
+      expect(text).not.toContain('effort=')
+    }
+  })
 })
