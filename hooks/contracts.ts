@@ -105,6 +105,33 @@ export interface DecisionLedger {
   nextId: number
 }
 
+/**
+ * One successful reply, kept in memory so the person can compare against it
+ * and undo to it (#31). Snapshot fields are the workflow state exactly as the
+ * successful reply left it; `context`/`original` stay workflow-constant and
+ * are not copied per revision.
+ */
+export interface DraftRevision {
+  /** Workflow-local id (`r1`, `r2`, …); never reused, even after undo. */
+  id: string
+  /** The workflow's round counter at the moment this success was recorded. */
+  successfulRound: number
+  /** The draft exactly as this reply delivered it. */
+  draft: string
+  /** The reply's change note. */
+  message: string
+  /** The reply's clarifying question as offered then, or null. */
+  question: string | null
+  /** The question id minted with that question, or null. */
+  questionId: string | null
+  /** The answer choices offered with that question. */
+  options: readonly string[]
+  /** The improvement dialogue as it stood after this reply. */
+  dialogue: readonly OptimizerMessage[]
+  /** The decision ledger as it stood after this reply. */
+  decisions: DecisionLedger
+}
+
 /** One optimization run over one original prompt. */
 export interface Workflow {
   /** Stable id for this run, unique per session. */
@@ -159,6 +186,12 @@ export interface Workflow {
   questionId?: string | null
   /** Last preflight refusal whose protected evidence exceeded the request budget. */
   budgetError?: BudgetFailure
+  /** Newest-last successful revisions kept for comparison and undo (newest five). */
+  revisions?: readonly DraftRevision[]
+  /** Id of the revision the workflow currently shows; the last of {@link revisions}. */
+  currentRevisionId?: string
+  /** Next revision id number to mint; a high-water mark, never reused after undo. */
+  nextRevisionId?: number
 }
 
 /** Counts and decision ids for one local preflight budget refusal. */

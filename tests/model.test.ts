@@ -433,13 +433,17 @@ function reducerEvidenceWorkflow(): Workflow {
   const id = state.workflow?.id as string
   const generation = state.workflow?.generation as number
   const answer = (question: string, decision: string, options: readonly string[]): void => {
+    // A reply is only accepted from a generating run, so enter the phase the
+    // caller's round would have set (the first round also passes collecting;
+    // later rounds ignore that event from reviewing).
+    state = reduce(state, { type: 'phase', workflowId: id, generation, phase: 'collecting' }, 1)
+    state = reduce(state, { type: 'phase', workflowId: id, generation, phase: 'generating' }, 1)
     state = reduce(state, {
       type: 'reply', workflowId: id, generation, sessionId: 'sess-1',
       reply: { draft: '중간 초안', message: '확인합니다.', question: q(question), options },
       usage: FULL_USAGE,
     }, 1)
     state = reduce(state, { type: 'instruct', workflowId: id, text: a(decision) }, 2)
-    state = { ...state, workflow: state.workflow === null ? null : { ...state.workflow, phase: 'generating' } }
   }
   answer('처리 위치는?', '절대로 외부 서비스에 보내지 말고 로컬에서만 처리해줘', ['로컬', '외부 서비스'])
   answer('출력 방식은?', '화면에 결과만 표시해줘', ['화면', '파일'])

@@ -236,13 +236,13 @@ describe('reduce — round limit approval', () => {
   })
 
   test('a new reply, failure or instruction clears approval status but preserves the approved limit', () => {
-    const events: OptimizerEvent[] = [
-      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: ZERO },
-      { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'try again' },
-      { type: 'instruct', workflowId: 'wf-1', text: '더 짧게' },
+    const events: ReadonlyArray<{ event: OptimizerEvent; phase: Phase }> = [
+      { event: { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: ZERO }, phase: 'generating' },
+      { event: { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'try again' }, phase: 'generating' },
+      { event: { type: 'instruct', workflowId: 'wf-1', text: '더 짧게' }, phase: 'reviewing' },
     ]
-    for (const event of events) {
-      const current = deepFreeze(state({ workflow: workflow({ rounds: 5, roundLimit: 10, limitAsk: 'closed' }) }))
+    for (const { event, phase } of events) {
+      const current = deepFreeze(state({ workflow: workflow({ phase, rounds: 5, roundLimit: 10, limitAsk: 'closed' }) }))
       const next = reduce(current, event, 1)
       expect(next.workflow?.limitAsk).toBeUndefined()
       expect(next.workflow?.roundLimit).toBe(10)
@@ -251,17 +251,24 @@ describe('reduce — round limit approval', () => {
 })
 
 describe('reduce — start', () => {
+  const startedDefaults = {
+    decisions: { entries: [], nextId: 1 },
+    questionId: null,
+    revisions: [],
+    nextRevisionId: 1,
+  }
+
   test('installs a workflow when none is active', () => {
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state(), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
+    expect(next.workflow).toEqual({ ...wf, ...startedDefaults })
   })
 
   test('replaces a workflow that is already idle', () => {
     const old = workflow({ id: 'wf-old', phase: 'idle' })
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state({ workflow: old }), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
+    expect(next.workflow).toEqual({ ...wf, ...startedDefaults })
   })
 
   test('ignores a start while a run is in progress', () => {
@@ -418,13 +425,27 @@ describe('reduce — reply', () => {
   })
 
   test('a matching reply clears a previous failure', () => {
-    const current = state({ workflow: workflow({ phase: 'failed', lastError: 'boom' }) })
+    // Legal retry path: failed → generating, then the reply lands.
+    const current = state({ workflow: workflow({ phase: 'generating', lastError: 'boom' }) })
     const next = reduce(
       current,
       { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: usage() },
       1,
     )
     expect('lastError' in (next.workflow ?? {})).toBe(false)
+  })
+
+  test('a reply outside generating only records usage', () => {
+    for (const phase of ['idle', 'collecting', 'reviewing', 'transferring', 'sending'] as const) {
+      const current = state({ workflow: workflow({ phase, draft: 'KEEP' }) })
+      const next = reduce(
+        current,
+        { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ draft: 'STALE' }), usage: usage({ input_tokens: 4 }) },
+        1,
+      )
+      expect(next.workflow?.draft).toBe('KEEP')
+      expect(next.usage).toEqual(totals({ calls: 1, input: 4, updatedAt: 1 }))
+    }
   })
 
   test('a stale generation leaves the workflow alone but records the usage', () => {
@@ -1104,7 +1125,9 @@ describe('reduce — budget refusal', () => {
       type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
     }, 9)
-    const recovered = reduce(failed, {
+    // A retry re-enters generating before the recovery reply can land.
+    const retrying = reduce(failed, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 9)
+    const recovered = reduce(retrying, {
       type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       reply: reply({ draft: '회복된 초안' }), usage: usage(),
     }, 10)
@@ -1167,7 +1190,8 @@ describe('reduce — explicit decision correction', () => {
     const corrected = reduce(reviewed(), {
       type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '로컬 유지',
     }, 2)
-    const replied = reduce(corrected, {
+    const generating = reduce(corrected, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 2)
+    const replied = reduce(generating, {
       type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       reply: reply({ draft: '정정 반영 초안', message: '' }), usage: usage(),
     }, 3)
@@ -1194,7 +1218,8 @@ describe('reduce — explicit decision correction', () => {
 
   test('a model reply or failure cannot create a supersession', () => {
     const current = reviewed()
-    const replied = reduce(current, {
+    const generating = reduce(current, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 1)
+    const replied = reduce(generating, {
       type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
       reply: reply({ draft: '모델 초안', message: '모델 메모' }), usage: usage(),
     }, 1)

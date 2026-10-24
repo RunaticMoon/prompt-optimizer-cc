@@ -25,6 +25,7 @@ import type {
 } from './contracts'
 import { appendAnswer, appendCorrection, emptyLedger, isActiveDecision, questionIdFor } from './decisions'
 import { REQUEST_BUDGET_NOTICE } from './model'
+import { recordRevision } from './revisions'
 
 /**
  * The only legal `phase` moves. Everything else — including a move to the same
@@ -119,14 +120,17 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const current = base.workflow
       // One run per session: an in-flight run cannot be displaced by another.
       if (current !== null && current.phase !== 'idle') return base
-      // Every real run starts with a ledger and a null pending-question id;
-      // fixture workflows that predate the fields get the same defaults.
+      // Every real run starts with a ledger, an empty revision history and a
+      // null pending-question id; fixture workflows that predate the fields
+      // get the same defaults.
       return {
         ...base,
         workflow: {
           ...event.workflow,
           decisions: event.workflow.decisions ?? emptyLedger(),
           questionId: event.workflow.questionId ?? null,
+          revisions: event.workflow.revisions ?? [],
+          nextRevisionId: event.workflow.nextRevisionId ?? 1,
         },
       }
     }
@@ -172,7 +176,11 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
         ? addTotals(base.usage, event.usage, now)
         : base.usage
       const current = matchWorkflow(base, event.workflowId, event.generation)
-      if (current === null) return usage === base.usage ? base : { ...base, usage }
+      // Only a live generating run may accept a result: a duplicate settled
+      // reply must not overwrite the review state or append history twice.
+      if (current === null || current.phase !== 'generating') {
+        return usage === base.usage ? base : { ...base, usage }
+      }
 
       const question = event.reply.question
       const updated: Workflow = {
@@ -201,7 +209,20 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       delete updated.questionAsk
       delete updated.limitAsk
       if (current.correctionPending === true) updated.correctionPending = false
-      return { ...base, usage, workflow: updated }
+      // The snapshot is taken after the reply is fully folded in, so the
+      // recorded draft, dialogue and ledger are exactly what the person would
+      // go back to. Failures and budget refusals never reach this point.
+      const revision = recordRevision(current, {
+        successfulRound: updated.rounds,
+        draft: updated.draft,
+        message: updated.message ?? '',
+        question: updated.question ?? null,
+        questionId: updated.questionId ?? null,
+        options: [...(updated.options ?? [])],
+        dialogue: [...updated.dialogue],
+        decisions: current.decisions ?? emptyLedger(),
+      })
+      return { ...base, usage, workflow: { ...updated, ...revision } }
     }
 
     case 'question-ask': {
