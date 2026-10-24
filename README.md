@@ -255,6 +255,7 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 | `triggerPrefix` | string | `?? ` | 비어 있으면 prefix 모드에서 기본값으로 복귀 | prefix 모드 트리거 접두어. smart 모드에서도 같은 접두어를 명시적 개선으로 인정하며, 비어 있으면 smart의 접두어 shortcut이 꺼진다 |
 | `rawPrefix` | string | `>> ` | — | 맨 앞에 타이핑하면 옵티마이저 끔 모드를 켜는 문자열(빈 문자열이면 모드 끔) |
 | `uiMode` | string | `auto` | `auto` \| `pane` \| `composer` | `auto`·`pane`은 패널을 시도하고 배치되지 않으면 입력창 대화로 폴백, `composer`는 항상 입력창 |
+| `refinementLevel` | string | `deep` | `quick` \| `standard` \| `deep` | 보완 강도. `quick`은 표현 정리와 중대한 결정만, `standard`는 결과를 바꾸는 결정을 우선하고, `deep`은 기존 단계적 인터뷰를 유지한다(5.5) |
 | `model` | string | `sonnet` | 비어 있지 않은 문자열 | 옵티마이저 완성에 쓸 모델 별칭/ID |
 | `maxTokens` | number | `2048` | 128–2048 | 한 번의 완성 출력 상한 |
 | `timeoutMs` | number | `30000` | 1000–30000 | 한 번의 완성 시간 제한(ms) |
@@ -268,6 +269,8 @@ claude-mem, OpenViking 같은 장기 기억 플러그인은 classic 훅(SessionS
 
 > **마이그레이션**: 옵티마이저가 다른 플러그인이 주입한 장기 기억을 참고하게 하던 `prompt-optimizer.memoryContext` 설정은 제거됐다. 설정에 값이 남아 있어도 경고 없이 무시되며 지워도 된다. 이전처럼 옵티마이저가 기억을 참고하게 하는 대체 설정은 없다.
 
+> **보완 수준 마이그레이션**: `refinementLevel`이 없는 기존 설정은 경고 없이 `deep`으로 해석된다. 기존 사용자와 새 설치 모두 업데이트만으로 보완 정책이 조용히 바뀌지 않는다. `quick`·`standard`는 사용자가 `/config`에서 명시적으로 고를 때만 적용된다.
+
 ### 5.1 `/config` 행
 
 `register.ts`의 `config.set` 핸들러는 `<plugin>.<key>` 접두어, 즉 `prompt-optimizer.`로 시작하는 키를 처리한다. `/config` 메뉴에는 다음 행이 나타난다.
@@ -279,6 +282,7 @@ prompt-optimizer.triggerMode
 prompt-optimizer.triggerPrefix
 prompt-optimizer.rawPrefix
 prompt-optimizer.uiMode
+prompt-optimizer.refinementLevel
 prompt-optimizer.model
 prompt-optimizer.maxTokens
 prompt-optimizer.timeoutMs
@@ -362,7 +366,7 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 
 `hooks/system-prompt.ts`의 `composeSystemPrompt`는 다음 순서로 조립한다.
 
-1. 기본 프롬프트(`BASE_SYSTEM_PROMPT`, 공통 편집 지침 포함)
+1. 선택한 보완 수준의 기본 프롬프트(해당 수준의 편집 지침과 라운드 정책 포함). `deep`은 기존 `BASE_SYSTEM_PROMPT`와 바이트 단위로 같다(5.5).
 2. 대상 모델 추가 블록 — `common`이면 생략한다. 제목은 `[대상 모델 편집 지침: opus-5-5]`처럼 코드가 정한 프로필 이름만 쓰고 raw 모델 문자열은 넣지 않는다.
 3. 사용자 추가 지침(`systemPromptFile`, 5.3) — trim 후 비어 있지 않을 때만 `[추가 지침]`으로 추가
 4. 고정 계약(`[고정 계약]`) — 항상 마지막. 역할 제한과 JSON 출력 계약을 다시 붙이며 어떤 추가 지침도 이를 덮어쓸 수 없다.
@@ -375,6 +379,23 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 - 요청 분류, 목표/맥락/범위/완료 기준 네 필드 구조, 지시어 해소 아이디어는 [oh-my-fable](https://github.com/Junhan2/oh-my-fable)(MIT)의 `fable-prompt` 스킬을 참고했다. 그 스킬의 "개선 후 실행" 절차와 블록 원문 복사 규칙은 채택하지 않는다.
 - 요구사항 질문은 [grill-me](https://github.com/mattpocock/skills/blob/main/skills/productivity/grill-me/SKILL.md), [grill-with-docs](https://github.com/mattpocock/skills/blob/main/skills/engineering/grill-with-docs/SKILL.md), [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)의 결정 의존성과 사실·사용자 결정 구분을 참고했다. 여러 질문·서브에이전트 탐색 대신 기존 UI의 한 질문과 제한된 읽기 전용 스냅샷으로 적용한다.
 - 용어와 결정 이유는 [domain-modeling](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md), [ADR 형식](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/ADR-FORMAT.md), [용어집 형식](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/GLOSSARY-FORMAT.md)을 참고했다. 합의된 용어·중요한 절충을 초안에 담으며, 해당 스킬을 실행하거나 문서 파일을 자동 생성하지 않는다.
+
+### 5.5 보완 수준
+
+`refinementLevel`은 한 작업의 요구사항 보완 강도를 정한다. 모델·최대 토큰·최대 라운드·타임아웃과 분리되어 있으며, 수준을 바꿔도 새 모델을 쓰거나 라운드 한도를 자동으로 바꾸지 않는다.
+
+| 값 | 정책 | 질문 기준 |
+|---|---|---|
+| `quick` | 원문 언어·목적·범위·작업 종류·제약과 모든 대상을 유지하며 표현과 제약을 정리한다. 구현 구조·아키텍처·체크리스트로 임의 확장하지 않는다. | 결과·범위·API 계약·요청 동작의 안전을 실제로 바꾸는 결정만 가장 중요한 질문 하나로 확인한다. 나머지 세부는 초안에 미결정·제안으로 남긴다. |
+| `standard` | 결과·범위·인터페이스·입출력·오류 계약·비교 기준을 중심으로 구체화한다. | 위 계약을 바꾸는 사용자 결정을 의존성 순서로 하나씩 묻는다. 명시적으로 요구됐거나 계약에 영향을 주는 이름·형식·정렬·반올림이 아니면 묻지 않는다. |
+| `deep` | 기존 정책을 유지한다. 남은 라운드가 있으면 사용자가 정할 미결정을 단계적으로 묻고, 마지막 라운드에서도 미결정을 초안에 남긴다. | 현재 동작과 같다(기본값). |
+
+- **기본값은 `deep`이다.** 기존 설정에 값이 없거나 새로 설치해도 현재 동작이 바뀌지 않는다. 잘못된 값은 경고와 함께 `deep`으로 폴백하고, 실행 중 `/config` 변경이 거부되면 이전 값을 유지한다.
+- **다음 라운드부터 적용된다.** 라운드 시작 시 설정을 읽어 요청을 조립하므로, 생성 중에 값을 바꿔도 이미 보낸 요청은 바뀌지 않고 다음 라운드부터 새 수준을 쓴다.
+- **`question`이 `null`이어도 모든 세부가 합의됐다는 뜻은 아니다.** 각 수준은 답하지 않은 미결정을 초안에 미결정·제안으로 남기며, 라운드가 0이 되어도 답을 임의로 만들지 않는다.
+- **라운드 연장은 기존 사용자 승인 흐름을 따른다.** 자동 전송·전송 버튼·자동 라운드 상향은 추가하지 않는다.
+- **상태 확인**: `/optimize status`의 `보완 수준:` 줄에 `quick (빠른 정리)`, `standard (일반 보완)`, `deep (심층 구체화)` 중 현재 선택이 표시된다.
+- **의미 평가는 별도다.** 같은 입력의 수준별 실제 질문 수·초안 품질 비교는 mock 테스트가 아니라 #37 평가 실행 또는 별도 승인된 실제 모델 스모크로 확인한다. 결정적 테스트는 정책 조립·설정 경로·초안 보존만 검증하며, 비교 절차는 `docs/smoke.md` 5장에 있다.
 
 ## 6. 비용·프라이버시
 
