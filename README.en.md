@@ -192,7 +192,7 @@ If the pane cannot be laid out or `uiMode` is `composer`, the improvement dialog
 
 ### 4.6 The `/optimize` command
 
-Command name `optimize`, description `프롬프트 옵티마이저: 개선 시작·승인·전송·설정` ("Prompt Optimizer: start, approve, send, configure improvements"), argument hint `[text|on|off|accept|send|raw|cancel|retry|more|status|decisions|correct <id> <text>|model <id>]` (`hooks/commands.ts`). The first token is compared case-insensitively against the reserved words. `retry` and `model` take the whole rest as their argument, and `correct` takes the first token as the decision id and the whole rest as the replacement text; every other reserved word takes none, so trailing text after it returns a usage error.
+Command name `optimize`, description `프롬프트 옵티마이저: 개선 시작·승인·전송·설정` ("Prompt Optimizer: start, approve, send, configure improvements"), argument hint `[text|on|off|accept|send|raw|cancel|retry|more|status|decisions|correct <id> <text>|model <id>|undo|show|diff|sources]` (`hooks/commands.ts`). The first token is compared case-insensitively against the reserved words. `retry` and `model` take the whole rest as their argument, and `correct` takes the first token as the decision id and the whole rest as the replacement text. `show` and `diff` take at most one optional argument (`show` accepts `draft|original|previous`, defaulting to `draft`; `diff` accepts `original|previous`, defaulting to `original`); every other reserved word takes none, so trailing text after it returns a usage error.
 
 | Command | Behavior |
 |---|---|
@@ -205,6 +205,10 @@ Command name `optimize`, description `프롬프트 옵티마이저: 개선 시�
 | `/optimize more` | Explicitly approves 5 more rounds for the current job when it has reached its limit with an unresolved question or an unapplied correction. Global settings stay unchanged. |
 | `/optimize decisions` | Lists confirmed decisions with their id, status (active/replaced), source question, choices, raw answer and resolved choice. The original is shown as the always-applicable `사용자 원문` ("the user's original"). |
 | `/optimize correct <id> <text>` | Replaces one active decision with the given text. It changes state only and calls no model; `/optimize retry` applies it. At the round limit, use `/optimize more` to approve 5 rounds and then retry. |
+| `/optimize undo` | Restores the preceding successful round: draft, change note, question, choices, dialogue and decision state come back in one state-only transition. It is refused while generating, transferring, sending or while a choice dialog is open. Only the latest five successful rounds are kept in memory, so there is nothing before the first success or an evicted round; a later successful refine branches with a fresh id. It calls no model and keeps usage, round count and the approved round limit; the prompt box is untouched (the person still accepts and presses Enter). |
+| `/optimize show [draft\|original\|previous]` | Shows a stored text in full. The default is the current draft; `original` shows the user's original and `previous` shows exactly the preceding successful round that undo would restore. Everything is read from the stored state, never from freshly typed prompt-box content. |
+| `/optimize diff [original\|previous]` | Shows the changes between the current draft and the original (default) or the preceding successful round as a one-column `-`/`+` comparison. The first 80 lines are shown and the remaining count is summarized; the full texts are available through `show original`/`show previous` and `show`. |
+| `/optimize sources` | Shows the confirmed decisions with their sources and the repository evidence (paths and excerpts) the collector actually read and selected. The whole draft and change note are always labeled `미확정 제안` ("unconfirmed proposal"): matching an evidence sentence is not user agreement. |
 | `/optimize cancel` | Cancels the improvement job and restores its stored original to the prompt box. Separately written new input is protected. |
 | `/optimize status` | Shows the configuration, the current stage, and this session's usage. It includes `옵티마이저 모델:` (optimizer model), `모델별 지침: 켜짐`/`꺼짐(공통 지침만 사용)` (model-specific guidance on/off, off keeps common guidance only), and the target model applied to the last optimization (5.4). The `그대로 보내기:` line reads `그대로 보내기: 맨 앞에 ">> " 입력(ctrl+u로 해제)` when a trigger string is set and `그대로 보내기: 꺼짐` when it is empty, and adds `옵티마이저 끔 모드: 켜짐 (다음 제출은 그대로 전송)` while the mode is on. The `붙여넣기 그대로 보내기:` line reads `붙여넣기 그대로 보내기: 켬 (붙여넣기·외부 앱 입력만으로 채운 프롬프트는 다듬지 않음)` when on ("sending pastes as-is: on — a prompt filled only by a paste or another app's input is not refined") and `붙여넣기 그대로 보내기: 끔` when off. |
 | `/optimize model <alias-or-id>` | Changes the optimizer model. |
@@ -466,10 +470,13 @@ hooks/
   model.ts             # single-completion request/response mapping
   state.ts             # pure reducer
   decisions.ts         # decision ledger, source and correction helpers
+  revisions.ts         # successful-round snapshots and undo helpers
+  draft-diff.ts        # one-column draft comparison (line-based, bounded LCS)
   delivery.ts          # prompt-box restore (prompt.fill) and explicit send (prompt.submit)
   controller.ts        # improvement dialogue controller
   commands.ts          # /optimize parsing and dispatch
   decision-view.ts     # read-only `/optimize decisions` output
+  review-view.ts       # read-only `/optimize show`·`diff`·`sources` output
   ui/
     register.tsx       # ui.render/press/input/close hooks
     present.ts         # composer status/log display

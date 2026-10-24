@@ -192,7 +192,7 @@ claude --plugin-dir /path/to/prompt-optimizer
 
 ### 4.6 `/optimize` 명령
 
-명령 이름 `optimize`, 설명 `프롬프트 옵티마이저: 개선 시작·승인·전송·설정`, 인자 힌트 `[text|on|off|accept|send|raw|cancel|retry|more|status|decisions|correct <id> <text>|model <id>]`(`hooks/commands.ts`). 첫 토큰을 대소문자 구분 없이 예약어로 비교한다. `retry`와 `model`은 나머지 전체를 인자로 받고, `correct`는 첫 토큰을 결정 id로, 나머지 전체를 정정 내용으로 받는다. 나머지 예약어는 인자를 받지 않으므로 뒤에 남는 텍스트가 있으면 사용법 오류를 반환한다.
+명령 이름 `optimize`, 설명 `프롬프트 옵티마이저: 개선 시작·승인·전송·설정`, 인자 힌트 `[text|on|off|accept|send|raw|cancel|retry|more|status|decisions|correct <id> <text>|model <id>|undo|show|diff|sources]`(`hooks/commands.ts`). 첫 토큰을 대소문자 구분 없이 예약어로 비교한다. `retry`와 `model`은 나머지 전체를 인자로 받고, `correct`는 첫 토큰을 결정 id로, 나머지 전체를 정정 내용으로 받는다. `show`와 `diff`는 선택 인자를 하나만 받는다(`show`는 `draft|original|previous`, 기본값 `draft`; `diff`는 `original|previous`, 기본값 `original`). 나머지 예약어는 인자를 받지 않으므로 뒤에 남는 텍스트가 있으면 사용법 오류를 반환한다.
 
 | 명령 | 동작 |
 |---|---|
@@ -205,6 +205,10 @@ claude --plugin-dir /path/to/prompt-optimizer
 | `/optimize more` | 한도에 도달하고 미해결 질문이 남거나 아직 반영되지 않은 정정이 있는 이번 작업에 5회를 추가로 허용한다. 전역 설정은 바꾸지 않는다. |
 | `/optimize decisions` | 확정 결정을 id·상태(활성/대체됨)·출처 질문·선택지·원문 답변·해석된 선택과 함께 보여준다. 원문은 항상 적용되는 `사용자 원문`으로 표시한다. |
 | `/optimize correct <id> <내용>` | 활성 결정 하나를 지정한 내용으로 정정한다. 상태만 바꾸고 모델을 호출하지 않으며, `/optimize retry`로 반영한다. 라운드 한도에 도달했으면 `/optimize more`로 5회를 허용한 뒤 retry한다. |
+| `/optimize undo` | 직전 성공 라운드로 되돌린다. 초안·변경 메모·질문·선택지·대화·결정 상태를 한 번에 복원하고 생성·전송 중과 열린 선택 창에서는 거부한다. 성공한 보완 결과만 최근 5개까지 메모리에 보관되므로 첫 성공 앞이나 잘려나간 이전 라운드로는 돌아갈 수 없고, 되돌린 뒤 다시 성공하면 새 id로 분기한다. 모델을 호출하지 않고 사용량·라운드 수·승인된 라운드 한도도 그대로이며, 입력창은 건드리지 않는다(사용자가 계속 accept하고 Enter한다). |
+| `/optimize show [draft\|original\|previous]` | 저장된 텍스트 전문을 보여준다. 기본값은 현재 개선안이고, `original`은 사용자 원문, `previous`는 undo가 돌아가는 바로 그 직전 성공 라운드 개선안이다. 비교 대상은 항상 저장된 상태이므로 입력창에 새로 쓴 내용은 읽지 않는다. |
+| `/optimize diff [original\|previous]` | 현재 개선안과 원문(기본값) 또는 직전 성공 라운드 개선안의 변경을 한 컬럼 `-`/`+` 비교로 보여준다. 처음 80줄을 보여주고 나머지 줄 수는 요약으로 알려 주며, 전문은 `show original`/`show previous`와 `show`로 확인한다. |
+| `/optimize sources` | 확정 결정과 출처, 그리고 수집기가 실제로 읽고 선택한 저장소 근거(경로·발췌)를 보여준다. 개선안 전체와 변경 메모는 항상 `미확정 제안`으로 표시되며, 근거 문장과 일치해도 사용자 합의로 표시되지 않는다. |
 | `/optimize cancel` | 개선 작업을 취소하고 보관한 원문을 입력창에 복원한다. 별도로 작성한 새 입력은 덮어쓰지 않는다. |
 | `/optimize status` | 설정·진행 단계·이 세션 사용량 표시. `옵티마이저 모델:`, `모델별 지침: 켜짐`/`꺼짐(공통 지침만 사용)`, 마지막 최적화에 적용한 대상 모델(5.4)를 포함한다. `그대로 보내기:` 줄은 트리거 문자열이 있으면 `그대로 보내기: 맨 앞에 ">> " 입력(ctrl+u로 해제)`, 비어 있으면 `그대로 보내기: 꺼짐`이고, 모드가 켜져 있으면 `옵티마이저 끔 모드: 켜짐 (다음 제출은 그대로 전송)`을 덧붙인다. `붙여넣기 그대로 보내기:` 줄은 켜져 있으면 `붙여넣기 그대로 보내기: 켬 (붙여넣기·외부 앱 입력만으로 채운 프롬프트는 다듬지 않음)`, 꺼져 있으면 `붙여넣기 그대로 보내기: 끔`이다. |
 | `/optimize model <alias-or-id>` | 옵티마이저 모델 변경. |
@@ -466,10 +470,13 @@ hooks/
   model.ts             # 단일 완성 요청/응답 변환
   state.ts             # 순수 리듀서
   decisions.ts         # 결정 원장·출처·정정 헬퍼
+  revisions.ts         # 성공 라운드 스냅샷·되돌리기 헬퍼
+  draft-diff.ts        # 초안 한 컬럼 비교(줄 단위, 한도 있는 LCS)
   delivery.ts          # 입력창 복원(prompt.fill)과 명시적 전송(prompt.submit)
   controller.ts        # 개선 대화 제어기
   commands.ts          # /optimize 파싱·디스패치
   decision-view.ts     # /optimize decisions 읽기 전용 출력
+  review-view.ts       # /optimize show·diff·sources 읽기 전용 출력
   ui/
     register.tsx       # ui.render/press/input/close 훅
     present.ts         # composer 상태/로그 표시

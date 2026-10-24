@@ -27,14 +27,18 @@ import type {
   GuidanceStatus,
   OptimizerConfig,
   RuntimeState,
+  Workflow,
 } from './contracts'
 import {
   CORRECTION_LIMIT_NOTICE,
   CORRECTION_NOTICE,
   IN_FLIGHT_REASON,
+  UNDO_NOTICE,
   type ActionResult,
 } from './controller'
 import { formatDecisions } from './decision-view'
+import { undoTarget } from './revisions'
+import { NO_PREVIOUS_NOTICE, formatDraftDiff, formatShow, formatSources } from './review-view'
 import { canStartRound, workflowRoundLimit } from './state'
 import type { UiPorts } from './ui/ui-ports'
 
@@ -42,7 +46,8 @@ import type { UiPorts } from './ui/ui-ports'
 export const OPTIMIZE_COMMAND: CommandSpec = {
   name: 'optimize',
   description: '프롬프트 옵티마이저: 개선 시작·승인·전송·설정',
-  argumentHint: '[text|on|off|accept|send|raw|cancel|retry|more|status|decisions|correct <id> <text>|model <id>]',
+  argumentHint:
+    '[text|on|off|accept|send|raw|cancel|retry|more|status|decisions|correct <id> <text>|model <id>|undo|show|diff|sources]',
   immediate: true,
 }
 
@@ -87,6 +92,8 @@ export interface CommandController {
   extendRounds(ports: EnginePorts): Promise<ActionResult>
   /** Explicitly replaces one active decision; absent on an older host. */
   correctDecision?(id: string, text: string): ActionResult
+  /** Restores the preceding successful revision; absent on an older host. */
+  undo?(): ActionResult
   /** Restores the draft into the composer. */
   accept(ports: EnginePorts): Promise<ActionResult>
   /** Sends the improved draft now. */
@@ -148,6 +155,10 @@ export type ParsedCommand =
   | { kind: 'status' }
   | { kind: 'decisions' }
   | { kind: 'correct'; id: string; text: string }
+  | { kind: 'undo' }
+  | { kind: 'show'; target: 'draft' | 'original' | 'previous' }
+  | { kind: 'diff'; baseline: 'original' | 'previous' }
+  | { kind: 'sources' }
   | { kind: 'model'; model: string }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
@@ -162,9 +173,13 @@ const HELP_TEXT = [
   '/optimize raw — 원문을 그대로 보내기',
   '/optimize retry [instruction] — 보완 내용으로 다시 다듬기',
   '/optimize more — 미해결 질문이나 반영할 정정이 남은 이번 작업에 5회 더 허용',
+  '/optimize undo — 직전 성공 라운드로 되돌리기. 실패 뒤에도 마지막 성공의 이전 성공으로 돌아가며, 사용량과 라운드 한도는 유지됩니다',
+  '/optimize show [draft|original|previous] — 현재 개선안·원문·직전 성공 라운드 전문 보기 (기본 draft)',
+  '/optimize diff [original|previous] — 원문 또는 직전 성공 라운드 대비 변경 보기 (기본 original)',
   '/optimize cancel — 개선 작업 취소',
   '/optimize status — 설정과 진행 상황 보기',
   '/optimize decisions — 확정 결정과 출처 보기',
+  '/optimize sources — 결정 출처와 읽은 저장소 근거 보기',
   '/optimize correct <id> <내용> — 결정 정정 후 /optimize retry로 반영',
   '/optimize model <id> — 옵티마이저 모델 변경',
   '/optimize -- <text> — 예약어로 시작하는 문장도 개선 시작',
@@ -217,6 +232,14 @@ export function parseOptimizeArgs(args: string): ParsedCommand {
       return rest === '' ? { kind: 'status' } : rejectExtraArgument(head)
     case 'decisions':
       return rest === '' ? { kind: 'decisions' } : rejectExtraArgument(head)
+    case 'undo':
+      return rest === '' ? { kind: 'undo' } : rejectExtraArgument(head)
+    case 'sources':
+      return rest === '' ? { kind: 'sources' } : rejectExtraArgument(head)
+    case 'show':
+      return parseShowTarget(rest)
+    case 'diff':
+      return parseDiffBaseline(rest)
     case 'correct':
       return parseCorrection(rest)
     case 'help':
@@ -263,6 +286,43 @@ function parseCorrection(rest: string): ParsedCommand {
     }
   }
   return { kind: 'correct', id, text }
+}
+
+const SHOW_TARGETS = ['draft', 'original', 'previous'] as const
+const DIFF_BASELINES = ['original', 'previous'] as const
+
+/** The usage error for `show`; one optional known target, nothing else. */
+const SHOW_USAGE = 'show 대상은 draft, original, previous 중 하나입니다. 예: /optimize show original'
+
+/** The usage error for `diff`; one optional known baseline, nothing else. */
+const DIFF_USAGE = 'diff 기준은 original 또는 previous 중 하나입니다. 예: /optimize diff previous'
+
+/**
+ * Parses `show [draft|original|previous]`. The target defaults to the current
+ * draft; an unknown word or a second token is a usage error, never a start.
+ */
+function parseShowTarget(rest: string): ParsedCommand {
+  if (rest === '') return { kind: 'show', target: 'draft' }
+  if (rest.search(/\s/) !== -1) return { kind: 'error', message: SHOW_USAGE }
+  const target = rest.toLowerCase()
+  if ((SHOW_TARGETS as readonly string[]).includes(target)) {
+    return { kind: 'show', target: target as (typeof SHOW_TARGETS)[number] }
+  }
+  return { kind: 'error', message: SHOW_USAGE }
+}
+
+/**
+ * Parses `diff [original|previous]`. The baseline defaults to the original;
+ * an unknown word or a second token is a usage error, never a start.
+ */
+function parseDiffBaseline(rest: string): ParsedCommand {
+  if (rest === '') return { kind: 'diff', baseline: 'original' }
+  if (rest.search(/\s/) !== -1) return { kind: 'error', message: DIFF_USAGE }
+  const baseline = rest.toLowerCase()
+  if ((DIFF_BASELINES as readonly string[]).includes(baseline)) {
+    return { kind: 'diff', baseline: baseline as (typeof DIFF_BASELINES)[number] }
+  }
+  return { kind: 'error', message: DIFF_USAGE }
 }
 
 /**
@@ -507,6 +567,27 @@ async function dispatch(
       const workflow = deps.controller.getState().workflow
       return { text: workflow === null ? NO_WORKFLOW : formatDecisions(workflow) }
     }
+    case 'sources': {
+      const workflow = deps.controller.getState().workflow
+      return { text: workflow === null ? NO_WORKFLOW : formatSources(workflow) }
+    }
+    case 'show': {
+      const workflow = deps.controller.getState().workflow
+      if (workflow === null) return { text: NO_WORKFLOW }
+      return showOutcome(workflow, command.target)
+    }
+    case 'diff': {
+      const workflow = deps.controller.getState().workflow
+      if (workflow === null) return { text: NO_WORKFLOW }
+      return diffOutcome(workflow, command.baseline)
+    }
+    case 'undo': {
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
+      const undo = deps.controller.undo
+      if (undo === undefined) return { text: '되돌리기를 지원하지 않는 호스트입니다.' }
+      const result = undo.call(deps.controller)
+      return { text: result.ok ? UNDO_NOTICE : result.reason }
+    }
     case 'correct': {
       if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
       const correct = deps.controller.correctDecision
@@ -577,6 +658,51 @@ async function dispatch(
 
 /** A friendly line when a command needs a run and none is active. */
 const NO_WORKFLOW = '진행 중인 개선 작업이 없습니다. `/optimize <텍스트>`로 새로 시작하세요.'
+
+/** The headings `show` prints above each stored text. */
+const SHOW_LABELS = {
+  draft: '현재 개선안:',
+  original: '사용자 원문:',
+  previous: '직전 성공 라운드 개선안:',
+} as const
+
+/**
+ * Resolves a `show` target to a stored text, whole. `previous` selects the
+ * same preceding retained success undo would restore; a first success or an
+ * evicted predecessor has nothing to show. Everything is read from the
+ * workflow state — never from the composer draft.
+ */
+function showOutcome(
+  workflow: Readonly<Workflow>,
+  target: 'draft' | 'original' | 'previous',
+): CommandOutcome {
+  if (target === 'original') return { text: formatShow(SHOW_LABELS.original, workflow.original) }
+  if (target === 'draft') {
+    if (workflow.draft === '') return { text: '아직 생성된 개선안이 없습니다.' }
+    return { text: formatShow(SHOW_LABELS.draft, workflow.draft) }
+  }
+  const plan = undoTarget(workflow, workflow.currentRevisionId)
+  if (plan === null) return { text: NO_PREVIOUS_NOTICE }
+  return { text: formatShow(SHOW_LABELS.previous, plan.target.draft) }
+}
+
+/**
+ * Resolves a `diff` baseline and compares it with the current draft. Both
+ * sides are stored texts: the baseline is the original or the same preceding
+ * snapshot `show previous` uses, never uncommitted composer content.
+ */
+function diffOutcome(
+  workflow: Readonly<Workflow>,
+  baseline: 'original' | 'previous',
+): CommandOutcome {
+  if (workflow.draft === '') return { text: '비교할 개선안이 없습니다.' }
+  if (baseline === 'original') {
+    return { text: formatDraftDiff(workflow.original, workflow.draft, 'original') }
+  }
+  const plan = undoTarget(workflow, workflow.currentRevisionId)
+  if (plan === null) return { text: NO_PREVIOUS_NOTICE }
+  return { text: formatDraftDiff(plan.target.draft, workflow.draft, 'previous') }
+}
 
 /** Whether an active workflow exists to act on. */
 function hasWorkflow(deps: CommandDeps): boolean {
