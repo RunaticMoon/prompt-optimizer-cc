@@ -253,14 +253,14 @@ describe('reduce — start', () => {
   test('installs a workflow when none is active', () => {
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state(), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toBe(wf)
+    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
   })
 
   test('replaces a workflow that is already idle', () => {
     const old = workflow({ id: 'wf-old', phase: 'idle' })
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state({ workflow: old }), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toBe(wf)
+    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
   })
 
   test('ignores a start while a run is in progress', () => {
@@ -619,14 +619,14 @@ describe('reduce — instruct', () => {
     expect(next.workflow?.phase).toBe('reviewing')
     expect(next.workflow?.dialogue).toEqual([
       { role: 'optimizer', text: '초안' },
-      { role: 'user', text: '더 짧게' },
+      { role: 'user', text: '더 짧게', decisionId: 'd1' },
     ])
   })
 
   test('a failed workflow also takes a supplement', () => {
     const current = state({ workflow: workflow({ phase: 'failed' }) })
     const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '다시' }, 1)
-    expect(next.workflow?.dialogue).toEqual([{ role: 'user', text: '다시' }])
+    expect(next.workflow?.dialogue).toEqual([{ role: 'user', text: '다시', decisionId: 'd1' }])
   })
 
   test('clears the stored question and options while keeping the message', () => {
@@ -836,6 +836,173 @@ describe('reduce — raw mode', () => {
     const next = reduce(current, { type: 'reset', sessionId: SESSION }, 50)
     expect(next.rawMode).toBeNull()
     expect(next.usage).toEqual(current.usage)
+  })
+})
+
+describe('reduce — decision evidence', () => {
+  test('start gives a fixture workflow an empty ledger and no pending question id', () => {
+    const started = reduce(state(), { type: 'start', workflow: workflow({ phase: 'idle' }) }, 1)
+    expect(started.workflow?.decisions).toEqual({ entries: [], nextId: 1 })
+    expect(started.workflow?.questionId).toBeNull()
+  })
+
+  test('a successful reply mints a fresh question id, and null when there is no question', () => {
+    const first = reduce(
+      state({ workflow: workflow({ phase: 'generating', rounds: 0 }) }),
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ question: '어느 쪽인가요?' }), usage: usage() },
+      1,
+    )
+    expect(first.workflow?.questionId).toBe('q:wf-1:1:1')
+
+    const second = reduce(
+      state({ workflow: workflow({ phase: 'generating', rounds: 2 }) }),
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ question: null }), usage: usage() },
+      1,
+    )
+    expect(second.workflow?.questionId).toBeNull()
+  })
+
+  test('an exact "1번" answer keeps the question, options and resolved choice', () => {
+    const current = state({
+      workflow: workflow({
+        phase: 'reviewing',
+        rounds: 1,
+        questionId: 'q:wf-1:1:1',
+        message: '비교 기준을 확인합니다.',
+        question: '기존 image는 무엇과 비교할까요?',
+        options: ['변화 이력의 직전 값', '배포 기준'],
+      }),
+    })
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '1번' }, 2)
+    const ledger = next.workflow?.decisions
+    expect(ledger?.entries).toHaveLength(1)
+    const entry = ledger?.entries[0]
+    expect(entry?.id).toBe('d1')
+    expect(entry?.text).toBe('1번')
+    expect(entry?.source).toEqual({
+      kind: 'user-answer',
+      questionId: 'q:wf-1:1:1',
+      question: '기존 image는 무엇과 비교할까요?',
+      options: ['변화 이력의 직전 값', '배포 기준'],
+      answeredAfterRound: 1,
+    })
+    expect(entry?.selectedOption).toEqual({ index: 1, text: '변화 이력의 직전 값' })
+    expect(next.workflow?.dialogue).toEqual([
+      { role: 'user', text: '1번', decisionId: 'd1' },
+    ])
+    // The pending question is cleared exactly as before.
+    expect(next.workflow?.question).toBeNull()
+    expect(next.workflow?.questionId).toBeNull()
+    expect(next.workflow?.options).toEqual([])
+  })
+
+  test('a button label answer resolves the same way as its number', () => {
+    const current = state({
+      workflow: workflow({
+        phase: 'reviewing', rounds: 1, question: '어느 쪽?', options: ['변화 이력', '배포 기준'],
+      }),
+    })
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '배포 기준' }, 1)
+    expect(next.workflow?.decisions?.entries[0]?.selectedOption).toEqual({ index: 2, text: '배포 기준' })
+  })
+
+  test('an out-of-range, ambiguous or prose answer stays verbatim and unresolved', () => {
+    for (const text of ['7번', '첫 번째', '배포 기준일 수도 있어요', '1, 2']) {
+      const current = state({
+        workflow: workflow({ phase: 'reviewing', rounds: 1, question: '어느 쪽?', options: ['A', 'B'] }),
+      })
+      const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text }, 1)
+      const entry = next.workflow?.decisions?.entries[0]
+      expect(entry?.text).toBe(text)
+      expect(entry?.selectedOption).toBeUndefined()
+    }
+  })
+
+  test('several questions get distinct ids and keep their own sources', () => {
+    let current = state({ workflow: workflow({ phase: 'generating', rounds: 0 }) })
+    current = reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ question: '처리 위치는?', options: ['로컬', '서버'] }), usage: usage(),
+    }, 1)
+    const firstQuestion = current.workflow?.questionId
+    current = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '로컬' }, 2)
+    current = reduce({ ...current, workflow: current.workflow === null ? null : { ...current.workflow, phase: 'generating' } }, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ question: '출력 방식은?', options: ['화면', '파일'] }), usage: usage(),
+    }, 3)
+    const secondQuestion = current.workflow?.questionId
+    current = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '화면' }, 4)
+
+    expect(firstQuestion).not.toBe(secondQuestion)
+    const entries = current.workflow?.decisions?.entries ?? []
+    expect(entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(entries[0]?.source.questionId).toBe(firstQuestion)
+    expect(entries[1]?.source.questionId).toBe(secondQuestion)
+    expect(entries[0]?.source.question).toBe('처리 위치는?')
+    expect(entries[1]?.source.options).toEqual(['화면', '파일'])
+  })
+
+  test('model draft and change notes never enter user evidence', () => {
+    const current = state({
+      workflow: workflow({ phase: 'reviewing', rounds: 1, question: '어느 쪽?', options: ['A', 'B'] }),
+    })
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    const serialized = JSON.stringify(next.workflow?.decisions)
+    expect(serialized).toContain('"text":"A"')
+    expect(serialized).not.toContain('개선안')
+    expect(serialized).not.toContain('더 짧게 만들었습니다')
+    expect(next.workflow?.decisions?.entries).toHaveLength(1)
+  })
+
+  test('a failed later round keeps the recorded source and clears the pending question', () => {
+    const reviewed = state({
+      workflow: workflow({
+        phase: 'reviewing', rounds: 1, questionId: 'q:wf-1:1:1', question: '어느 쪽?', options: ['A', 'B'],
+      }),
+    })
+    const instructed = reduce(reviewed, { type: 'instruct', workflowId: 'wf-1', text: '1번' }, 1)
+    const failed = reduce({ ...instructed, workflow: instructed.workflow === null ? null : { ...instructed.workflow, phase: 'generating' } }, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 2)
+    expect(failed.workflow?.phase).toBe('failed')
+    expect(failed.workflow?.decisions?.entries[0]?.source.question).toBe('어느 쪽?')
+    expect(failed.workflow?.decisions?.entries[0]?.selectedOption).toEqual({ index: 1, text: 'A' })
+  })
+
+  test('cancel and reset release the ledger with the workflow', () => {
+    const current = state({ workflow: workflow({ phase: 'reviewing' }) })
+    const withDecision = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    expect(reduce(withDecision, { type: 'cancel', workflowId: 'wf-1' }, 2).workflow).toBeNull()
+    expect(reduce(withDecision, { type: 'reset', sessionId: SESSION }, 2).workflow).toBeNull()
+  })
+
+  test('a frozen ledger is not mutated by a later answer', () => {
+    const current = deepFreeze(state({
+      workflow: workflow({ phase: 'reviewing', question: '어느 쪽?', options: ['A', 'B'] }),
+    }))
+    const snapshot = JSON.stringify(current)
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '1번' }, 1)
+    expect(JSON.stringify(current)).toBe(snapshot)
+    expect(next.workflow?.decisions?.entries).toHaveLength(1)
+  })
+
+  test('a reply or failure event never appends a user decision', () => {
+    const current = state({
+      workflow: workflow({
+        phase: 'generating', question: '어느 쪽?', options: ['A', 'B'],
+        decisions: { entries: [], nextId: 1 },
+      }),
+    })
+    const replyNext = reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '모델 초안', message: '모델 메모', question: '다른 질문?', options: ['X', 'Y'] }),
+      usage: usage(),
+    }, 1)
+    expect(replyNext.workflow?.decisions).toEqual({ entries: [], nextId: 1 })
+    const failedNext = reduce(current, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 1)
+    expect(failedNext.workflow?.decisions).toEqual({ entries: [], nextId: 1 })
   })
 })
 

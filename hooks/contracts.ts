@@ -69,6 +69,42 @@ export interface WorkflowProgress {
   updatedAt: number
 }
 
+/**
+ * Provenance for one user-authored answer: the question and choices that were
+ * on screen when the person answered. Captured before `instruct` clears them.
+ */
+export interface AnswerSource {
+  kind: 'user-answer'
+  /** Id minted with the question (null when the answer had no question). */
+  questionId: string | null
+  /** The question exactly as the model returned it, or null. */
+  question: string | null
+  /** The answer choices exactly as offered, empty when there were none. */
+  options: readonly string[]
+  /** Successful rounds recorded when the answer arrived. */
+  answeredAfterRound: number
+}
+
+/** One user-authored decision, kept verbatim with its source. */
+export interface UserDecision {
+  /** Workflow-local id (`d1`, `d2`, …); never reused. */
+  id: string
+  /** The exact user text after the existing input normalization. */
+  text: string
+  source: AnswerSource
+  /** The choice the answer resolved to, when it matched an option exactly. */
+  selectedOption?: { index: number; text: string }
+  /** Earlier decision this entry explicitly replaced. */
+  supersedes?: string
+}
+
+/** Every decision a workflow has recorded, including replaced history. */
+export interface DecisionLedger {
+  entries: readonly UserDecision[]
+  /** Next id number to mint; a high-water mark, never reused. */
+  nextId: number
+}
+
 /** One optimization run over one original prompt. */
 export interface Workflow {
   /** Stable id for this run, unique per session. */
@@ -111,6 +147,10 @@ export interface Workflow {
   options?: readonly string[]
   /** Engine question dialog for this reply; absent when only the pane is used. */
   questionAsk?: 'pending' | 'closed'
+  /** Recorded user-authored answers with their exact question/option provenance. */
+  decisions?: DecisionLedger
+  /** Id of the question awaiting an answer; minted by a successful reply, null when none. */
+  questionId?: string | null
 }
 
 /** A one-shot permit that lets one restored draft bypass interception. */
@@ -173,6 +213,8 @@ export interface OptimizerMessage {
   role: 'user' | 'optimizer'
   /** The message text. */
   text: string
+  /** Ledger entry for a user turn captured as a decision (absent for optimizer turns). */
+  decisionId?: string
 }
 
 /** Token counts for one or more completions (mirrors the engine's usage). */

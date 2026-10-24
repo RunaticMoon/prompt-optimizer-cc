@@ -2741,7 +2741,9 @@ describe('ui.ask — detached questions and pane fallback', () => {
       dialog.resolve(answer)
       await h.waitFor(() => h.controller.getState().workflow?.rounds === 2)
       expect(h.calls.complete).toBe(2)
-      expect(h.controller.getState().workflow?.dialogue.filter(m => m.role === 'user')).toEqual([{ role: 'user', text: answer }])
+      expect(h.controller.getState().workflow?.dialogue.filter(m => m.role === 'user')).toEqual([
+        { role: 'user', text: answer, decisionId: 'd1' },
+      ])
     })
   }
 
