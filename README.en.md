@@ -431,7 +431,7 @@ Check commands:
 
 `.github/workflows/pr-checks.yml` runs these independent checks on pull requests to `main` and on manual dispatch (`workflow_dispatch`): `version` (version agreement), `package` (no generated types or references among tracked files), `validate` (marketplace, manifest and hooks), and `test (cli 2.1.292)`/`test (cli 2.1.304)` (mock tests on the minimum supported and current verified CLI). The CLI versions are written once in the workflow `env`. `test (cli latest)` is an exploratory job that tracks the newest CLI; it uses `continue-on-error` and is not required.
 
-PR CI does not run `typecheck`: generating the declarations in `.claude-plugin/types/` requires a real model call (see the `scripts/check-types.mjs` note above), so the workflow records that in the job summary and does not claim a passing typecheck. PR CI also never runs real-model semantic evaluation. The workflow uses only `contents: read` and no secrets. Whether to make these checks required is decided separately in repository settings.
+PR CI does not run `typecheck`: generating the declarations in `.claude-plugin/types/` requires a real model call (see the `scripts/check-types.mjs` note above). No typecheck check run is created; instead, the final step of the `package` job records the omission in its job summary and a warning annotation. PR CI also never runs real-model semantic evaluation. The workflow uses only `contents: read` and no secrets. Whether to make these checks required is decided separately in repository settings.
 
 File structure:
 

@@ -57,6 +57,21 @@ jobs:
         run: npm ci
       - name: Check tracked files for generated declarations
         run: npm run check:package
+      # Not a separate job: a check that was not run must not appear as a
+      # passing check run, so the package job records the omission instead.
+      - name: Report that typecheck is not run
+        if: always()
+        run: |
+          {
+            echo '## Typecheck not run'
+            echo ''
+            echo '`npm run typecheck` is not run in PR CI: it needs the CLI-generated'
+            echo 'declarations in `.claude-plugin/types/`, and generating them requires a'
+            echo 'real model call (see `scripts/check-types.mjs`). PR CI never makes model'
+            echo 'calls or uses credentials, so this step records the omission instead of'
+            echo 'claiming a passing typecheck.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo '::warning title=Typecheck not run::Generated CLI declarations require a real model call; see scripts/check-types.mjs.'
 
   validate:
     name: validate
@@ -122,20 +137,3 @@ jobs:
             echo ''
             echo 'This job tracks the newest published Claude Code CLI and is not a required check.'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  typecheck:
-    name: typecheck (not run)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Record that typecheck is not run
-        run: |
-          {
-            echo '## Typecheck not run'
-            echo ''
-            echo '`npm run typecheck` is not run in PR CI: it needs the CLI-generated'
-            echo 'declarations in `.claude-plugin/types/`, and generating them requires a'
-            echo 'real model call (see `scripts/check-types.mjs`). PR CI never makes model'
-            echo 'calls or uses credentials, so this job records the omission instead of'
-            echo 'claiming a passing typecheck.'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo '::warning title=Typecheck not run::Generated CLI declarations require a real model call; see scripts/check-types.mjs.'

@@ -431,7 +431,7 @@ claude --plugin-dir . -p "type generation" \
 
 `.github/workflows/pr-checks.yml`는 `main` 대상 PR과 수동 실행(`workflow_dispatch`)에서 `version`(버전 일치), `package`(추적 파일에 생성 타입·참조 없음), `validate`(마켓플레이스·매니페스트·훅), `test (cli 2.1.292)`·`test (cli 2.1.304)`(최소 지원·현재 검증 CLI에서 mock 테스트)를 독립 검사로 실행한다. CLI 버전은 workflow의 `env`에 한 번만 적어 두었다. `test (cli latest)`는 최신 CLI를 추적하는 탐색용 검사로 `continue-on-error`이며 필수가 아니다.
 
-`typecheck`는 PR CI에서 실행하지 않는다. 생성 선언(`.claude-plugin/types/`)을 만들려면 실제 모델 호출이 필요하기 때문이다(위 `scripts/check-types.mjs` 안내). PR workflow는 그 사실을 job summary에 남기며 타입 검사를 통과했다고 표시하지 않는다. 실모델 의미 평가도 PR CI에서 실행하지 않는다. 이 workflow는 `contents: read`만 쓰고 secret을 쓰지 않는다. 이 검사를 필수 체크로 지정할지는 저장소 설정에서 별도로 정한다.
+`typecheck`는 PR CI에서 실행하지 않는다. 생성 선언(`.claude-plugin/types/`)을 만들려면 실제 모델 호출이 필요하기 때문이다(위 `scripts/check-types.mjs` 안내). typecheck에 해당하는 검사 항목은 만들지 않고, 대신 `package` 검사의 마지막 단계가 그 사실을 job summary와 warning 주석으로 남긴다. 실모델 의미 평가도 PR CI에서 실행하지 않는다. 이 workflow는 `contents: read`만 쓰고 secret을 쓰지 않는다. 이 검사를 필수 체크로 지정할지는 저장소 설정에서 별도로 정한다.
 
 파일 구조:
 
