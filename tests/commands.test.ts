@@ -7,6 +7,7 @@ import type {
   GuidanceStatus,
   OptimizerConfig,
   RuntimeState,
+  SubmissionStatus,
   TargetModelSnapshot,
   Workflow,
 } from '../hooks/contracts'
@@ -384,6 +385,81 @@ describe('formatStatus', () => {
   })
 })
 
+/** One stored last-submission diagnostic, as the controller records it. */
+function submission(over: Partial<SubmissionStatus> = {}): SubmissionStatus {
+  return {
+    kind: 'pass',
+    passReason: 'pasted',
+    composition: { pasted: true, reason: 'keyless-long-insert' },
+    ...over,
+  }
+}
+
+describe('formatStatus — the last submission classification', () => {
+  test('shows the classification right after the paste bypass line', () => {
+    const text = formatStatus(config(), liveState(), null, submission())
+    expect(text).toContain('최근 제출 분류: 원문 통과 (붙여넣기 추정) · 입력: 키 없는 긴 삽입')
+    expect(text).toContain('직접 최적화: /optimize -- <원문>')
+    expect(text.indexOf('붙여넣기 그대로 보내기')).toBeLessThan(text.indexOf('최근 제출 분류'))
+    expect(text.indexOf('최근 제출 분류')).toBeLessThan(text.indexOf('옵티마이저 끔 모드: ') === -1 ? text.indexOf('진행 중인 개선 작업') : text.indexOf('옵티마이저 끔 모드'))
+  })
+
+  test('reads as none before a classification, after a reset, or from a legacy controller', () => {
+    expect(formatStatus(config(), liveState(), null, null)).toContain('최근 제출 분류: 없음')
+    // An omitted fourth argument (a legacy caller) reads the same way.
+    expect(formatStatus(config(), liveState())).toContain('최근 제출 분류: 없음')
+  })
+
+  test('with bypass off a pasted draft optimizes, so it shows optimize and no recovery route', () => {
+    const text = formatStatus(
+      config({ pasteBypass: false }),
+      liveState(),
+      null,
+      submission({ kind: 'optimize', trigger: 'auto' }),
+    )
+    expect(text).toContain('최근 제출 분류: 최적화 대상 (auto) · 입력: 키 없는 긴 삽입')
+    expect(text).not.toContain('원문 통과')
+    expect(text).not.toContain('/optimize --')
+  })
+
+  test('a prefix trigger or an active reply over a pasted draft shows its own decision', () => {
+    const prefix = formatStatus(
+      config(),
+      liveState(),
+      null,
+      submission({ kind: 'optimize', trigger: 'prefix' }),
+    )
+    expect(prefix).toContain('최근 제출 분류: 최적화 대상 (prefix) · 입력: 키 없는 긴 삽입')
+    expect(prefix).not.toContain('/optimize --')
+
+    const reply = formatStatus(
+      config(),
+      liveState(),
+      null,
+      submission({ kind: 'reply', composition: { pasted: true, reason: 'paste-placeholder' } }),
+    )
+    expect(reply).toContain('최근 제출 분류: 보완 답변 · 입력: 붙여넣기 자리표시')
+    expect(reply).not.toContain('/optimize --')
+  })
+
+  test('shows the remembered verdict with the base reason for a history recall', () => {
+    const text = formatStatus(
+      config(),
+      liveState(),
+      null,
+      submission({ composition: { pasted: false, reason: 'history', previousReason: 'typed' } }),
+    )
+    expect(text).toContain('최근 제출 분류: 원문 통과 (붙여넣기 추정) · 입력: 기록의 기존 판정 (직접 입력)')
+  })
+
+  test('renders the diagnostic without any prompt substring', () => {
+    const text = formatStatus(config(), liveState(), null, submission())
+    expect(text).not.toContain('원본 요청')
+    expect(text).not.toContain('초안 요청')
+    expect(text).not.toContain('[Pasted text #')
+  })
+})
+
 /** Records what the command called, so each intent can be asserted once. */
 interface Rig {
   deps: CommandDeps
@@ -423,6 +499,11 @@ function rig(
      * (returning this value); when absent, the controller is the legacy facade.
      */
     guidance?: Readonly<GuidanceStatus> | null
+    /**
+     * When the key is present, the controller exposes `getSubmissionStatus`
+     * (returning this value); when absent, the controller is the legacy facade.
+     */
+    submission?: Readonly<SubmissionStatus> | null
   } = {},
 ): Rig {
   const calls: string[] = []
@@ -491,6 +572,13 @@ function rig(
     const stored = opts.guidance ?? null
     controller.getGuidanceStatus = () => {
       calls.push('getGuidanceStatus')
+      return stored
+    }
+  }
+  if ('submission' in opts) {
+    const stored = opts.submission ?? null
+    controller.getSubmissionStatus = () => {
+      calls.push('getSubmissionStatus')
       return stored
     }
   }
@@ -726,6 +814,23 @@ describe('registerCommands — settings intents', () => {
     expect(result.text).toContain('모델별 지침: 꺼짐(공통 지침만 사용)')
     expect(result.text).toContain('마지막 최적화 대상: 감지 생략 · 적용: common (disabled)')
     expect(r.calls).toEqual(['getGuidanceStatus'])
+  })
+
+  test('status shows the stored submission classification without a model call', async ($, on) => {
+    const r = rig({
+      submission: {
+        kind: 'pass',
+        passReason: 'pasted',
+        composition: { pasted: true, reason: 'keyless-long-insert' },
+      },
+    })
+    wire(on, r)
+    const result = await run($, 'status')
+    expect(result.text).toContain('최근 제출 분류: 원문 통과 (붙여넣기 추정) · 입력: 키 없는 긴 삽입')
+    expect(result.text).toContain('직접 최적화: /optimize -- <원문>')
+    expect(r.sets).toEqual([])
+    // One stored-state read; no session.model or model.complete call.
+    expect(r.calls).toEqual(['getSubmissionStatus'])
   })
 
   test('status treats a null stored guidance as not yet detected', async ($, on) => {
