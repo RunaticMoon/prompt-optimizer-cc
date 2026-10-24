@@ -561,6 +561,18 @@ describe('classifySubmission — rule 12: smart mode', () => {
     }
   })
 
+  test('characters trim() removes at the edges still match the approval', () => {
+    // U+FEFF (BOM/zero-width no-break space) and U+00A0 (no-break space) count
+    // as leading/trailing whitespace to trim(), so the plan's trim() contract
+    // passes them; only characters trim() keeps, such as U+200B, block a pass.
+    for (const text of ['응\uFEFF', '응\u00A0', '\uFEFF계속\u00A0']) {
+      expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
+        kind: 'pass',
+        reason: 'smart-continuation',
+      })
+    }
+  })
+
   test('punctuation, variants and longer sentences conservatively optimize', () => {
     for (const text of ['응.', '응?', '계속해', '네', 'yes', '응요']) {
       expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
@@ -581,7 +593,7 @@ describe('classifySubmission — rule 12: smart mode', () => {
     }
   })
 
-  test('emoji, code, quotes and zero-width additions are not approvals', () => {
+  test('emoji, code, quotes and characters trim() does not remove are not approvals', () => {
     for (const text of ['응🚀', '`응`', '"응"', '응\u200b']) {
       expect(classifySubmission(submit({ text }), smart, state(), 0)).toEqual({
         kind: 'optimize',

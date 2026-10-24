@@ -13,7 +13,10 @@ export interface OptimizerConfig {
   modelGuidance: boolean
   /** `always` intercepts every eligible prompt; `prefix` only prefixed ones; `smart` also passes exact approval replies through. */
   triggerMode: TriggerMode
-  /** Prefix that starts an optimization when `triggerMode` is `prefix`. */
+  /**
+   * Prefix that starts an optimization when `triggerMode` is `prefix` or
+   * `smart`; in smart mode it also outranks paste classification.
+   */
   triggerPrefix: string
   /** Leading marker stripped before sending the rest of a prompt straight through. */
   rawPrefix: string

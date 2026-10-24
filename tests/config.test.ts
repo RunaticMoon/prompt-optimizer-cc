@@ -279,6 +279,13 @@ describe('resolveConfig — prefixes', () => {
     expect(smart.config.triggerPrefix).toBe('')
     expect(smart.warnings).toEqual([])
   })
+
+  test('smart mode settles an overlapping prefix pair like prefix mode', () => {
+    const { config, warnings } = resolveConfig({ triggerMode: 'smart', triggerPrefix: '>> ', rawPrefix: '>> ' })
+    expect(config.triggerPrefix).toBe(DEFAULT_CONFIG.triggerPrefix)
+    expect(config.rawPrefix).toBe('>> ')
+    expect(warnings).toHaveLength(1)
+  })
 })
 
 describe('resolveConfig — systemPromptFile', () => {
@@ -349,6 +356,7 @@ describe('validateConfigChange', () => {
     expect(validateConfigChange('pasteBypass', true)).toEqual({ ok: true, key: 'pasteBypass', value: true })
     expect(validateConfigChange('maxTokens', '2048')).toEqual({ ok: true, key: 'maxTokens', value: 2048 })
     expect(validateConfigChange('maxTokens', 128)).toEqual({ ok: true, key: 'maxTokens', value: 128 })
+    expect(validateConfigChange('triggerMode', 'smart')).toEqual({ ok: true, key: 'triggerMode', value: 'smart' })
   })
 
   test('rejects an unknown key', () => {
