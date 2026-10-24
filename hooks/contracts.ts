@@ -296,13 +296,15 @@ export type OptimizerEvent =
       type: 'reply'
       workflowId: string
       generation: number
+      /** Session the completion was issued for; its usage belongs there. */
+      sessionId: string
       reply: OptimizerReply
       usage: ModelUsage
     }
-  | { type: 'failed'; workflowId: string; generation: number; error: string; usage?: ModelUsage }
+  | { type: 'failed'; workflowId: string; generation: number; sessionId: string; error: string; usage?: ModelUsage }
   | { type: 'limit-ask'; workflowId: string; round: number; status: 'pending' | 'closed' | 'declined' }
   | { type: 'limit-extended'; workflowId: string; round: number; maxRounds: number }
-  | { type: 'usage'; workflowId: string; generation: number; usage: ModelUsage }
+  | { type: 'usage'; workflowId: string; generation: number; sessionId: string; usage: ModelUsage }
   | { type: 'cancel'; workflowId: string }
   | { type: 'dismiss'; workflowId: string }
   | { type: 'reset'; sessionId: string }

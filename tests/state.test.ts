@@ -236,8 +236,8 @@ describe('reduce — round limit approval', () => {
 
   test('a new reply, failure or instruction clears approval status but preserves the approved limit', () => {
     const events: OptimizerEvent[] = [
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply(), usage: ZERO },
-      { type: 'failed', workflowId: 'wf-1', generation: 1, error: 'try again' },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: ZERO },
+      { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'try again' },
       { type: 'instruct', workflowId: 'wf-1', text: '더 짧게' },
     ]
     for (const event of events) {
@@ -351,7 +351,7 @@ describe('reduce — reply', () => {
     })
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply({ draft: '새 초안' }), usage: usage({ input_tokens: 10, output_tokens: 2 }) },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ draft: '새 초안' }), usage: usage({ input_tokens: 10, output_tokens: 2 }) },
       777,
     )
     expect(next.workflow?.phase).toBe('reviewing')
@@ -374,7 +374,7 @@ describe('reduce — reply', () => {
     const current = state({ workflow: workflow({ phase: 'generating' }) })
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply({ message: '요약', question: '대상 파일은?' }), usage: usage() },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ message: '요약', question: '대상 파일은?' }), usage: usage() },
       1,
     )
     expect(next.workflow?.dialogue).toEqual([{ role: 'optimizer', text: '요약\n대상 파일은?' }])
@@ -385,7 +385,7 @@ describe('reduce — reply', () => {
     const next = reduce(
       current,
       {
-        type: 'reply', workflowId: 'wf-1', generation: 1,
+        type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
         reply: reply({ message: '요약', question: '어느 쪽인가요?', options: ['1번', '2번'] }),
         usage: usage(),
       },
@@ -400,7 +400,7 @@ describe('reduce — reply', () => {
     const current = state({ workflow: workflow({ phase: 'generating' }) })
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply(), usage: usage() },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: usage() },
       1,
     )
     expect(next.workflow?.options).toEqual([])
@@ -410,7 +410,7 @@ describe('reduce — reply', () => {
     const current = state({ workflow: workflow({ phase: 'generating', dialogue: [] }) })
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply({ message: '', question: null }), usage: usage() },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ message: '', question: null }), usage: usage() },
       1,
     )
     expect(next.workflow?.dialogue).toEqual([])
@@ -420,7 +420,7 @@ describe('reduce — reply', () => {
     const current = state({ workflow: workflow({ phase: 'failed', lastError: 'boom' }) })
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply(), usage: usage() },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: usage() },
       1,
     )
     expect('lastError' in (next.workflow ?? {})).toBe(false)
@@ -430,7 +430,7 @@ describe('reduce — reply', () => {
     const current = state({ workflow: workflow({ generation: 2, phase: 'generating', draft: 'KEEP', rounds: 1 }) })
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply({ draft: 'STALE' }), usage: usage({ input_tokens: 7 }) },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ draft: 'STALE' }), usage: usage({ input_tokens: 7 }) },
       42,
     )
     expect(next.workflow?.draft).toBe('KEEP')
@@ -443,7 +443,7 @@ describe('reduce — reply', () => {
     const current = state({ workflow: workflow({ id: 'wf-1', phase: 'generating' }) })
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'other', generation: 1, reply: reply(), usage: usage({ output_tokens: 3 }) },
+      { type: 'reply', workflowId: 'other', generation: 1, sessionId: SESSION, reply: reply(), usage: usage({ output_tokens: 3 }) },
       9,
     )
     expect(next.workflow?.phase).toBe('generating')
@@ -451,7 +451,7 @@ describe('reduce — reply', () => {
   })
 
   test('a reply with no active workflow only records usage', () => {
-    const next = reduce(state(), { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply(), usage: usage({ input_tokens: 1 }) }, 3)
+    const next = reduce(state(), { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: usage({ input_tokens: 1 }) }, 3)
     expect(next.workflow).toBeNull()
     expect(next.usage).toEqual(totals({ calls: 1, input: 1, updatedAt: 3 }))
   })
@@ -461,7 +461,7 @@ describe('reduce — failed', () => {
   for (const questionAsk of ['pending', 'closed'] as const) {
     test(`a matching failure clears ${questionAsk} question dialog state`, () => {
       const current = state({ workflow: workflow({ phase: 'reviewing', questionAsk }) })
-      const next = reduce(current, { type: 'failed', workflowId: 'wf-1', generation: 1, error: 'api-error' }, 11)
+      const next = reduce(current, { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'api-error' }, 11)
       expect(next.workflow?.phase).toBe('failed')
       expect('questionAsk' in (next.workflow ?? {})).toBe(false)
     })
@@ -471,7 +471,7 @@ describe('reduce — failed', () => {
     const current = state({ workflow: workflow({ phase: 'generating', rounds: 2, draft: '마지막 초안' }) })
     const next = reduce(
       current,
-      { type: 'failed', workflowId: 'wf-1', generation: 1, error: 'api-error', usage: usage({ output_tokens: 5 }) },
+      { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'api-error', usage: usage({ output_tokens: 5 }) },
       11,
     )
     expect(next.workflow?.phase).toBe('failed')
@@ -485,7 +485,7 @@ describe('reduce — failed', () => {
 
   test('a failure without usage still spends a round', () => {
     const current = state({ workflow: workflow({ rounds: 1 }) })
-    const next = reduce(current, { type: 'failed', workflowId: 'wf-1', generation: 1, error: 'rejected' }, 11)
+    const next = reduce(current, { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'rejected' }, 11)
     expect(next.workflow?.phase).toBe('failed')
     expect(next.workflow?.rounds).toBe(2)
     expect(next.workflow?.usage).toEqual(ZERO)
@@ -496,7 +496,7 @@ describe('reduce — failed', () => {
     const current = state({ workflow: workflow({ generation: 5, phase: 'generating' }) })
     const next = reduce(
       current,
-      { type: 'failed', workflowId: 'wf-1', generation: 4, error: 'api-error', usage: usage({ input_tokens: 9 }) },
+      { type: 'failed', workflowId: 'wf-1', generation: 4, sessionId: SESSION, error: 'api-error', usage: usage({ input_tokens: 9 }) },
       12,
     )
     expect(next.workflow?.phase).toBe('generating')
@@ -508,22 +508,93 @@ describe('reduce — failed', () => {
 describe('reduce — usage', () => {
   test('a matching usage event grows both the workflow and the session', () => {
     const current = state({ workflow: workflow({ phase: 'generating' }) })
-    const next = reduce(current, { type: 'usage', workflowId: 'wf-1', generation: 1, usage: usage({ input_tokens: 4 }) }, 20)
+    const next = reduce(current, { type: 'usage', workflowId: 'wf-1', generation: 1, sessionId: SESSION, usage: usage({ input_tokens: 4 }) }, 20)
     expect(next.workflow?.usage).toEqual(usage({ input_tokens: 4 }))
     expect(next.usage).toEqual(totals({ calls: 1, input: 4, updatedAt: 20 }))
   })
 
   test('a stale usage event grows only the session total', () => {
     const current = state({ workflow: workflow({ generation: 2, usage: ZERO }) })
-    const next = reduce(current, { type: 'usage', workflowId: 'wf-1', generation: 1, usage: usage({ input_tokens: 4 }) }, 20)
+    const next = reduce(current, { type: 'usage', workflowId: 'wf-1', generation: 1, sessionId: SESSION, usage: usage({ input_tokens: 4 }) }, 20)
     expect(next.workflow?.usage).toEqual(ZERO)
     expect(next.usage).toEqual(totals({ calls: 1, input: 4, updatedAt: 20 }))
   })
 
   test('a usage event with no workflow grows only the session total', () => {
-    const next = reduce(state(), { type: 'usage', workflowId: 'wf-1', generation: 1, usage: usage({ cache_read_input_tokens: 2 }) }, 20)
+    const next = reduce(state(), { type: 'usage', workflowId: 'wf-1', generation: 1, sessionId: SESSION, usage: usage({ cache_read_input_tokens: 2 }) }, 20)
     expect(next.workflow).toBeNull()
     expect(next.usage).toEqual(totals({ calls: 1, cacheRead: 2, updatedAt: 20 }))
+  })
+})
+
+describe('reduce — session attribution', () => {
+  // The state a session switch leaves behind: a fresh session with no run.
+  const switched = state({ sessionId: 'new' })
+
+  test('a reply owned by another session leaves the usage untouched', () => {
+    const next = reduce(
+      switched,
+      {
+        type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: 'old',
+        reply: reply({ draft: '이전 세션의 초안' }),
+        usage: usage({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 1, cache_creation_input_tokens: 2 }),
+      },
+      42,
+    )
+    expect(next).toBe(switched)
+  })
+
+  test('a reply owned by another session cannot touch the replacement run either', () => {
+    const replacement = workflow({ id: 'wf-2', sessionId: 'new', phase: 'generating', rounds: 1 })
+    const current = state({ sessionId: 'new', workflow: replacement })
+    const next = reduce(
+      current,
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: 'old', reply: reply({ draft: '이전 세션의 초안' }), usage: usage({ input_tokens: 3 }) },
+      42,
+    )
+    expect(next).toBe(current)
+  })
+
+  test('a zero-token aborted failure from another session does not increment calls', () => {
+    const next = reduce(
+      switched,
+      { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: 'old', error: '옵티마이저 요청이 중단되었습니다', usage: usage() },
+      42,
+    )
+    expect(next).toBe(switched)
+  })
+
+  test('a failure without usage from another session also leaves the totals alone', () => {
+    const next = reduce(
+      switched,
+      { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: 'old', error: 'api-error' },
+      42,
+    )
+    expect(next).toBe(switched)
+  })
+
+  test('a usage event owned by another session leaves the totals untouched', () => {
+    const next = reduce(
+      switched,
+      { type: 'usage', workflowId: 'wf-1', generation: 1, sessionId: 'old', usage: usage({ input_tokens: 4 }) },
+      42,
+    )
+    expect(next).toBe(switched)
+  })
+
+  test('a same-session stale result still counts (wrong generation, no workflow)', () => {
+    const staleGeneration = reduce(
+      state(),
+      { type: 'reply', workflowId: 'wf-1', generation: 9, sessionId: SESSION, reply: reply(), usage: usage({ input_tokens: 2 }) },
+      42,
+    )
+    expect(staleGeneration.usage).toEqual(totals({ calls: 1, input: 2, updatedAt: 42 }))
+    const noWorkflow = reduce(
+      state(),
+      { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'api-error', usage: usage({ output_tokens: 1 }) },
+      43,
+    )
+    expect(noWorkflow.usage).toEqual(totals({ calls: 1, output: 1, updatedAt: 43 }))
   })
 })
 
@@ -602,7 +673,7 @@ describe('reduce — cancel and dismiss', () => {
 
   test('a late reply after cancel is ignored but still counted', () => {
     const cancelled = reduce(state({ workflow: workflow({ generation: 1 }) }), { type: 'cancel', workflowId: 'wf-1' }, 1)
-    const next = reduce(cancelled, { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply(), usage: usage({ input_tokens: 6 }) }, 2)
+    const next = reduce(cancelled, { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(), usage: usage({ input_tokens: 6 }) }, 2)
     expect(next.workflow).toBeNull()
     expect(next.usage).toEqual(totals({ calls: 1, input: 6, updatedAt: 2 }))
   })
@@ -610,7 +681,7 @@ describe('reduce — cancel and dismiss', () => {
   test('a late reply does not touch a replacement run', () => {
     const replacement = workflow({ id: 'wf-2', generation: 2, phase: 'generating', draft: 'KEEP' })
     const current = state({ workflow: replacement })
-    const next = reduce(current, { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply({ draft: 'STALE' }), usage: usage() }, 3)
+    const next = reduce(current, { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ draft: 'STALE' }), usage: usage() }, 3)
     expect(next.workflow).toBe(replacement)
   })
 })
@@ -690,7 +761,7 @@ describe('reduce — bypass permits', () => {
 
   test('expiry is cleaned even by an unrelated event', () => {
     const current = state({ bypass: bypass({ expiresAt: 100 }), usage: totals({ calls: 1 }) })
-    const next = reduce(current, { type: 'usage', workflowId: 'wf-1', generation: 1, usage: usage() }, 100)
+    const next = reduce(current, { type: 'usage', workflowId: 'wf-1', generation: 1, sessionId: SESSION, usage: usage() }, 100)
     expect(next.bypass).toBeNull()
     expect(next.usage.calls).toBe(2)
   })
@@ -781,7 +852,7 @@ describe('reduce — immutability', () => {
 
     const next = reduce(
       current,
-      { type: 'reply', workflowId: 'wf-1', generation: 1, reply: reply({ question: '질문' }), usage: usage({ input_tokens: 1 }) },
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ question: '질문' }), usage: usage({ input_tokens: 1 }) },
       99,
     )
 

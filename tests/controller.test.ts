@@ -1922,6 +1922,43 @@ describe('isolation invariants', () => {
   })
 })
 
+describe('usage — session attribution', () => {
+  test('a late aborted completion after a session switch leaves the new session usage at zero', async () => {
+    // The mock honours the abort, but its response still carries the usage the
+    // host had already spent (issue #33).
+    const h = harness({
+      complete: (_request, signal) =>
+        new Promise<ModelCompleteResult>(resolve => {
+          signal?.addEventListener('abort', () => resolve({
+            isAnswered: false,
+            reason: 'aborted',
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              cache_read_input_tokens: 1,
+              cache_creation_input_tokens: 2,
+            },
+          }), { once: true })
+        }),
+    })
+    h.controller.onSessionStart('old')
+    await h.controller.onSubmit(h.ports, submit('이전 세션의 요청'), 'pane')
+    const queued = h.queue.shift()
+    const running = (queued as () => Promise<void>)()
+    await h.waitFor(() => h.calls.complete === 1)
+
+    // The switch aborts the in-flight call and resets the state first; the old
+    // round's continuation settles only afterwards.
+    h.controller.onSessionStart('new')
+    await running
+
+    const state = h.controller.getState()
+    expect(state.sessionId).toBe('new')
+    expect(state.workflow).toBeNull()
+    expect(state.usage).toEqual({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, updatedAt: 0 })
+  })
+})
+
 describe('scheduled work', () => {
   test('turns a failed scheduled refine into a notice, never a rejection', async () => {
     const h = harness()

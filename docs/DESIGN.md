@@ -504,7 +504,7 @@ interface OptimizerReply {
 - 오류는 `failed`, 원문과 마지막 유효 draft 보존.
 - cancel·새 세션·종료 시 generation 증가 및 abort.
 - 오래된 generation의 응답은 화면·초안에 적용하지 않음.
-- stale 응답의 반환 사용량은 중복 없이 집계.
+- 같은 세션의 stale 응답의 반환 사용량은 중복 없이 집계하며, 다른 세션에서 도착한 사용량은 그 세션에 귀속한다.
 - 승인·전송·복원 버튼 연타는 첫 동작만 처리.
 - 다른 출처의 메인 턴이 시작되면 현재 snapshot이 오래됐음을 표시하고 자동 전송은 하지 않음.
 
