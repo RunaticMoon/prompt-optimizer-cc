@@ -237,6 +237,7 @@ interface PromptParts {
   instruction: string
   round: number
   maxRounds: number
+  repositorySupplement: string
 }
 
 /**
@@ -248,7 +249,7 @@ interface PromptParts {
  */
 export function neutralizeTags(text: string): string {
   return text.replace(
-    /<(\s*\/?\s*(?:context|original_prompt|current_draft|dialogue|instruction|refinement_round|user_decisions|pending_question)\b)/gi,
+    /<(\s*\/?\s*(?:context|original_prompt|current_draft|dialogue|instruction|refinement_round|user_decisions|pending_question|repository_followup)\b)/gi,
     '‹$1',
   )
 }
@@ -282,6 +283,13 @@ function renderPrompt(parts: PromptParts): RenderedPrompt {
   // draft, so the model reads confirmed user intent first.
   if (parts.decisions !== null) blocks.push(parts.decisions)
   if (parts.pending !== null) blocks.push(parts.pending)
+  // Follow-up evidence is variable per round, so it starts after the cached
+  // context+original prefix and before the draft, behind the confirmed
+  // decisions. Its own tags are neutralized so repository text cannot close
+  // the block early.
+  if (parts.repositorySupplement !== '') {
+    blocks.push(`<repository_followup>\n${neutralizeTags(parts.repositorySupplement)}\n</repository_followup>`)
+  }
   if (parts.draft !== null) {
     const label = parts.labelDraft ? '\n[미확정 모델 제안: 활성 user_decisions가 우선한다]' : ''
     blocks.push(`<current_draft>${label}\n${parts.draft}\n</current_draft>`)
@@ -320,6 +328,14 @@ function renderPrompt(parts: PromptParts): RenderedPrompt {
  * decision. A fixture without a ledger keeps the older behavior, including
  * protecting the latest exchange.
  *
+ * `options.repositorySupplement` renders a neutralized `<repository_followup>`
+ * block after the fixed context+original prefix (and behind the confirmed
+ * decision evidence) and before the draft. It is variable (never cached) and
+ * is the first block dropped on overflow — before any dialogue, context, or
+ * draft trim and before {@link RequestBudgetError} can fire — so refreshed
+ * evidence can never shrink the snapshot, evict the latest question/answer,
+ * or displace a confirmed decision.
+ *
  * `options.cache` defaults to `false`, which keeps `prompt`/`system` as plain
  * strings (the older shape every engine takes). When `true`, both become
  * {@link ModelTextBlock} lists marked for the prompt cache: `system` is one
@@ -333,7 +349,7 @@ export function buildModelRequest(
   config: OptimizerConfig,
   system: string,
   instruction?: string,
-  options: { cache?: boolean } = {},
+  options: { cache?: boolean; repositorySupplement?: string } = {},
 ): ModelCompleteRequest {
   const original = workflow.original
   let draft = workflow.draft !== '' && workflow.draft !== original ? workflow.draft : null
@@ -352,15 +368,24 @@ export function buildModelRequest(
     ? workflow.dialogue.slice()
     : operativeDialogue(workflow.dialogue, ledger)
   let context = workflow.context?.text ?? ''
+  let repositorySupplement = options.repositorySupplement ?? ''
 
   const build = (): RenderedPrompt =>
     renderPrompt({
       context, original, decisions, pending, draft,
       labelDraft: ledger !== undefined, dialogue, instruction: instructionText,
-      round: workflow.rounds + 1, maxRounds: config.maxRounds,
+      round: workflow.rounds + 1, maxRounds: config.maxRounds, repositorySupplement,
     })
 
   let prompt = build()
+
+  // A follow-up block is the first thing dropped on pressure: the fixed
+  // context+original prefix, the latest exchange, and any confirmed decision
+  // must not shrink because of optional refreshed evidence.
+  if (prompt.text.length + system.length > MAX_REQUEST_CHARS && repositorySupplement !== '') {
+    repositorySupplement = ''
+    prompt = build()
+  }
 
   if (ledger === undefined) {
     // Legacy fixture path: keep the latest question/answer pair protected and
@@ -393,10 +418,11 @@ export function buildModelRequest(
     }
   } else {
     // Refuse before spending a call when the protected evidence alone is over
-    // budget. The count is the exact prompt+system the evidence needs.
+    // budget. The count is the exact prompt+system the evidence needs; the
+    // optional follow-up block is excluded because it is dropped first.
     const protectedPrompt = renderPrompt({
       context: '', original, decisions, pending, draft: null, labelDraft: true,
-      dialogue: [], instruction: instructionText,
+      dialogue: [], instruction: instructionText, repositorySupplement: '',
       round: workflow.rounds + 1, maxRounds: config.maxRounds,
     })
     const requiredChars = protectedPrompt.text.length + system.length
