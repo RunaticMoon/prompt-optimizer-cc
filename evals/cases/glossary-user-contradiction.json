@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "id": "glossary-user-contradiction",
+  "split": "development",
+  "tags": ["ko", "glossary", "contradiction"],
+  "provenance": {
+    "kind": "synthetic-reconstruction",
+    "source": "docs/smoke.md#22-요구사항-구체화의-의미-평가 (term-conflict scenario, synthetic wording)"
+  },
+  "original": "기존 image 정의를 현재 운영 중인 이미지로 바꿔서 diff API 요구사항을 정리해줘",
+  "context": {
+    "text": "# docs/GLOSSARY.md\n1: - 기존 image: 배포 직전에 승인된 이미지\n2: - image digest: 배포된 이미지의 내용 해시\n\n# src/images/image.repository.ts\n1: // 배포 이력에서 기준 이미지를 읽는다\n2: export async function findBaselineImage(nodeId: string) {}\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "surface-conflict",
+      "kind": "mustPreserve",
+      "description": "Surface the glossary/user contradiction and keep it open instead of silently choosing one definition.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-agreement",
+      "kind": "mustNotInfer",
+      "description": "Do not record either definition as an agreed decision before the user resolves the conflict.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-glossary-source",
+      "kind": "mustInclude",
+      "description": "Name the glossary definition as the conflicting evidence rather than dropping it.",
+      "severity": "major",
+      "literals": ["배포 직전에 승인된 이미지"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "asks-which-definition",
+      "kind": "questionPresent",
+      "round": "final"
+    },
+    {
+      "id": "names-glossary",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "용어집"
+    },
+    {
+      "id": "names-both-definitions",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "현재 운영 중인 이미지"
+    },
+    {
+      "id": "no-premature-agreement",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "합의된 결정"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "기존 image의 정의가 자료와 요청에서 다릅니다. 용어집은 \"배포 직전에 승인된 이미지\"라고 정의하지만 요청은 \"현재 운영 중인 이미지\"를 말합니다. 어느 정의를 기준으로 diff API 요구사항을 정할지 확인이 필요합니다.",
+      "message": "용어 충돌을 드러내고 결정을 미결정으로 남겼습니다.",
+      "question": "기존 image의 기준으로 어느 정의를 사용할까요?",
+      "options": [
+        "용어집의 배포 직전 승인 이미지",
+        "요청의 현재 운영 중 이미지",
+        "두 이미지를 모두 비교"
+      ]
+    }
+  ]
+}

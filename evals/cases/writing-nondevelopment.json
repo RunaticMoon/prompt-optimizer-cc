@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "id": "writing-nondevelopment",
+  "split": "development",
+  "tags": ["ko", "writing", "nondevelopment"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the writing/non-development matrix in issue #37; no real team or blog content."
+  },
+  "original": "우리 팀 블로그에 올릴 2026년 4분기 회고 글을 800자 정도로 써줘. 개발 용어는 빼고요.",
+  "context": {
+    "text": ""
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "keep-writing-task",
+      "kind": "mustPreserve",
+      "description": "Keep this a writing task, not a software implementation or test request.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-length-and-audience",
+      "kind": "mustInclude",
+      "description": "Keep the requested length and the team-blog audience while excluding development jargon.",
+      "severity": "major",
+      "literals": ["800자", "개발 용어"]
+    },
+    {
+      "id": "no-code-work",
+      "kind": "mustNotInfer",
+      "description": "Do not add tests, implementation steps or code review to a writing request.",
+      "severity": "major"
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-length",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "800자"
+    },
+    {
+      "id": "keeps-jargon-rule",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "개발 용어"
+    },
+    {
+      "id": "no-test-work",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "테스트"
+    },
+    {
+      "id": "no-implementation",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "구현"
+    },
+    {
+      "id": "no-unnecessary-question",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "우리 팀 블로그에 올릴 2026년 4분기 회고 글을 800자 정도로 써줘. 독자는 팀 내부 구성원이고, 개발 용어 없이 실제로 진행한 일과 배운 점을 담아줘.",
+      "message": "글쓰기 요청의 독자와 분량을 구체화했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "id": "korean-english-mixed",
+  "split": "development",
+  "tags": ["ko", "en", "mixed", "config"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the Korean-English mixed matrix in issue #37; synthetic config keys only."
+  },
+  "original": "login API의 timeout 설정을 config.yaml에서 30초로 바꿔줘. retry 횟수는 건드리지 마.",
+  "context": {
+    "text": "# config.yaml\n1: login:\n2:   timeout: 10s\n3:   retry: 3\n4:   endpoint: /api/login\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "keep-mixed-terms",
+      "kind": "mustInclude",
+      "description": "Preserve the mixed Korean/English identifiers login API, config.yaml, timeout and retry.",
+      "severity": "critical",
+      "literals": ["login API", "config.yaml", "timeout", "retry"]
+    },
+    {
+      "id": "change-timeout-only",
+      "kind": "mustPreserve",
+      "description": "Change only the timeout value to 30 seconds; do not touch retry.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-retry-change",
+      "kind": "mustNotInfer",
+      "description": "Do not change or recommend a new retry count.",
+      "severity": "major"
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-login-api",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "login API"
+    },
+    {
+      "id": "keeps-config-file",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "config.yaml"
+    },
+    {
+      "id": "keeps-timeout-value",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "30초"
+    },
+    {
+      "id": "keeps-retry-word",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "retry"
+    },
+    {
+      "id": "no-retry-change",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "retry 횟수를 바꿔"
+    },
+    {
+      "id": "no-unnecessary-question",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "login API의 timeout 설정을 config.yaml에서 30초로 바꿔줘. retry 횟수는 건드리지 말고, 변경 범위를 timeout 설정으로만 제한해줘.",
+      "message": "한영 혼합 용어와 변경 범위를 보존했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

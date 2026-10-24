@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "holdout-document-proofreading",
+  "split": "holdout",
+  "tags": ["ko", "holdout", "writing", "proofreading"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Holdout domain authored for issue #37; the contract excerpt is synthetic and not legal advice."
+  },
+  "original": "계약서 초안의 오탈자와 문장을 교정해줘. 법적 조항의 의미는 바꾸지 마.",
+  "context": {
+    "text": "# docs/contract-draft.md\n1: 제1조 (목적) 본 계약은 용역 제공에 관한 사항을 정한다.\n2: 제2조 (대금) 발주자는 검수 완료 후 10일 이내에 대금을 지급한다.\n3: 제3조 (해지) 당사자는 상대방에게 서면 통지로 계약을 해지할 수 있다.\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "proofread-only",
+      "kind": "mustPreserve",
+      "description": "Correct typos and sentences only; do not change the legal meaning of any clause.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-legal-rewrite",
+      "kind": "mustNotInfer",
+      "description": "Do not add new obligations, deadlines or legal interpretations.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-clauses",
+      "kind": "mustInclude",
+      "description": "Keep the existing three clauses and the no-meaning-change constraint in scope.",
+      "severity": "major",
+      "literals": ["법적 조항", "교정"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-proofreading",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "교정"
+    },
+    {
+      "id": "keeps-legal-meaning",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "법적 조항"
+    },
+    {
+      "id": "no-new-obligation",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "새로운 의무"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "계약서 초안의 오탈자와 문장을 교정해줘. 법적 조항의 의미는 바꾸지 말고, 제1조부터 제3조까지의 기존 내용을 유지한 채 표현만 다듬어줘.",
+      "message": "교정 범위를 문장 표현으로 제한하고 법적 의미 보존을 명시했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

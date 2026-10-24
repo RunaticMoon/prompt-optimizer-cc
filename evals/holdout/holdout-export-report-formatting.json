@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "id": "holdout-export-report-formatting",
+  "split": "holdout",
+  "tags": ["en", "holdout", "export", "formatting"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Holdout domain authored for issue #37; column names and encoding are synthetic."
+  },
+  "original": "Add a CSV export for the monthly revenue report. Keep the existing columns and order, use UTF-8 with a BOM, and do not include the internal margin column.",
+  "context": {
+    "text": "# src/reports/monthly.ts\n1: export const REVENUE_COLUMNS = ['month', 'region', 'revenue'] as const\n2: // The internal margin column is never exported.\n3: export function buildMonthlyReport() {}\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "keep-columns-order",
+      "kind": "mustPreserve",
+      "description": "Keep the existing column set and order for the CSV export.",
+      "severity": "critical"
+    },
+    {
+      "id": "exclude-margin",
+      "kind": "mustNotInfer",
+      "description": "Do not add the internal margin column or any other unsupplied column.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-encoding",
+      "kind": "mustInclude",
+      "description": "Keep UTF-8 with a BOM as the output encoding.",
+      "severity": "major",
+      "literals": ["UTF-8", "BOM"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-csv",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "CSV"
+    },
+    {
+      "id": "keeps-encoding",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "UTF-8"
+    },
+    {
+      "id": "keeps-bom",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "BOM"
+    },
+    {
+      "id": "excludes-margin",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "margin"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "Add a CSV export for the monthly revenue report. Reuse REVENUE_COLUMNS in its existing order and write UTF-8 with a BOM. Do not add any column that is not already part of the report.",
+      "message": "열 순서와 인코딩, 제외 열을 그대로 보존했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "exact-code-url-version-output",
+  "split": "development",
+  "tags": ["en", "literals", "code", "url", "version"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the exact-literal matrix in issue #37; the URL and version are reserved example values."
+  },
+  "original": "Update client to v1.4.2: call https://api.example.com/v2/users with X-Trace-Id, then print exactly \"OK 200\" and keep parseAccount() unchanged.",
+  "context": {
+    "text": "# src/client/update.ts\n1: export function parseAccount(raw: string) {}\n2: // API base: https://api.example.com/v2\n\n# src/client/config.ts\n1: export const HEADER_TRACE = 'X-Trace-Id'\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "exact-literals",
+      "kind": "mustInclude",
+      "description": "Preserve the version, URL, header name, exact output string and parser identifier.",
+      "severity": "critical",
+      "literals": ["v1.4.2", "https://api.example.com/v2/users", "X-Trace-Id", "\"OK 200\"", "parseAccount()"]
+    },
+    {
+      "id": "no-parser-rename",
+      "kind": "mustNotInfer",
+      "description": "Do not rename or reformat parseAccount() or change the exact output string.",
+      "severity": "critical"
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-version",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "v1.4.2"
+    },
+    {
+      "id": "keeps-url",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "https://api.example.com/v2/users"
+    },
+    {
+      "id": "keeps-header",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "X-Trace-Id"
+    },
+    {
+      "id": "keeps-exact-output",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "\"OK 200\""
+    },
+    {
+      "id": "keeps-parser",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "parseAccount()"
+    },
+    {
+      "id": "no-unnecessary-question",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "Update the client to v1.4.2. Call https://api.example.com/v2/users with the X-Trace-Id header, print exactly \"OK 200\" on success, and keep parseAccount() unchanged. Do not reformat the output or rename the parser.",
+      "message": "정확한 문자열과 코드 식별자를 보존했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

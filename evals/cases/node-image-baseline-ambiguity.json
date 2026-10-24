@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "id": "node-image-baseline-ambiguity",
+  "split": "development",
+  "tags": ["ko", "ambiguity", "evidence", "multi-round"],
+  "provenance": {
+    "kind": "synthetic-reconstruction",
+    "source": "docs/smoke.md#22-요구사항-구체화의-의미-평가 (node/image diff scenario, rewritten as synthetic data)"
+  },
+  "original": "노드별로 현재 property와 해당 image가 기존 image와의 diff를 반환해주는 API를 추가해주고, 내부 swagger나 mcp도 추가해줘",
+  "context": {
+    "text": "# docs/GLOSSARY.md\n1: - 기존 image: 배포 직전에 승인된 이미지\n2: - property: 노드에 설정된 키와 값\n\n# src/nodes/node.controller.ts\n1: // 노드의 현재 속성값을 조회한다\n2: export async function getNodeProperty(nodeId: string, key: string) {}\n3: // 노드 목록을 반환한다\n4: export async function listNodes() {}\n\n# docs/openapi.yaml\n1: paths:\n2:   /nodes:\n3:     get:\n4:       summary: 노드 목록\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 2,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [
+    {
+      "text": "배포 직전에 승인된 이미지를 기준으로 비교해줘.",
+      "when": { "questionIncludes": "비교 기준" }
+    }
+  ],
+  "constraints": [
+    {
+      "id": "preserve-targets",
+      "kind": "mustPreserve",
+      "description": "Keep the diff API plus internal swagger and MCP deliverables; do not narrow or widen the requested targets.",
+      "severity": "critical"
+    },
+    {
+      "id": "baseline-from-answer",
+      "kind": "mustInclude",
+      "description": "Use the answered baseline image instead of inventing a comparison basis.",
+      "severity": "critical",
+      "literals": ["배포 직전에 승인된"]
+    },
+    {
+      "id": "no-invented-endpoint",
+      "kind": "mustNotInfer",
+      "description": "Do not invent endpoint paths, MCP registry names or a confirmed cause that the supplied evidence does not show.",
+      "severity": "critical"
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-baseline",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "배포 직전에 승인된"
+    },
+    {
+      "id": "keeps-swagger-mcp",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "MCP"
+    },
+    {
+      "id": "no-second-baseline",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "현재 운영 중인 이미지"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "노드별 현재 property와 기준 이미지의 diff를 반환하는 API를 추가하고, 내부 swagger와 MCP 노출도 함께 추가해줘. 비교 기준 이미지는 아직 정해지지 않았다.",
+      "message": "비교 기준을 먼저 확인합니다.",
+      "question": "diff의 비교 기준으로 어떤 이미지를 사용할까요?",
+      "options": [
+        "배포 직전에 승인된 이미지",
+        "현재 운영 중인 이미지",
+        "사용자가 지정한 이미지"
+      ]
+    },
+    {
+      "draft": "노드별로 현재 property 값과 배포 직전에 승인된 기준 이미지의 값을 비교해 diff를 반환하는 API를 추가해줘. 내부 swagger 문서와 MCP 노출도 같은 입력·결과·오류 계약으로 추가하고, 근거에 없는 엔드포인트나 레지스트리 이름은 만들지 마.",
+      "message": "합의한 비교 기준을 초안에 반영했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

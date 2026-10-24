@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "holdout-reservation-cancellation",
+  "split": "holdout",
+  "tags": ["ko", "holdout", "reservation", "policy"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Holdout domain authored for issue #37 after the development suite was frozen; synthetic policy only."
+  },
+  "original": "예약 취소 정책을 정리해줘. 취소 수수료와 환불 기한은 기존 정책을 그대로 두고, 사용자에게 보여줄 안내 문구만 다듬어줘.",
+  "context": {
+    "text": "# docs/reservation-policy.md\n1: - 예약 24시간 전까지 취소: 수수료 없음\n2: - 예약 24시간 이내 취소: 1박 요금의 30%\n3: - 환불은 취소 승인 후 3영업일 이내\n\n# src/reservation/notice.ts\n1: // 취소 안내 문구를 만든다\n2: export function cancellationNotice() {}\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "keep-policy-values",
+      "kind": "mustPreserve",
+      "description": "Keep the existing cancellation fee and refund deadline unchanged; only the user-facing notice wording may change.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-policy-change",
+      "kind": "mustNotInfer",
+      "description": "Do not introduce new fees, deadlines or exceptions that the policy excerpt does not state.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-notice-scope",
+      "kind": "mustInclude",
+      "description": "Keep the cancellation notice wording as the actual deliverable.",
+      "severity": "major",
+      "literals": ["안내 문구", "수수료"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-notice",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "안내 문구"
+    },
+    {
+      "id": "keeps-fee",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "수수료"
+    },
+    {
+      "id": "keeps-policy-unchanged",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "수수료를 인상"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "예약 취소 정책의 사용자 안내 문구만 다듬어줘. 예약 24시간 전까지는 수수료가 없고, 24시간 이내에는 1박 요금의 30%가 적용되며, 환불은 취소 승인 후 3영업일 이내라는 기존 정책은 그대로 유지해줘.",
+      "message": "기존 수수료·환불 정책을 유지하고 안내 문구 범위로 한정했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

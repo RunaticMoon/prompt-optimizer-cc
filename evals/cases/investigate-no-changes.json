@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "investigate-no-changes",
+  "split": "development",
+  "tags": ["ko", "investigation", "no-scope-expansion"],
+  "provenance": {
+    "kind": "synthetic-reconstruction",
+    "source": "docs/smoke.md#22-요구사항-구체화의-의미-평가 (regression: cause investigation without modification)"
+  },
+  "original": "왜 빌드가 느린지 원인만 조사해줘. 아무것도 바꾸지 마.",
+  "context": {
+    "text": "# package.json\n1: {\n2:   \"scripts\": { \"build\": \"tsc -p tsconfig.json\" }\n3: }\n\n# tsconfig.json\n1: { \"compilerOptions\": { \"incremental\": false } }\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "investigate-only",
+      "kind": "mustPreserve",
+      "description": "Investigate why the build is slow; do not request a change or an implementation.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-invented-cause",
+      "kind": "mustNotInfer",
+      "description": "Do not claim a confirmed slow-build cause from a two-line config excerpt.",
+      "severity": "critical"
+    },
+    {
+      "id": "keep-build-cause",
+      "kind": "mustInclude",
+      "description": "Keep the build and the cause analysis in the request.",
+      "severity": "major",
+      "literals": ["빌드", "원인"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-cause",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "원인"
+    },
+    {
+      "id": "keeps-build",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "빌드"
+    },
+    {
+      "id": "no-modification",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "수정"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "빌드가 느린 원인만 조사하고 아무것도 바꾸지 마. 빌드 단계별 소요 시간과 증분 빌드·캐시 설정을 확인할 대상으로 남기고, 확인되지 않은 원인은 단정하지 마.",
+      "message": "조사 전용 범위와 확인 대상을 보존했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}

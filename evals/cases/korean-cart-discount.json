@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "korean-cart-discount",
+  "split": "development",
+  "tags": ["ko", "cart", "investigation", "evidence"],
+  "provenance": {
+    "kind": "synthetic-authored",
+    "source": "Authored for the Korean-only retrieval matrix in issue #37; the cart fixture is synthetic."
+  },
+  "original": "장바구니 합계가 할인 적용 후에도 원래 금액으로 보여. 원인만 찾아줘.",
+  "context": {
+    "text": "# src/cart/CartSummary.tsx\n1: // 장바구니 항목과 할인 전 합계를 계산한다\n2: export function CartSummary({ items }: Props) {\n3:   const subtotal = sum(items)\n4:   return <Total amount={subtotal} />\n5: }\n\n# src/cart/discount.ts\n1: // 할인율을 적용한 최종 금액을 반환한다\n2: export function applyDiscount(total: number) {}\n"
+  },
+  "initialDialogue": [],
+  "initialDraft": "",
+  "roundsCompleted": 0,
+  "settings": {
+    "guidanceProfile": "common",
+    "maxRounds": 1,
+    "maxTokens": 2048,
+    "timeoutMs": 30000,
+    "cache": false
+  },
+  "answers": [],
+  "constraints": [
+    {
+      "id": "investigate-only",
+      "kind": "mustPreserve",
+      "description": "Find the cause only; do not request or describe a fix.",
+      "severity": "critical"
+    },
+    {
+      "id": "no-confirmed-cause",
+      "kind": "mustNotInfer",
+      "description": "Do not assert a confirmed cause; distinguish code shown in the excerpt from unverified behavior.",
+      "severity": "critical"
+    },
+    {
+      "id": "cart-and-discount",
+      "kind": "mustInclude",
+      "description": "Keep the cart summary and the discount calculation in scope.",
+      "severity": "major",
+      "literals": ["장바구니", "할인"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "keeps-cart",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "장바구니"
+    },
+    {
+      "id": "keeps-discount",
+      "kind": "includes",
+      "round": "final",
+      "field": "draft",
+      "value": "할인"
+    },
+    {
+      "id": "no-modification",
+      "kind": "excludes",
+      "round": "final",
+      "field": "draft",
+      "value": "수정해"
+    },
+    {
+      "id": "done-asking",
+      "kind": "questionNull",
+      "round": "final"
+    }
+  ],
+  "mockResponses": [
+    {
+      "draft": "장바구니 합계가 할인 적용 후에도 원래 금액으로 표시되는 원인만 조사해줘. CartSummary가 할인 전 합계를 Total에 전달하는지, applyDiscount 결과가 반영되는지 확인하고, 아직 확인되지 않은 원인은 단정하지 마.",
+      "message": "장바구니와 할인 계산의 조사 범위를 보존했습니다.",
+      "question": null,
+      "options": []
+    }
+  ]
+}
