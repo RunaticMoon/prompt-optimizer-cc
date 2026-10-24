@@ -818,7 +818,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
         notify(notice)
       }
 
-      const system = composeSystemPrompt(extra, target.profile)
+      // `config` was captured at round start, so a live level change applies to
+      // the next round and never rewrites an in-flight request.
+      const system = composeSystemPrompt(extra, target.profile, config.refinementLevel)
       let request: ReturnType<typeof buildModelRequest>
       try {
         request = buildModelRequest(current, {

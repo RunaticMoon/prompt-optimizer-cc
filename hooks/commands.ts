@@ -26,6 +26,7 @@ import type {
   EnginePorts,
   GuidanceStatus,
   OptimizerConfig,
+  RefinementLevel,
   RuntimeState,
   SubmissionStatus,
   Workflow,
@@ -344,6 +345,18 @@ function parseDiffBaseline(rest: string): ParsedCommand {
  * it directly and never calls the model getter or any other port. The same
  * holds for `submission`, the controller's stored last-submission diagnostic.
  */
+/** The status label for each refinement level; the config union is exhaustive. */
+function describeRefinementLevel(level: RefinementLevel): string {
+  switch (level) {
+    case 'quick':
+      return 'quick (빠른 정리)'
+    case 'standard':
+      return 'standard (일반 보완)'
+    case 'deep':
+      return 'deep (심층 구체화)'
+  }
+}
+
 export function formatStatus(
   config: OptimizerConfig,
   state: Readonly<RuntimeState>,
@@ -353,6 +366,7 @@ export function formatStatus(
   const lines: string[] = [
     `프롬프트 옵티마이저: ${config.enabled ? '켜짐' : '꺼짐'}`,
     `트리거: ${triggerLabel(config)} · UI: ${config.uiMode}`,
+    `보완 수준: ${describeRefinementLevel(config.refinementLevel)}`,
     `옵티마이저 모델: ${config.model} · 최대 토큰: ${config.maxTokens} · 타임아웃: ${config.timeoutMs}ms · 최대 라운드: ${config.maxRounds}`,
     `모델별 지침: ${config.modelGuidance ? '켜짐' : '꺼짐(공통 지침만 사용)'}`,
     `마지막 최적화 대상: ${describeLastTarget(guidance)}`,

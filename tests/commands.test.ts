@@ -329,6 +329,20 @@ describe('formatStatus', () => {
     expect(text.indexOf('트리거: smart')).toBeLessThan(text.indexOf('최근 제출 분류'))
   })
 
+  test('shows the selected refinement level right after the trigger line', () => {
+    const expected = {
+      quick: '보완 수준: quick (빠른 정리)',
+      standard: '보완 수준: standard (일반 보완)',
+      deep: '보완 수준: deep (심층 구체화)',
+    } as const
+    for (const [level, line] of Object.entries(expected)) {
+      const text = formatStatus(config({ refinementLevel: level as keyof typeof expected }), liveState())
+      expect(text).toContain(line)
+      expect(text.indexOf(line)).toBeGreaterThan(text.indexOf('트리거:'))
+      expect(text.indexOf(line)).toBeLessThan(text.indexOf('옵티마이저 모델:'))
+    }
+  })
+
   test('separates the optimizer model from the model-guidance toggle', () => {
     const on = formatStatus(config({ model: 'haiku', modelGuidance: true }), liveState())
     expect(on).toContain('옵티마이저 모델: haiku · 최대 토큰')
