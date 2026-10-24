@@ -97,6 +97,33 @@ test('--mock holdout has its own frozen four-case corpus', async () => {
   assert.equal(parsed.metadata.plannedCalls, 4)
 })
 
+test('repo provenance follows the checkout root, not the caller cwd', async () => {
+  const dir = await tempDir('popt-other-repo-')
+  const init = spawnSync('git', ['init', '-q', dir], { encoding: 'utf8' })
+  assert.equal(init.status, 0, init.stderr)
+  const commit = spawnSync(
+    'git',
+    ['-C', dir, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'x'],
+    { encoding: 'utf8' },
+  )
+  assert.equal(commit.status, 0, commit.stderr)
+  const tempSha = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const checkoutSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: CHECKOUT_ROOT, encoding: 'utf8' }).stdout.trim()
+  assert.notEqual(tempSha, checkoutSha)
+
+  const out = path.join(dir, 'result.json')
+  const result = spawnSync(
+    process.execPath,
+    [RUNNER, '--mock', '--suite', 'holdout', '--repeats', '1', '--out', out],
+    { cwd: dir, encoding: 'utf8' },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  const parsed = JSON.parse(await readFile(out, 'utf8'))
+  assert.equal(parsed.metadata.repoSha, checkoutSha)
+  assert.notEqual(parsed.metadata.repoSha, tempSha)
+  assert.equal(typeof parsed.metadata.dirty, 'boolean')
+})
+
 test('--out is exclusive and never overwrites a result', async () => {
   const dir = await tempDir()
   const out = path.join(dir, 'result.json')
@@ -172,6 +199,35 @@ test('live mode runs only the explicit fake adapter with logical call caps', asy
   const calls = (await readFile(log, 'utf8')).trim().split('\n')
   assert.equal(calls.length, 4)
   assert.ok(calls.every(line => JSON.parse(line).model === 'fake-requested'))
+})
+
+test('live mode refuses an existing --out before making any adapter call', async () => {
+  const dir = await tempDir()
+  const out = path.join(dir, 'live.json')
+  const log = path.join(dir, 'calls.jsonl')
+  await writeFile(out, 'occupied', 'utf8')
+  const result = run(
+    [
+      '--live',
+      '--adapter',
+      path.join(CHECKOUT_ROOT, 'evals', 'runner', 'fixtures', 'fake-adapter.mjs'),
+      '--model',
+      'fake-model',
+      '--max-calls',
+      '4',
+      '--max-rounds',
+      '1',
+      '--suite',
+      'holdout',
+      '--out',
+      out,
+    ],
+    { POPT_FAKE_ADAPTER_LOG: log, POPT_FAKE_ADAPTER_MODE: 'ok' },
+  )
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /refusing to overwrite/)
+  assert.equal(existsSync(log), false)
+  assert.equal(await readFile(out, 'utf8'), 'occupied')
 })
 
 test('live mode refuses a CI environment before touching the adapter', async () => {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/RunaticMoon/prompt-optimizer-cc/evals/rubric/review-schema.json",
   "title": "Prompt optimizer semantic review record v1",
-  "description": "Shape of a human semantic review attached to one case repeat. The runner checks only reviewVersion, caseId, caseHash, repeat and each review's criterionId/verdict; it does not execute this schema.",
+  "description": "Shape of a human semantic review attached to one case repeat. The runner checks reviewVersion, caseId, caseHash, repeat, each review's criterionId/verdict, that quote appears verbatim in the repeat's round rawText, that criterion items are not duplicated, and that constraintId (constraint-omission only) names a constraint of the case; it does not execute this schema.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -69,6 +69,12 @@
         "quote": { "$ref": "#/$defs/quote" },
         "reason": { "$ref": "#/$defs/reason" },
         "requiredCondition": { "type": "string", "maxLength": 1000 },
+        "constraintId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Required context for constraint-omission items reviewed per constraint; must match a constraints[].id of the case."
+        },
         "disagreement": { "$ref": "#/$defs/secondOpinion" },
         "adjudication": { "$ref": "#/$defs/secondOpinion" }
       }

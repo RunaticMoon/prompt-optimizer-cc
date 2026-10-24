@@ -420,6 +420,12 @@ export function validateCase(value, { file = null, split = null } = {}) {
     if (mockResponses.length > Math.min(MAX_MOCK_RESPONSES, remainingRounds)) {
       fail('mockResponses', 'more responses than the remaining rounds')
     }
+    if (mockResponses.length < answers.length + 1) {
+      fail(
+        'mockResponses',
+        `expected at least ${answers.length + 1} response(s) so the round after every answer exists`,
+      )
+    }
   }
   for (let index = 0; index < answers.length; index += 1) {
     if (index >= mockResponses.length) {

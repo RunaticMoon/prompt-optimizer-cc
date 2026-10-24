@@ -151,6 +151,30 @@ test('mock responses and answers must be internally consistent', () => {
   assert.throws(() => validateCase(nullQuestionWithOptions), /options require a non-null question/)
 })
 
+test('every answer requires the post-answer mock response', () => {
+  const missing = validCase()
+  missing.settings = { ...missing.settings, maxRounds: 2 }
+  missing.answers = [{ text: '1번', when: { questionIncludes: 'q' } }]
+  missing.mockResponses = [
+    { draft: 'a', message: 'm', question: 'q?', options: ['1번'] },
+  ]
+  assert.throws(() => validateCase(missing), /the round after every answer exists/)
+
+  const satisfied = validCase()
+  satisfied.settings = { ...satisfied.settings, maxRounds: 2 }
+  satisfied.answers = [{ text: '1번', when: { questionIncludes: 'q' } }]
+  satisfied.mockResponses = [
+    { draft: 'a', message: 'm', question: 'q?', options: ['1번'] },
+    { draft: 'b', message: 'm', question: null, options: [] },
+  ]
+  const parsed = validateCase(satisfied)
+  assert.equal(parsed.mockResponses.length, 2)
+
+  const noAnswersNeedsOne = validCase()
+  noAnswersNeedsOne.mockResponses = []
+  assert.throws(() => validateCase(noAnswersNeedsOne), /expected at least one response/)
+})
+
 test('round-scoped rules must be reachable and in range', () => {
   const before = validCase()
   before.roundsCompleted = 1

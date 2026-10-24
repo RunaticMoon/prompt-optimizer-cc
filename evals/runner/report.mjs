@@ -123,7 +123,7 @@ export function summarizeRun(run) {
       totals.rounds += 1
       const parsed = isPlainObject(round.reply)
       if (parsed) totals.completedRounds += 1
-      else totals.parseFailures += 1
+      if (isParseFailureRound(round)) totals.parseFailures += 1
       if (!parsed) {
         // A failed call still has an input, but no rule judgment of its own.
         if (isPlainObject(round.usage) && round.usage.known === true) {
@@ -156,14 +156,22 @@ export function summarizeRun(run) {
     const review = repeat?.humanReview
     if (isPlainObject(review) && Array.isArray(review.reviews)) {
       semantic.reviewedEpisodes += 1
+      // Denominators count distinct constraints and episodes, never review
+      // items, so duplicated entries cannot push a rate past 1.
+      const constraintKeys = new Set()
+      const failedConstraintKeys = new Set()
+      let scopeReviewed = false
+      let scopeFailed = false
       for (const item of review.reviews) {
         if (item?.criterionId === 'constraint-omission' && (item.verdict === 'pass' || item.verdict === 'fail')) {
-          semantic.reviewedConstraints += 1
-          if (item.verdict === 'fail') semantic.constraintOmissions += 1
+          const key =
+            typeof item.constraintId === 'string' && item.constraintId !== '' ? item.constraintId : '(unkeyed)'
+          constraintKeys.add(key)
+          if (item.verdict === 'fail') failedConstraintKeys.add(key)
         }
         if (item?.criterionId === 'scope-addition' && (item.verdict === 'pass' || item.verdict === 'fail')) {
-          semantic.reviewedScopeEpisodes += 1
-          if (item.verdict === 'fail') semantic.scopeAdditions += 1
+          scopeReviewed = true
+          if (item.verdict === 'fail') scopeFailed = true
         }
         if (item?.criterionId === 'unnecessary-question' && item.verdict === 'fail') {
           semantic.unnecessaryQuestions += 1
@@ -175,6 +183,10 @@ export function summarizeRun(run) {
           semantic.languageFailures += 1
         }
       }
+      semantic.reviewedConstraints += constraintKeys.size
+      semantic.constraintOmissions += failedConstraintKeys.size
+      if (scopeReviewed) semantic.reviewedScopeEpisodes += 1
+      if (scopeFailed) semantic.scopeAdditions += 1
     }
   }
 
@@ -247,196 +259,27 @@ export function summarizeRun(run) {
   }
 }
 
+/**
+ * A round with raw model text that did not parse. Rounds that never produced
+ * text (timeout, adapter error, missing mock response) are transport failures,
+ * not parse failures, and are counted through episode status instead.
+ */
+export function isParseFailureRound(round) {
+  if (isPlainObject(round?.reply)) return false
+  return typeof round?.rawText === 'string' && round.rawText !== ''
+}
+
 /** Escapes model text so it cannot corrupt a Markdown table or emit HTML. */
 export function escapeMarkdownCell(value, maxChars = 160) {
   const raw = value === null || value === undefined ? '' : String(value)
   const points = [...raw]
   const truncated = points.length > maxChars ? `${points.slice(0, Math.max(0, maxChars - 1)).join('')}…` : raw
   return truncated
+    .replace(/\\/g, '\\\\')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\|/g, '\\|')
     .replace(/`/g, '\\`')
-    .replace(/\r?\n/g, ' ')
-}
-
-function formatNumber(value) {
-  if (value === null || value === undefined) return 'N/A'
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return Number.isInteger(value) ? String(value) : value.toFixed(2)
-  }
-  return String(value)
-}
-
-function formatRate(value) {
-  return value === null ? 'N/A' : `${(value * 100).toFixed(1)}%`
-}
-
-function metadataTable(metadata) {
-  return [
-    '| 항목 | 값 |',
-    '|---|---|',
-    `| 모드 | ${escapeMarkdownCell(metadata.mode ?? 'unknown')} |`,
-    `| 평가군 | ${escapeMarkdownCell(metadata.suite ?? 'unknown')} |`,
-    `| 저장소 SHA | ${escapeMarkdownCell(metadata.repoSha ?? 'unknown')} |`,
-    `| 패키지 버전 | ${escapeMarkdownCell(metadata.packageVersion ?? 'unknown')} |`,
-    `| Node | ${escapeMarkdownCell(metadata.nodeVersion ?? 'unknown')} |`,
-    `| 요청 모델 | ${escapeMarkdownCell(metadata.model?.requested ?? 'none')} |`,
-    `| 실제 모델 | ${escapeMarkdownCell(metadata.model?.actual ?? 'unknown')} |`,
-    `| 반복 | ${formatNumber(metadata.settings?.repeats ?? null)} |`,
-    `| 예상/시도/완료 호출 | ${formatNumber(metadata.plannedCalls ?? null)} / ${formatNumber(metadata.attemptedCalls ?? null)} / ${formatNumber(metadata.completedCalls ?? null)} |`,
-    `| 시작/종료 | ${escapeMarkdownCell(metadata.startedAt ?? 'unknown')} / ${escapeMarkdownCell(metadata.endedAt ?? 'unknown')} |`,
-  ].join('\n')
-}
-
-/** Renders a human-readable Markdown report from a result object. */
-export function renderMarkdown(run) {
-  const metadata = isPlainObject(run?.metadata) ? run.metadata : {}
-  const summary = isPlainObject(run?.aggregate) ? run.aggregate : summarizeRun(run)
-  const lines = []
-  lines.push('# 프롬프트 의미 평가 결과')
-  lines.push('')
-  if (summary.mode === 'mock') {
-    lines.push('> **pipeline/rule rehearsal only — no semantic-quality conclusion**')
-    lines.push('>')
-    lines.push(
-      '> 이 보고서의 규칙 검사는 어휘·구조 신호입니다. 의미 품질 판정은 `evals/rubric/README.md`의 사람 심사 기록으로만 이루어지며, 심사되지 않은 의미 지표는 N/A입니다.',
-    )
-  } else {
-    lines.push('> 실제 모델 실행입니다. 규칙 통과는 의미 품질의 증거가 아닙니다. 사람 심사가 필요합니다.')
-  }
-  lines.push('')
-  lines.push(metadataTable(metadata))
-  lines.push('')
-  lines.push('## 집계')
-  lines.push('')
-  lines.push('| 지표 | 값 |')
-  lines.push('|---|---|')
-  const rows = [
-    ['사례 / 에피소드', `${summary.totals.cases} / ${summary.totals.episodes}`],
-    ['완료 / 실패 / 상한 도달', `${summary.totals.completedEpisodes} / ${summary.totals.failedEpisodes} / ${summary.totals.cappedEpisodes}`],
-    ['규칙 통과 / 실패 / N/A', `${summary.totals.rulePasses} / ${summary.totals.ruleFailures} / ${summary.totals.ruleNotApplicable}`],
-    ['규칙 통과율', formatRate(summary.rates.rulePassRate)],
-    ['파싱 실패', `${summary.totals.parseFailures} (${formatRate(summary.rates.parseFailureRate)})`],
-    ['라운드 / 작업', formatNumber(summary.rates.roundsPerTask)],
-    ['질문 수 / 질문으로 끝난 에피소드', `${summary.questionCounts.questions} / ${summary.questionCounts.episodesEndingWithQuestion}`],
-    ['지연 중앙값 / p90', `${formatNumber(summary.latency.medianMs)}ms / ${formatNumber(summary.latency.p90Ms)}ms (${summary.latency.method})`],
-    ['사용량 알려진 에피소드', `${summary.usage.knownEpisodes} / ${summary.usage.episodes}${summary.usage.synthetic ? ' (synthetic 0)' : ''}`],
-    ['토큰 합계(입력/출력/캐시 읽기/캐시 생성)', `${summary.usage.totals.input_tokens} / ${summary.usage.totals.output_tokens} / ${summary.usage.totals.cache_read_input_tokens} / ${summary.usage.totals.cache_creation_input_tokens}`],
-    ['심사된 에피소드', `${summary.semantic.reviewedEpisodes} / ${summary.totals.episodes} (${summary.semantic.status})`],
-    ['제약 누락률', `${formatRate(summary.semantic.constraintOmissionRate)} (${summary.semantic.constraintOmissions}/${summary.semantic.reviewedConstraints})`],
-    ['범위 추가율', `${formatRate(summary.semantic.scopeAdditionRate)} (${summary.semantic.scopeAdditions}/${summary.semantic.reviewedScopeEpisodes})`],
-    ['불필요 질문', `${summary.semantic.unnecessaryQuestions} (심사 기반)`],
-  ]
-  lines.push(...rows.map(([label, value]) => `| ${label} | ${value} |`))
-  lines.push('')
-
-  lines.push('## 사례별 결과')
-  lines.push('')
-  lines.push('| 사례 | 반복 | 상태 | 라운드 | 규칙 통과/실패 | 파싱 실패 | 지연 | 종료 이유 |')
-  lines.push('|---|---|---|---|---|---|---|---|')
-  for (const { caseItem, repeat } of episodes(run)) {
-    const rounds = Array.isArray(repeat.rounds) ? repeat.rounds : []
-    const pass = rounds.reduce(
-      (total, round) => total + (round.judgments ?? []).filter(item => item.status === 'pass').length,
-      0,
-    )
-    const fail = rounds.reduce(
-      (total, round) => total + (round.judgments ?? []).filter(item => item.status === 'fail').length,
-      0,
-    )
-    const parseFailures = rounds.reduce(
-      (total, round) => total + (isPlainObject(round.reply) ? 0 : 1),
-      0,
-    )
-    const duration = rounds.reduce(
-      (total, round) => total + (finiteOrNull(round.durationMs) ?? 0),
-      0,
-    )
-    lines.push(
-      `| ${escapeMarkdownCell(caseItem.caseId)} | ${formatNumber(repeat.repeat)} | ${escapeMarkdownCell(repeat.status)} | ${rounds.length} | ${pass}/${fail} | ${parseFailures} | ${formatNumber(duration)}ms | ${escapeMarkdownCell(repeat.stopReason ?? '')} |`,
-    )
-  }
-  lines.push('')
-
-  const failures = []
-  for (const { caseItem, repeat } of episodes(run)) {
-    for (const round of repeat.rounds ?? []) {
-      for (const judgment of round.judgments ?? []) {
-        if (judgment.status === 'fail') {
-          failures.push({ caseItem, repeat, round, judgment })
-        }
-      }
-    }
-  }
-  lines.push('## 규칙 실패 상세')
-  lines.push('')
-  if (failures.length === 0) {
-    lines.push('규칙 실패가 없습니다. 이는 의미 품질 통과가 아닙니다.')
-  } else {
-    lines.push('| 사례 | 반복 | 라운드 | 규칙 | 근거 |')
-    lines.push('|---|---|---|---|---|')
-    for (const { caseItem, repeat, round, judgment } of failures) {
-      lines.push(
-        `| ${escapeMarkdownCell(caseItem.caseId)} | ${repeat.repeat} | ${round.round} | ${escapeMarkdownCell(judgment.ruleId)} | ${escapeMarkdownCell(judgment.evidence)} |`,
-      )
-    }
-  }
-  lines.push('')
-
-  lines.push('## 실패·분기·시간 초과')
-  lines.push('')
-  const buckets = [
-    ['실패', summary.failures.failed],
-    ['상한 도달', summary.failures.capped],
-    ['시나리오 분기', summary.failures['scenario-diverged']],
-    ['시간 초과', summary.failures.timeout],
-    ['어댑터 미지원', summary.failures.unsupported],
-    ['호출 상한으로 건너뜀', summary.failures.cap],
-  ]
-  let anyBucket = false
-  for (const [label, items] of buckets) {
-    if (items.length === 0) continue
-    anyBucket = true
-    lines.push(`- ${label}: ${items.length}`)
-    for (const item of items) {
-      lines.push(
-        `  - ${escapeMarkdownCell(item.caseId)} 반복 ${item.repeat}: ${escapeMarkdownCell(item.error?.kind ?? item.stopReason ?? item.status)}`,
-      )
-    }
-  }
-  if (!anyBucket) lines.push('없음.')
-  lines.push('')
-
-  lines.push('## 사람 심사')
-  lines.push('')
-  if (summary.semantic.reviewedEpisodes === 0) {
-    lines.push('심사 기록이 없습니다. 의미 지표는 모두 N/A이며 0이 아닙니다.')
-  } else {
-    lines.push(
-      `심사된 에피소드 ${summary.semantic.reviewedEpisodes}/${summary.totals.episodes}. 미심사 ${summary.semantic.unreviewedEpisodes}건은 통과로 계산하지 않습니다.`,
-    )
-    lines.push('')
-    lines.push('| 사례 | 반복 | 기준 | 판정 | 인용 |')
-    lines.push('|---|---|---|---|---|')
-    for (const { caseItem, repeat } of episodes(run)) {
-      for (const item of repeat.humanReview?.reviews ?? []) {
-        lines.push(
-          `| ${escapeMarkdownCell(caseItem.caseId)} | ${repeat.repeat} | ${escapeMarkdownCell(item.criterionId)} | ${escapeMarkdownCell(item.verdict)} | ${escapeMarkdownCell(item.quote)} |`,
-        )
-      }
-    }
-  }
-  lines.push('')
-  lines.push('## 한계')
-  lines.push('')
-  lines.push(
-    '- mock 실행은 파이프라인·규칙 리허설이며 의미 품질 결론이 아닙니다. 실제 모델 품질과 provider 동작은 이 보고서로 검증되지 않습니다.',
-  )
-  lines.push('- 실패 사례의 원문·근거·답변·모델 응답은 결과 JSON에 보존됩니다. 이 Markdown은 요약입니다.')
-  lines.push('- 규칙 실패는 어휘 신호이며 동의어 누락을 자동으로 의미 누락으로 판정하지 않습니다.')
-  lines.push('- 보류 평가군은 별도 동결 코퍼스이며, 코퍼스 해시가 다른 실행을 개선으로 비교하지 않습니다.')
-  lines.push('')
-  return `${lines.join('\n')}\n`
+    .replace(/\r\n?|\n/g, ' ')
 }

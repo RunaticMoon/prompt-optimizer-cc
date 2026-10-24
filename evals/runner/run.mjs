@@ -13,7 +13,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { mkdir, open, readFile } from 'node:fs/promises'
+import { mkdir, open, readFile, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -31,10 +31,14 @@ const USAGE = [
   '  node evals/runner/run.mjs --live --adapter ABSOLUTE --model ID --max-calls N --max-rounds N [--repeats N] [--out FILE]',
 ].join('\n')
 
-/** Repository identity recorded in result metadata; never required. */
+/**
+ * Repository identity recorded in result metadata; never required. Git runs
+ * against the checkout root so the caller's cwd cannot substitute another
+ * repository's HEAD.
+ */
 function repoInfo() {
-  const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' })
-  const status = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' })
+  const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', cwd: CHECKOUT_ROOT })
+  const status = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8', cwd: CHECKOUT_ROOT })
   return {
     sha: sha.status === 0 ? sha.stdout.trim() : null,
     dirty: status.status === 0 ? status.stdout.trim() !== '' : null,
@@ -50,8 +54,13 @@ async function packageVersion() {
   }
 }
 
-/** Writes a result with exclusive creation and a private file mode. */
-async function writeResult(outPath, result) {
+/**
+ * Reserves the output path with exclusive creation and a private file mode
+ * before the first adapter call, so a live run cannot spend its calls and then
+ * fail on an existing output. The reservation is removed again if the run
+ * fails before any result is written.
+ */
+async function reserveOut(outPath) {
   const resolved = path.resolve(outPath)
   await mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 })
   let handle
@@ -63,6 +72,13 @@ async function writeResult(outPath, result) {
     }
     throw cause
   }
+  await handle.close()
+  return resolved
+}
+
+/** Writes a result into a path already reserved by {@link reserveOut}. */
+async function writeResult(reservedPath, result) {
+  const handle = await open(reservedPath, 'w', 0o600)
   try {
     await handle.writeFile(`${JSON.stringify(result, null, 2)}\n`, 'utf8')
   } finally {
@@ -99,24 +115,33 @@ async function main() {
   }
   validateBudget(cases, args)
 
-  const { createRequests } = await import('./requests.mjs')
-  const requests = await createRequests()
-  const { runEvaluation } = await import('./core.mjs')
-  const result = await runEvaluation({
-    cases,
-    args,
-    requests,
-    repo: repoInfo(),
-    packageVersion: await packageVersion(),
-  })
+  let reserved = null
+  try {
+    if (args.out !== null) reserved = await reserveOut(args.out)
+    const { createRequests } = await import('./requests.mjs')
+    const requests = await createRequests()
+    const { runEvaluation } = await import('./core.mjs')
+    const result = await runEvaluation({
+      cases,
+      args,
+      requests,
+      repo: repoInfo(),
+      packageVersion: await packageVersion(),
+    })
 
-  if (args.out !== null) {
-    await writeResult(args.out, result)
-    console.log(`result written to ${args.out}`)
-  }
-  for (const line of summaryLines(result)) console.log(line)
-  if (args.mode === 'live') {
-    console.log('live adapter calls were capped by logical complete invocations; provider-internal retries are not bounded')
+    if (reserved !== null) {
+      await writeResult(reserved, result)
+      reserved = null
+      console.log(`result written to ${args.out}`)
+    }
+    for (const line of summaryLines(result)) console.log(line)
+    if (args.mode === 'live') {
+      console.log('live adapter calls were capped by logical complete invocations; provider-internal retries are not bounded')
+    }
+  } catch (cause) {
+    // Nothing was written yet, so the failed run must not keep blocking the path.
+    if (reserved !== null) await unlink(reserved).catch(() => {})
+    throw cause
   }
 }
 

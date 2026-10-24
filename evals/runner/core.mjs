@@ -281,6 +281,7 @@ export async function runEvaluation({
         let usage = mode === 'mock' ? mockUsage() : { known: false, counts: null }
         let adapterRound = null
         let roundStop = 'answer-fed'
+        let answerAttempted = null
 
         if (mode === 'mock') {
           const response = caseItem.mockResponses[index]
@@ -407,7 +408,20 @@ export async function runEvaluation({
               if (!questionOk || !optionOk) {
                 status = 'scenario-diverged'
                 stopReason = 'answer-condition-mismatch'
-                error = { kind: 'scenario-diverged', status: null }
+                // The answer was never fed, but the trace must show what was
+                // attempted and which gate it failed for diagnosis.
+                error = {
+                  kind: 'scenario-diverged',
+                  status: null,
+                  answer: answer.text,
+                  gate: answer.when ?? null,
+                }
+                answerAttempted = {
+                  text: answer.text,
+                  when: answer.when ?? null,
+                  question,
+                  option1: typeof optionOne === 'string' ? optionOne : null,
+                }
                 roundStop = 'answer-condition-mismatch'
               } else {
                 draft = reply.draft
@@ -427,6 +441,7 @@ export async function runEvaluation({
           context: caseItem.context.text,
           priorDialogue,
           answer: roundStop === 'answer-fed' && reply?.question ? dialogue[dialogue.length - 1]?.text ?? null : null,
+          answerAttempted,
           request: {
             model: built.request.model,
             system: built.request.system ?? built.system,
@@ -455,7 +470,7 @@ export async function runEvaluation({
 
       const graded = gradeEpisode({
         caseId: caseItem.id,
-        replies: rounds.map(round => ({ round: round.round, reply: round.reply })),
+        replies: rounds.map(round => ({ round: round.round, reply: round.reply, rawText: round.rawText })),
         rules: caseItem.rules,
       })
       for (const round of rounds) {

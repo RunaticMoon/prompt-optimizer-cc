@@ -205,7 +205,9 @@ export function gradeEpisode({ caseId = null, replies, rules }) {
   const judgments = []
   let parseFailures = 0
   for (const item of ordered) {
-    if (!isPlainObject(item.reply)) parseFailures += 1
+    if (!isPlainObject(item.reply) && typeof item.rawText === 'string' && item.rawText !== '') {
+      parseFailures += 1
+    }
   }
 
   for (const rule of rules) {
@@ -245,8 +247,16 @@ export function gradeEpisode({ caseId = null, replies, rules }) {
   }
 }
 
-/** Validates and merges one human review onto a case repeat record. */
-export function mergeHumanReview(repeat, review, { caseId, caseHash } = {}) {
+/**
+ * Validates and merges one human review onto a case repeat record. This is a
+ * library function (no CLI); `evals/README.md` documents how to call it.
+ *
+ * A quote must appear verbatim in one of the repeat's round `rawText` values,
+ * review items are deduplicated by criterion (plus `constraintId` for
+ * `constraint-omission`), and a `constraintId` must name a constraint of the
+ * case when the caller supplies them.
+ */
+export function mergeHumanReview(repeat, review, { caseId, caseHash, constraints = null } = {}) {
   if (!isPlainObject(repeat)) fail('repeat must be an object')
   if (!isPlainObject(review)) fail('human review must be an object')
   if (review.reviewVersion !== 1) fail('human review must declare reviewVersion 1')
@@ -267,6 +277,15 @@ export function mergeHumanReview(repeat, review, { caseId, caseHash } = {}) {
   if (!Array.isArray(review.reviews) || review.reviews.length === 0) {
     fail('human review needs at least one criterion review')
   }
+  const rawTexts = (Array.isArray(repeat.rounds) ? repeat.rounds : [])
+    .map(round => (isPlainObject(round) ? round.rawText : null))
+    .filter(value => typeof value === 'string' && value !== '')
+  const caseConstraintIds = new Set(
+    (Array.isArray(constraints) ? constraints : [])
+      .map(constraint => (isPlainObject(constraint) ? constraint.id : null))
+      .filter(value => typeof value === 'string'),
+  )
+  const seen = new Set()
   for (const [index, item] of review.reviews.entries()) {
     if (!isPlainObject(item)) fail(`human review reviews[${index}] must be an object`)
     if (!REVIEW_CRITERIA.includes(item.criterionId)) {
@@ -279,6 +298,25 @@ export function mergeHumanReview(repeat, review, { caseId, caseHash } = {}) {
     }
     if (item.verdict === 'fail' && item.quote.trim() === '' && item.requiredCondition === undefined) {
       fail(`human review reviews[${index}] needs a quote or requiredCondition for a fail verdict`)
+    }
+    const key = `${item.criterionId}\u0000${typeof item.constraintId === 'string' ? item.constraintId : ''}`
+    if (seen.has(key)) {
+      fail(`human review reviews[${index}] repeats ${item.criterionId}; merge one item per criterion`)
+    }
+    seen.add(key)
+    if (item.constraintId !== undefined) {
+      if (item.criterionId !== 'constraint-omission') {
+        fail(`human review reviews[${index}].constraintId is only valid for constraint-omission`)
+      }
+      if (typeof item.constraintId !== 'string' || item.constraintId.trim() === '') {
+        fail(`human review reviews[${index}].constraintId must be a nonempty string`)
+      }
+      if (caseConstraintIds.size > 0 && !caseConstraintIds.has(item.constraintId)) {
+        fail(`human review reviews[${index}].constraintId does not name a constraint of this case`)
+      }
+    }
+    if (item.quote.trim() !== '' && !rawTexts.some(text => text.includes(item.quote))) {
+      fail(`human review reviews[${index}].quote does not appear in this repeat's round rawText`)
     }
   }
   return { ...repeat, humanReview: review }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { escapeMarkdownCell, renderMarkdown, summarizeRun } from './report.mjs'
+import { escapeMarkdownCell, isParseFailureRound, summarizeRun } from './report.mjs'
 
 function judgment(id, status, extra = {}) {
   return { ruleId: id, kind: 'includes', round: 1, field: 'draft', value: 'x', status, evidence: `${id} ${status}`, reason: status, ...extra }
@@ -97,8 +97,8 @@ test('reviewed rates use reviewed denominators and missing reviews stay unreview
     humanReview: {
       reviewVersion: 1,
       reviews: [
-        { criterionId: 'constraint-omission', verdict: 'pass', quote: 'q', reason: 'r' },
-        { criterionId: 'constraint-omission', verdict: 'fail', quote: 'q', reason: 'r' },
+        { criterionId: 'constraint-omission', constraintId: 'c1', verdict: 'pass', quote: 'q', reason: 'r' },
+        { criterionId: 'constraint-omission', constraintId: 'c2', verdict: 'fail', quote: 'q', reason: 'r' },
         { criterionId: 'scope-addition', verdict: 'fail', quote: 'q', reason: 'r' },
         { criterionId: 'unnecessary-question', verdict: 'fail', quote: 'q', reason: 'r' },
       ],
@@ -172,27 +172,64 @@ test('questions count rounds and episodes that end with a question', () => {
   assert.equal(summary.rates.roundsPerTask, 2)
 })
 
-test('renderMarkdown labels mock runs and lists rule failures', () => {
-  const markdown = renderMarkdown(result())
-  assert.match(markdown, /\*\*pipeline\/rule rehearsal only — no semantic-quality conclusion\*\*/)
-  assert.match(markdown, /case-a/)
-  assert.match(markdown, /r2/)
-  assert.match(markdown, /N\/A/)
-  assert.match(markdown, /의미 지표는 모두 N\/A/)
+test('escapeMarkdownCell neutralizes tables and HTML from model text', () => {
+  const escaped = escapeMarkdownCell('| <script>alert(1)</script> `x`\nsecond | row', 120)
+  assert.ok(!escaped.includes('<script>'))
+  assert.ok(!escaped.includes('\n'))
+  assert.match(escaped, /&lt;script&gt;/)
+  assert.match(escaped, /\\\|/)
+  assert.match(escaped, /\\`x\\`/)
 })
 
-test('live reports do not carry the mock warning', () => {
-  const markdown = renderMarkdown(
+test('escapeMarkdownCell escapes backslashes before pipes, so a hostile cell cannot split a table', () => {
+  const escaped = escapeMarkdownCell('a \\| b', 120)
+  assert.equal(escaped, 'a \\\\\\| b')
+
+  const row = `| ${escaped} |`
+  const cells = row.slice(2, -2).match(/(?<!\\)\|/g)
+  assert.equal(cells, null)
+
+  const double = escapeMarkdownCell('\\\\', 120)
+  assert.equal(double, '\\\\\\\\')
+
+  const cr = escapeMarkdownCell('x\ry', 120)
+  assert.equal(cr, 'x y')
+  assert.ok(!cr.includes('\r'))
+})
+
+test('parse failures count only rounds whose raw text did not parse', () => {
+  const parsedRound = {
+    round: 1,
+    reply: { draft: 'd', message: 'm', question: null, options: [] },
+    judgments: [],
+    durationMs: 1,
+    usage: { known: false, counts: null },
+  }
+  const parseFailureRound = { ...parsedRound, round: 2, reply: null, rawText: '{"draft":' }
+  const transportFailureRound = { ...parsedRound, round: 3, reply: null, rawText: null }
+  const emptyTextRound = { ...parsedRound, round: 4, reply: null, rawText: '' }
+
+  assert.equal(isParseFailureRound(parsedRound), false)
+  assert.equal(isParseFailureRound(parseFailureRound), true)
+  assert.equal(isParseFailureRound(transportFailureRound), false)
+  assert.equal(isParseFailureRound(emptyTextRound), false)
+
+  const summary = summarizeRun(
     result({
-      metadata: {
-        mode: 'live',
-        model: { requested: 'explicit-model', actual: null },
-        adapter: { kind: 'fake', hash: 'd'.repeat(64), path: '/tmp/fake.mjs' },
-      },
+      cases: [
+        {
+          caseId: 'case-a',
+          caseHash: 'a'.repeat(64),
+          tags: [],
+          repeats: [repeat({ rounds: [parsedRound, parseFailureRound, transportFailureRound, emptyTextRound] })],
+        },
+      ],
     }),
   )
-  assert.ok(!markdown.includes('pipeline/rule rehearsal only'))
-  assert.match(markdown, /사람 심사가 필요합니다/)
+  assert.equal(summary.totals.rounds, 4)
+  assert.equal(summary.totals.completedRounds, 1)
+  assert.equal(summary.totals.parseFailures, 1)
+  assert.equal(summary.rates.parseFailureRate, 0.25)
 })
 
 test('escapeMarkdownCell neutralizes tables and HTML from model text', () => {

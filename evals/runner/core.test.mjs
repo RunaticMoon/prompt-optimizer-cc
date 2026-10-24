@@ -117,6 +117,9 @@ function stubAdapter(complete) {
   }
 }
 
+// What fakeRequests builds for makeCase: maxTokens 1024, effort 'low', plain string prompt.
+const APPLIED = { maxTokens: 1024, effort: 'low', cache: false }
+
 async function run(cases, argsValue, extra = {}) {
   return runEvaluation({
     cases,
@@ -238,10 +241,17 @@ test('a deictic mismatch stops as scenario-diverged without inventing an answer'
     ],
   })
   const result = await run([caseItem], args())
-  assert.equal(result.cases[0].repeats[0].status, 'scenario-diverged')
-  assert.equal(result.cases[0].repeats[0].stopReason, 'answer-condition-mismatch')
-  assert.equal(result.cases[0].repeats[0].rounds.length, 1)
-  assert.equal(result.cases[0].repeats[0].rounds[0].answer, null)
+  const episode = result.cases[0].repeats[0]
+  assert.equal(episode.status, 'scenario-diverged')
+  assert.equal(episode.stopReason, 'answer-condition-mismatch')
+  assert.equal(episode.rounds.length, 1)
+  assert.equal(episode.rounds[0].answer, null)
+  assert.equal(episode.rounds[0].answerAttempted.text, '1번')
+  assert.deepEqual(episode.rounds[0].answerAttempted.when, { questionIncludes: '기준', option1Includes: '정률' })
+  assert.equal(episode.rounds[0].answerAttempted.question, '기준은?')
+  assert.equal(episode.rounds[0].answerAttempted.option1, '정액 할인')
+  assert.equal(episode.error.answer, '1번')
+  assert.deepEqual(episode.error.gate, { questionIncludes: '기준', option1Includes: '정률' })
 })
 
 test('a question with no scripted answer ends with an open decision', async () => {
@@ -340,11 +350,51 @@ test('a timeout aborts the call and is recorded separately', async () => {
 
 test('missing live usage stays unknown rather than zero', async () => {
   const result = await run([makeCase()], args({ mode: 'live', adapter: '/tmp/fake.mjs', model: 'm', maxCalls: 1 }), {
-    adapter: stubAdapter(async () => ({ text: JSON.stringify(reply()), modelId: 'actual-model' })),
+    adapter: stubAdapter(async () => ({ text: JSON.stringify(reply()), modelId: 'actual-model', settingsApplied: { ...APPLIED } })),
   })
   const round = result.cases[0].repeats[0].rounds[0]
   assert.deepEqual(round.usage, { known: false, counts: null })
   assert.equal(result.metadata.model.actual, 'actual-model')
+})
+
+test('a live call without complete settingsApplied is unsupported, never successful', async () => {
+  const missing = await run([makeCase()], args({ mode: 'live', adapter: '/tmp/fake.mjs', model: 'm', maxCalls: 1 }), {
+    adapter: stubAdapter(async () => ({ text: JSON.stringify(reply()), modelId: 'actual-model' })),
+  })
+  assert.equal(missing.cases[0].repeats[0].status, 'unsupported')
+  assert.deepEqual(missing.cases[0].repeats[0].error, { kind: 'unsupported-settings', status: null })
+  assert.equal(missing.metadata.completedCalls, 0)
+  assert.equal(missing.cases[0].repeats[0].rounds[0].adapter, null)
+
+  const partial = await run([makeCase()], args({ mode: 'live', adapter: '/tmp/fake.mjs', model: 'm', maxCalls: 1 }), {
+    adapter: stubAdapter(async () => ({
+      text: JSON.stringify(reply()),
+      settingsApplied: { maxTokens: 1024 },
+    })),
+  })
+  assert.equal(partial.cases[0].repeats[0].status, 'unsupported')
+  assert.equal(partial.metadata.completedCalls, 0)
+})
+
+test('the fake adapter without settingsApplied marks the call unsupported', async () => {
+  const previousMode = process.env.POPT_FAKE_ADAPTER_MODE
+  for (const mode of ['no-settings', 'partial-settings']) {
+    process.env.POPT_FAKE_ADAPTER_MODE = mode
+    try {
+      const result = await run(
+        [makeCase()],
+        args({ mode: 'live', adapter: FAKE_ADAPTER, model: 'requested-model', maxCalls: 1 }),
+        { adapter: null },
+      )
+      assert.equal(result.cases[0].repeats[0].status, 'unsupported')
+      assert.deepEqual(result.cases[0].repeats[0].error, { kind: 'unsupported-settings', status: null })
+      assert.equal(result.metadata.completedCalls, 0)
+      assert.equal(result.cases[0].repeats[0].rounds[0].rawText, null)
+    } finally {
+      if (previousMode === undefined) delete process.env.POPT_FAKE_ADAPTER_MODE
+      else process.env.POPT_FAKE_ADAPTER_MODE = previousMode
+    }
+  }
 })
 
 test('supplied credential-shaped data is refused before any call', async () => {
@@ -361,7 +411,7 @@ test('supplied credential-shaped data is refused before any call', async () => {
 test('a credential-shaped live response is redacted and marks the run non-comparable', async () => {
   const text = JSON.stringify({ draft: `token ${AWS_KEY}`, message: 'm', question: null, options: [] })
   const result = await run([makeCase()], args({ mode: 'live', adapter: '/tmp/fake.mjs', model: 'm', maxCalls: 1 }), {
-    adapter: stubAdapter(async () => ({ text, modelId: 'actual-model' })),
+    adapter: stubAdapter(async () => ({ text, modelId: 'actual-model', settingsApplied: { ...APPLIED } })),
   })
   assert.equal(result.metadata.comparable, false)
   assert.equal(result.metadata.sensitiveFindings.length, 1)

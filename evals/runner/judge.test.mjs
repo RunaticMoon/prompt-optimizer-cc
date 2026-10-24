@@ -130,14 +130,24 @@ test('a rule for a round that never ran is not-applicable, never a pass', () => 
   assert.equal(episode.ruleNotApplicable, 1)
 })
 
-test('a missing reply fails applicable rules and counts a parse failure', () => {
+test('a missing reply fails applicable rules; only raw-text rounds count as parse failures', () => {
   const episode = gradeEpisode({
-    replies: [{ round: 1, reply: null }],
+    replies: [{ round: 1, reply: null, rawText: '{"draft":' }],
     rules: [rule({ kind: 'questionNull' }), rule({ id: 'r2', kind: 'jsonContract' })],
   })
   assert.equal(episode.parseFailures, 1)
   assert.equal(episode.ruleFailures, 2)
   assert.ok(episode.judgments.every(item => item.reason === 'reply-unavailable'))
+
+  const transport = gradeEpisode({
+    replies: [
+      { round: 1, reply: null, rawText: null },
+      { round: 2, reply: null, rawText: '' },
+    ],
+    rules: [rule({ kind: 'questionNull' })],
+  })
+  assert.equal(transport.parseFailures, 0)
+  assert.equal(transport.ruleFailures, 1)
 })
 
 test('gradeRound only applies final rules when final is set', () => {
@@ -162,29 +172,37 @@ function review(overrides = {}) {
   }
 }
 
+const RAW_TEXT = '{"draft":"로그인 오류를 조사해줘.","message":"범위를 유지했습니다.","question":null,"options":[]}'
+
+function repeatWithRounds() {
+  return { repeat: 1, rounds: [{ round: 1, rawText: RAW_TEXT }] }
+}
+
+const CASE_CONSTRAINTS = [{ id: 'keep-login', kind: 'mustInclude', description: 'd', severity: 'critical' }]
+
 test('mergeHumanReview validates the minimum consumed fields', () => {
-  const merged = mergeHumanReview({ repeat: 1 }, review(), {
+  const merged = mergeHumanReview(repeatWithRounds(), review(), {
     caseId: 'case-a',
     caseHash: 'a'.repeat(64),
   })
   assert.equal(merged.humanReview.reviewerId, 'reviewer-a')
 
   assert.throws(
-    () => mergeHumanReview({ repeat: 1 }, review({ caseId: 'other' }), { caseId: 'case-a' }),
+    () => mergeHumanReview(repeatWithRounds(), review({ caseId: 'other' }), { caseId: 'case-a' }),
     JudgeError,
   )
   assert.throws(
-    () => mergeHumanReview({ repeat: 1 }, review({ repeat: 2 }), { caseId: 'case-a' }),
+    () => mergeHumanReview(repeatWithRounds(), review({ repeat: 2 }), { caseId: 'case-a' }),
     /repeat does not match/,
   )
   assert.throws(
-    () => mergeHumanReview({ repeat: 1 }, review({ reviews: [] }), {}),
+    () => mergeHumanReview(repeatWithRounds(), review({ reviews: [] }), {}),
     /at least one criterion/,
   )
   assert.throws(
     () =>
       mergeHumanReview(
-        { repeat: 1 },
+        repeatWithRounds(),
         review({ reviews: [{ criterionId: 'unknown', verdict: 'pass', quote: 'x', reason: 'y' }] }),
         {},
       ),
@@ -193,12 +211,122 @@ test('mergeHumanReview validates the minimum consumed fields', () => {
   assert.throws(
     () =>
       mergeHumanReview(
-        { repeat: 1 },
+        repeatWithRounds(),
         review({ reviews: [{ criterionId: 'scope-addition', verdict: 'fail', quote: '', reason: 'y' }] }),
         {},
       ),
     /requiredCondition/,
   )
+})
+
+test('mergeHumanReview rejects a quote that is not verbatim round rawText', () => {
+  const paraphrased = review({
+    reviews: [{ criterionId: 'constraint-omission', verdict: 'pass', quote: '로그인 문제를 확인했습니다', reason: 'r' }],
+  })
+  assert.throws(
+    () => mergeHumanReview(repeatWithRounds(), paraphrased, { caseId: 'case-a' }),
+    /quote does not appear in this repeat's round rawText/,
+  )
+  assert.throws(
+    () => mergeHumanReview({ repeat: 1, rounds: [] }, review(), { caseId: 'case-a' }),
+    /quote does not appear/,
+  )
+
+  const merged = mergeHumanReview(
+    repeatWithRounds(),
+    review({
+      reviews: [
+        {
+          criterionId: 'constraint-omission',
+          verdict: 'fail',
+          quote: '',
+          reason: '그 조건을 뒷받침하는 출력 문장을 찾지 못했다',
+          requiredCondition: '최종 초안에 로그인 범위가 남아 있어야 한다',
+        },
+      ],
+    }),
+    { caseId: 'case-a' },
+  )
+  assert.equal(merged.humanReview.reviews[0].requiredCondition.includes('로그인'), true)
+})
+
+test('mergeHumanReview rejects duplicate criterion items', () => {
+  const duplicated = review({
+    reviews: [
+      { criterionId: 'scope-addition', verdict: 'pass', quote: '범위를 유지했습니다.', reason: 'r' },
+      { criterionId: 'scope-addition', verdict: 'fail', quote: '', requiredCondition: 'x', reason: 'r' },
+    ],
+  })
+  assert.throws(() => mergeHumanReview(repeatWithRounds(), duplicated, {}), /repeats scope-addition/)
+
+  const perConstraint = review({
+    reviews: [
+      {
+        criterionId: 'constraint-omission',
+        constraintId: 'keep-login',
+        verdict: 'pass',
+        quote: '로그인 오류를 조사해줘.',
+        reason: 'r',
+      },
+      {
+        criterionId: 'constraint-omission',
+        constraintId: 'keep-scope',
+        verdict: 'pass',
+        quote: '범위를 유지했습니다.',
+        reason: 'r',
+      },
+    ],
+  })
+  const merged = mergeHumanReview(repeatWithRounds(), perConstraint, {
+    constraints: [...CASE_CONSTRAINTS, { id: 'keep-scope', kind: 'mustPreserve', description: 'd', severity: 'major' }],
+  })
+  assert.equal(merged.humanReview.reviews.length, 2)
+})
+
+test('mergeHumanReview validates constraintId against the case constraints', () => {
+  assert.throws(
+    () =>
+      mergeHumanReview(
+        repeatWithRounds(),
+        review({
+          reviews: [
+            { criterionId: 'scope-addition', constraintId: 'keep-login', verdict: 'pass', quote: 'q', reason: 'r' },
+          ],
+        }),
+        { constraints: CASE_CONSTRAINTS },
+      ),
+    /constraintId is only valid for constraint-omission/,
+  )
+  assert.throws(
+    () =>
+      mergeHumanReview(
+        repeatWithRounds(),
+        review({
+          reviews: [
+            { criterionId: 'constraint-omission', constraintId: 'made-up', verdict: 'pass', quote: 'q', reason: 'r' },
+          ],
+        }),
+        { constraints: CASE_CONSTRAINTS },
+      ),
+    /constraintId does not name a constraint of this case/,
+  )
+
+  const merged = mergeHumanReview(
+    repeatWithRounds(),
+    review({
+      reviews: [
+        {
+          criterionId: 'constraint-omission',
+          constraintId: 'keep-login',
+          verdict: 'pass',
+          quote: '로그인 오류를 조사해줘.',
+          reason: 'r',
+        },
+      ],
+    }),
+    { constraints: CASE_CONSTRAINTS },
+  )
+  assert.equal(merged.humanReview.reviews[0].constraintId, 'keep-login')
 })
 
 test('review criteria are the documented set', () => {

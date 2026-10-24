@@ -185,16 +185,6 @@ test('metadata hashes the composed guidance and each production source file', as
   const hashes = await requests.metadata.sourceHashes()
   assert.deepEqual(Object.keys(hashes), requests.metadata.sourceFiles)
   for (const hash of Object.values(hashes)) assert.match(hash, /^[a-f0-9]{64}$/)
-
-  assert.deepEqual(requests.metadata.requestedSettings(settings({ model: 'explicit-model' })), {
-    model: 'explicit-model',
-    guidanceProfile: 'common',
-    maxRounds: 2,
-    maxTokens: 1024,
-    timeoutMs: 10000,
-    cache: false,
-    effort: requests.metadata.effort,
-  })
 })
 
 test('the runner works from a fresh copy with only hooks, runner files and package.json', async () => {

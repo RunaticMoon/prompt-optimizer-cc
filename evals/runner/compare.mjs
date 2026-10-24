@@ -13,7 +13,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { escapeMarkdownCell, summarizeRun } from './report.mjs'
+import { escapeMarkdownCell, isParseFailureRound, summarizeRun } from './report.mjs'
 
 export const COMPARISON_VERSION = 1
 export const ALLOWED_CHANGES = ['guidance', 'model', 'settings']
@@ -104,6 +104,22 @@ function corpusHash(run) {
   return createHash('sha256').update(signature, 'utf8').digest('hex')
 }
 
+/**
+ * A reason the run must not be used as paired evidence, or null. A run whose
+ * output was redacted or otherwise marked non-comparable can never back a
+ * comparison, so comparison fails closed on it.
+ */
+function comparabilityProblem(run, label) {
+  if (run.metadata.comparable === false) {
+    return `${label} is marked comparable:false`
+  }
+  const findings = run.metadata.sensitiveFindings
+  if (Array.isArray(findings) && findings.length > 0) {
+    return `${label} records ${findings.length} sensitive finding(s)`
+  }
+  return null
+}
+
 function pairIndex(run) {
   const index = new Map()
   for (const caseItem of run.cases) {
@@ -127,28 +143,41 @@ function judgmentMap(repeat) {
   return map
 }
 
+/**
+ * Review denominators count distinct constraints and episodes, not review
+ * items: duplicate items must not inflate a rate beyond 1. Constraint items
+ * are keyed by `constraintId` when the reviewer recorded one.
+ */
 function reviewCounts(repeat) {
   const review = repeat.humanReview
   if (!isPlainObject(review) || !Array.isArray(review.reviews)) {
     return { reviewed: false, constraints: null, omissions: null, scope: null, additions: null, unnecessary: null }
   }
-  let constraints = 0
-  let omissions = 0
-  let scope = 0
-  let additions = 0
+  const constraintKeys = new Set()
+  const failedConstraintKeys = new Set()
+  let scopeReviewed = false
+  let scopeFailed = false
   let unnecessary = 0
   for (const item of review.reviews) {
     if (item.criterionId === 'constraint-omission' && (item.verdict === 'pass' || item.verdict === 'fail')) {
-      constraints += 1
-      if (item.verdict === 'fail') omissions += 1
+      const key = typeof item.constraintId === 'string' && item.constraintId !== '' ? item.constraintId : '(unkeyed)'
+      constraintKeys.add(key)
+      if (item.verdict === 'fail') failedConstraintKeys.add(key)
     }
     if (item.criterionId === 'scope-addition' && (item.verdict === 'pass' || item.verdict === 'fail')) {
-      scope += 1
-      if (item.verdict === 'fail') additions += 1
+      scopeReviewed = true
+      if (item.verdict === 'fail') scopeFailed = true
     }
     if (item.criterionId === 'unnecessary-question' && item.verdict === 'fail') unnecessary += 1
   }
-  return { reviewed: true, constraints, omissions, scope, additions, unnecessary }
+  return {
+    reviewed: true,
+    constraints: constraintKeys.size,
+    omissions: failedConstraintKeys.size,
+    scope: scopeReviewed ? 1 : 0,
+    additions: scopeFailed ? 1 : 0,
+    unnecessary,
+  }
 }
 
 function durations(repeat) {
@@ -199,11 +228,36 @@ function p90(values) {
   return sorted[Math.max(0, Math.ceil(0.9 * sorted.length) - 1)]
 }
 
+/** Version identity for one side, so a report can name what was compared. */
+function sideMetadata(run) {
+  const metadata = run.metadata
+  return {
+    repoSha: metadata.repoSha ?? null,
+    dirty: metadata.dirty ?? null,
+    packageVersion: metadata.packageVersion ?? null,
+    nodeVersion: metadata.nodeVersion ?? null,
+    runnerVersion: metadata.runnerVersion ?? null,
+    schemaVersion: metadata.schemaVersion ?? null,
+    rubricVersion: metadata.rubricVersion ?? null,
+    guidanceProfiles: Object.fromEntries(
+      Object.entries(metadata.guidance?.profiles ?? {}).map(([profile, value]) => [
+        profile,
+        isPlainObject(value) ? value.version ?? null : null,
+      ]),
+    ),
+    model: {
+      requested: metadata.model?.requested ?? null,
+      actual: metadata.model?.actual ?? null,
+    },
+  }
+}
+
 function sideSummary(run) {
   const summary = summarizeRun(run)
   return {
     mode: summary.mode,
     suite: summary.suite,
+    metadata: sideMetadata(run),
     statusCounts: statusCounts(run),
     rulePasses: summary.totals.rulePasses,
     ruleFailures: summary.totals.ruleFailures,
@@ -234,6 +288,13 @@ export function compareRuns(baseline, candidate, { allowChange = [] } = {}) {
   const candMeta = candidate.metadata
   const changedDimensions = []
   const unresolved = []
+
+  for (const [label, run] of [['baseline', baseline], ['candidate', candidate]]) {
+    const problem = comparabilityProblem(run, label)
+    if (problem !== null) {
+      fail(`${problem}; redacted or contaminated output cannot be presented as paired comparison evidence`)
+    }
+  }
 
   if (baseMeta.schemaVersion !== candMeta.schemaVersion) fail('result schemaVersion differs')
   if (baseMeta.runnerVersion !== candMeta.runnerVersion) fail('runner version differs')
@@ -354,7 +415,7 @@ export function compareRuns(baseline, candidate, { allowChange = [] } = {}) {
         completedRounds: (base.repeat.rounds ?? []).filter(round => isPlainObject(round.reply)).length,
         rulePasses: [...baseRules.values()].filter(item => item.status === 'pass').length,
         ruleFailures: [...baseRules.values()].filter(item => item.status === 'fail').length,
-        parseFailures: (base.repeat.rounds ?? []).filter(round => !isPlainObject(round.reply)).length,
+        parseFailures: (base.repeat.rounds ?? []).filter(isParseFailureRound).length,
         usage: usageTotals(base.repeat),
         reviews: baseReview,
       },
@@ -365,7 +426,7 @@ export function compareRuns(baseline, candidate, { allowChange = [] } = {}) {
         completedRounds: (cand.repeat.rounds ?? []).filter(round => isPlainObject(round.reply)).length,
         rulePasses: [...candRules.values()].filter(item => item.status === 'pass').length,
         ruleFailures: [...candRules.values()].filter(item => item.status === 'fail').length,
-        parseFailures: (cand.repeat.rounds ?? []).filter(round => !isPlainObject(round.reply)).length,
+        parseFailures: (cand.repeat.rounds ?? []).filter(isParseFailureRound).length,
         usage: usageTotals(cand.repeat),
         reviews: candReview,
       },
@@ -400,7 +461,9 @@ export function compareRuns(baseline, candidate, { allowChange = [] } = {}) {
         ? 'pipeline/rule rehearsal only — no semantic-quality conclusion'
         : 'lexical/structural comparison only; human semantic review is required',
     compatibility: {
-      comparable: true,
+      comparable:
+        comparabilityProblem(baseline, 'baseline') === null &&
+        comparabilityProblem(candidate, 'candidate') === null,
       confounded: changedDimensions.length > 0,
       changedDimensions,
       changedSettings: settingsChanges,
@@ -485,6 +548,28 @@ export function renderComparisonMarkdown(comparison) {
     lines.push('')
   }
 
+  const baseId = comparison.baseline.metadata
+  const candId = comparison.candidate.metadata
+  lines.push('## 버전·실행 조건')
+  lines.push('')
+  lines.push('| 항목 | 기준 | 변경 |')
+  lines.push('|---|---|---|')
+  lines.push(`| 저장소 SHA | ${escapeMarkdownCell(baseId.repoSha ?? 'unknown')} | ${escapeMarkdownCell(candId.repoSha ?? 'unknown')} |`)
+  lines.push(`| 저장소 상태 | ${formatDirty(baseId.dirty)} | ${formatDirty(candId.dirty)} |`)
+  lines.push(`| 패키지 버전 | ${escapeMarkdownCell(baseId.packageVersion ?? 'unknown')} | ${escapeMarkdownCell(candId.packageVersion ?? 'unknown')} |`)
+  lines.push(`| Node | ${escapeMarkdownCell(baseId.nodeVersion ?? 'unknown')} | ${escapeMarkdownCell(candId.nodeVersion ?? 'unknown')} |`)
+  lines.push(
+    `| 러너·스키마·루브릭 버전 | ${escapeMarkdownCell(sideVersions(baseId))} | ${escapeMarkdownCell(sideVersions(candId))} |`,
+  )
+  lines.push(`| 요청 모델 | ${escapeMarkdownCell(baseId.model.requested ?? 'none')} | ${escapeMarkdownCell(candId.model.requested ?? 'none')} |`)
+  lines.push(`| 실제 모델 | ${escapeMarkdownCell(baseId.model.actual ?? 'unknown')} | ${escapeMarkdownCell(candId.model.actual ?? 'unknown')} |`)
+  for (const profile of [...new Set([...Object.keys(baseId.guidanceProfiles), ...Object.keys(candId.guidanceProfiles)])].sort()) {
+    lines.push(
+      `| guidance ${escapeMarkdownCell(profile)} | ${escapeMarkdownCell(baseId.guidanceProfiles[profile] ?? 'unknown')} | ${escapeMarkdownCell(candId.guidanceProfiles[profile] ?? 'unknown')} |`,
+    )
+  }
+  lines.push('')
+
   const summary = comparison.summary
   lines.push('## 집계')
   lines.push('')
@@ -499,10 +584,10 @@ export function renderComparisonMarkdown(comparison) {
   lines.push(`| 개선된 쌍 / 회귀 쌍 | ${summary.improvedPairs} | ${summary.regressedPairs} |`)
   lines.push(`| 심사된 쌍 / 미심사 쌍 | ${summary.semanticReviewedPairs} | ${summary.semanticUnreviewedPairs} |`)
   lines.push(
-    `| 제약 누락률 | ${formatRate(summary.semanticRates.baselineConstraintOmissionRate)} | ${formatRate(summary.semanticRates.candidateConstraintOmissionRate)} |`,
+    `| 제약 누락률 | ${formatRateWithCounts(summary.semanticRates.baselineConstraintOmissionRate, comparison.baseline.semantic.constraintOmissions, comparison.baseline.semantic.reviewedConstraints)} | ${formatRateWithCounts(summary.semanticRates.candidateConstraintOmissionRate, comparison.candidate.semantic.constraintOmissions, comparison.candidate.semantic.reviewedConstraints)} |`,
   )
   lines.push(
-    `| 범위 추가율 | ${formatRate(summary.semanticRates.baselineScopeAdditionRate)} | ${formatRate(summary.semanticRates.candidateScopeAdditionRate)} |`,
+    `| 범위 추가율 | ${formatRateWithCounts(summary.semanticRates.baselineScopeAdditionRate, comparison.baseline.semantic.scopeAdditions, comparison.baseline.semantic.reviewedScopeEpisodes)} | ${formatRateWithCounts(summary.semanticRates.candidateScopeAdditionRate, comparison.candidate.semantic.scopeAdditions, comparison.candidate.semantic.reviewedScopeEpisodes)} |`,
   )
   lines.push('')
   lines.push('의미 비율이 N/A이면 심사되지 않은 것이며 0이 아닙니다.')
@@ -558,6 +643,20 @@ function formatRate(value) {
   return value === null ? 'N/A' : `${(value * 100).toFixed(1)}%`
 }
 
+/** A rate is always shown with its raw numerator and denominator. */
+function formatRateWithCounts(rate, numerator, denominator) {
+  const counts = `(${numerator ?? 0}/${denominator ?? 0})`
+  return rate === null ? `N/A ${counts}` : `${formatRate(rate)} ${counts}`
+}
+
+function formatDirty(value) {
+  return value === true ? 'dirty' : value === false ? 'clean' : 'unknown'
+}
+
+function sideVersions(side) {
+  return `${side.runnerVersion ?? '?'}/${side.schemaVersion ?? '?'}/${side.rubricVersion ?? '?'}`
+}
+
 /** Chooses JSON or Markdown from the output extension. */
 export function formatComparison(comparison, outPath) {
   return path.extname(outPath).toLowerCase() === '.json'
@@ -579,7 +678,8 @@ export async function writeComparison(outPath, comparison) {
   return body
 }
 
-function parseCompareArgs(argv) {
+/** Parses compare argv; a following `--flag` is never taken as a value. */
+export function parseCompareArgs(argv) {
   const args = { baseline: null, candidate: null, out: null, allowChange: [], help: false }
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
@@ -587,7 +687,7 @@ function parseCompareArgs(argv) {
     const take = () => {
       if (inline !== null) return inline
       const next = argv[index + 1]
-      if (next === undefined) fail(`${flag} expects a value`)
+      if (next === undefined || next.startsWith('--')) fail(`${flag} expects a value`)
       index += 1
       return next
     }

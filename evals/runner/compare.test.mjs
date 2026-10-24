@@ -10,6 +10,7 @@ import {
   CompareError,
   compareRuns,
   formatComparison,
+  parseCompareArgs,
   renderComparisonMarkdown,
   validateResult,
   writeComparison,
@@ -151,6 +152,18 @@ test('mock and live results never compare', () => {
   )
 })
 
+test('a non-comparable result is refused instead of presented as paired evidence', () => {
+  const marked = result()
+  marked.metadata.comparable = false
+  assert.throws(() => compareRuns(marked, result()), /baseline is marked comparable:false/)
+  assert.throws(() => compareRuns(result(), marked), /candidate is marked comparable:false/)
+
+  const findings = result()
+  findings.metadata.sensitiveFindings = [{ caseId: 'case-a', repeat: 1, round: 1, location: 'adapter-response', kinds: ['aws-key'] }]
+  assert.throws(() => compareRuns(result(), findings), /candidate records 1 sensitive finding/)
+  assert.throws(() => compareRuns(findings, result()), /baseline records 1 sensitive finding/)
+})
+
 test('different corpus hashes and suites are rejected', () => {
   assert.throws(
     () => compareRuns(result(), result({ corpusHash: 'd'.repeat(64) })),
@@ -221,6 +234,7 @@ test('unreviewed semantic data compares as N/A, and reviewed data uses raw denom
   assert.equal(unreviewed.summary.semanticReviewedPairs, 0)
   assert.equal(unreviewed.summary.semanticRates.baselineConstraintOmissionRate, null)
   assert.ok(unreviewed.compatibility.unresolved.some(item => /semantic review missing/.test(item)))
+  assert.match(renderComparisonMarkdown(unreviewed), /제약 누락률 \| N\/A \(0\/0\) \| N\/A \(0\/0\)/)
 
   const reviewed = compareRuns(
     result({ review: review({ constraint: 'fail', scope: 'fail' }) }),
@@ -231,6 +245,60 @@ test('unreviewed semantic data compares as N/A, and reviewed data uses raw denom
   assert.equal(reviewed.summary.semanticRates.candidateConstraintOmissionRate, 0)
   assert.equal(reviewed.summary.semanticRates.baselineScopeAdditionRate, 1)
   assert.equal(reviewed.summary.semanticRates.candidateScopeAdditionRate, 0)
+})
+
+test('the comparison records version identity for both sides', () => {
+  const baseline = result()
+  const candidate = result()
+  candidate.metadata.repoSha = 'def456'
+  candidate.metadata.dirty = true
+  candidate.metadata.packageVersion = '0.14.0'
+  candidate.metadata.model = { requested: 'model-b', actual: null }
+  const comparison = compareRuns(baseline, candidate, { allowChange: ['model'] })
+  assert.equal(comparison.baseline.metadata.repoSha, 'abc123')
+  assert.equal(comparison.baseline.metadata.dirty, false)
+  assert.equal(comparison.baseline.metadata.packageVersion, '0.13.0')
+  assert.deepEqual(comparison.baseline.metadata.guidanceProfiles, { common: 'f'.repeat(64) })
+  assert.equal(comparison.candidate.metadata.repoSha, 'def456')
+  assert.equal(comparison.candidate.metadata.dirty, true)
+  assert.equal(comparison.candidate.metadata.model.requested, 'model-b')
+
+  const markdown = renderComparisonMarkdown(comparison)
+  assert.match(markdown, /## 버전·실행 조건/)
+  assert.match(markdown, /\| 저장소 SHA \| abc123 \| def456 \|/)
+  assert.match(markdown, /\| 저장소 상태 \| clean \| dirty \|/)
+  assert.match(markdown, /\| 패키지 버전 \| 0\.13\.0 \| 0\.14\.0 \|/)
+  assert.match(markdown, /\| 러너·스키마·루브릭 버전 \| 1\/1\/1 \| 1\/1\/1 \|/)
+  assert.match(markdown, /\| 요청 모델 \| none \| model-b \|/)
+  assert.match(markdown, /\| 실제 모델 \| unknown \| unknown \|/)
+  assert.match(markdown, new RegExp(`\\| guidance common \\| ${'f'.repeat(64)} \\| ${'f'.repeat(64)} \\|`))
+})
+
+test('semantic rates in the markdown carry their raw numerators and denominators', () => {
+  const reviewed = compareRuns(
+    result({ review: review({ constraint: 'fail', scope: 'pass' }) }),
+    result({ review: review({ constraint: 'fail', scope: 'fail' }) }),
+  )
+  const markdown = renderComparisonMarkdown(reviewed)
+  assert.match(markdown, /제약 누락률 \| 100\.0% \(1\/1\) \| 100\.0% \(1\/1\)/)
+  assert.match(markdown, /범위 추가율 \| 0\.0% \(0\/1\) \| 100\.0% \(1\/1\)/)
+})
+
+test('review denominators count distinct constraints and episodes, not review items', () => {
+  const duplicated = review()
+  duplicated.reviews = [
+    { criterionId: 'constraint-omission', constraintId: 'c1', verdict: 'pass', quote: 'q', reason: 'r' },
+    { criterionId: 'constraint-omission', constraintId: 'c1', verdict: 'fail', quote: '', requiredCondition: 'x', reason: 'r' },
+    { criterionId: 'scope-addition', verdict: 'fail', quote: '', requiredCondition: 'y', reason: 'r' },
+    { criterionId: 'scope-addition', verdict: 'fail', quote: '', requiredCondition: 'z', reason: 'r' },
+  ]
+  const comparison = compareRuns(result({ review: duplicated }), result({ review: duplicated }))
+  assert.equal(comparison.pairs[0].baseline.reviews.constraints, 1)
+  assert.equal(comparison.pairs[0].baseline.reviews.omissions, 1)
+  assert.equal(comparison.pairs[0].baseline.reviews.scope, 1)
+  assert.equal(comparison.pairs[0].baseline.reviews.additions, 1)
+  assert.equal(comparison.summary.semanticRates.baselineConstraintOmissionRate, 1)
+  assert.equal(comparison.summary.semanticRates.baselineScopeAdditionRate, 1)
 })
 
 test('comparison markdown escapes hostile model-derived text', () => {
@@ -290,4 +358,25 @@ test('validateResult rejects unrelated formats and unknown allow-change dimensio
     () => compareRuns(result(), result(), { allowChange: ['rubric'] }),
     /unknown --allow-change/,
   )
+})
+
+test('compare args never take a following flag as a value', () => {
+  assert.throws(
+    () => parseCompareArgs(['--baseline', '--candidate', 'c.json', '--out', 'o.md']),
+    /--baseline expects a value/,
+  )
+  assert.throws(
+    () => parseCompareArgs(['--baseline', 'b.json', '--candidate', 'c.json', '--allow-change', '--out', 'o.md']),
+    /--allow-change expects a value/,
+  )
+  const parsed = parseCompareArgs([
+    '--baseline', 'b.json',
+    '--candidate', 'c.json',
+    '--out', 'o.md',
+    '--allow-change', 'guidance',
+  ])
+  assert.equal(parsed.baseline, 'b.json')
+  assert.equal(parsed.candidate, 'c.json')
+  assert.equal(parsed.out, 'o.md')
+  assert.deepEqual(parsed.allowChange, ['guidance'])
 })

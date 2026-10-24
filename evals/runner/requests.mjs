@@ -103,7 +103,6 @@ export async function createRequests({ root, runtime } = {}) {
     nodeVersion: hooks.runtime.version,
     checkoutRoot,
     sourceFiles: [...SOURCE_FILES],
-    effort: hooks.contracts.DEFAULT_EFFORT,
     composeSystemPrompt,
     /** SHA-256 of the exact system text for a guidance profile. */
     guidanceVersion(profile) {
@@ -116,18 +115,6 @@ export async function createRequests({ root, runtime } = {}) {
         hashes[file] = sha256(await readFile(path.join(checkoutRoot, file), 'utf8'))
       }
       return hashes
-    },
-    /** The settings actually requested from a transport, for the result record. */
-    requestedSettings(settings) {
-      return {
-        model: settings.model === undefined ? null : settings.model,
-        guidanceProfile: settings.guidanceProfile,
-        maxRounds: settings.maxRounds,
-        maxTokens: settings.maxTokens,
-        timeoutMs: settings.timeoutMs,
-        cache: settings.cache === true,
-        effort: hooks.contracts.DEFAULT_EFFORT,
-      }
     },
   }
 

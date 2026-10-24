@@ -139,14 +139,15 @@ export function normalizeUsage(raw) {
 /**
  * Validates what a live adapter reports as applied. `settingsApplied` is an
  * observation: a mismatched maxTokens/effort/cache means the transport
- * silently dropped or changed a requested setting, so the call fails as
- * unsupported instead of being recorded as successful.
+ * silently dropped or changed a requested setting, and a missing
+ * `settingsApplied` (or a missing key) means nothing proves the settings were
+ * applied. Both fail as unsupported instead of being recorded as successful,
+ * so a silent transport can never pass as a verified call.
  */
 export function normalizeAppliedSettings(request, response) {
   const raw = response?.settingsApplied
-  if (raw === undefined || raw === null) return { known: false, values: null }
-  if (typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new UnsupportedSettingsError('settingsApplied must be an object')
+  if (raw === undefined || raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new UnsupportedSettingsError('adapter did not report settingsApplied for the request')
   }
   const expected = {
     maxTokens: request.maxTokens,
@@ -154,7 +155,10 @@ export function normalizeAppliedSettings(request, response) {
     cache: Array.isArray(request.prompt),
   }
   for (const [key, value] of Object.entries(expected)) {
-    if (Object.prototype.hasOwnProperty.call(raw, key) && raw[key] !== value) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) {
+      throw new UnsupportedSettingsError(`adapter did not report whether ${key} was applied`)
+    }
+    if (raw[key] !== value) {
       throw new UnsupportedSettingsError(`adapter applied an unexpected ${key}`)
     }
   }

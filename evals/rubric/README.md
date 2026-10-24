@@ -49,7 +49,7 @@
 
 ## 심사 기록 형식
 
-`review-schema.json`은 기록 형식을 설명하는 JSON Schema입니다. 실행기는 이 파일로 일반 JSON Schema 검증을 수행하지 않고, `result.cases[].repeats[].humanReview`에 병합할 때 `reviewVersion`·`caseId`·`caseHash`·`repeat`·`reviews[].criterionId`·`verdict`만 최소한으로 확인합니다.
+`review-schema.json`은 기록 형식을 설명하는 JSON Schema입니다. 실행기는 이 파일로 일반 JSON Schema 검증을 수행하지 않고, `result.cases[].repeats[].humanReview`에 병합할 때(`evals/runner/judge.mjs`의 `mergeHumanReview`) `reviewVersion`·`caseId`·`caseHash`·`repeat`·`reviews[].criterionId`·`verdict`를 확인하고, 그 위에서 `quote`가 해당 반복의 라운드 `rawText`에 그대로 나타나는지, 같은 기준(`criterionId`와 `constraint-omission`의 `constraintId`) 항목이 중복되지 않는지, `constraintId`가 사례의 제약 id 중 하나인지를 검사합니다. 어긋나면 기록은 병합되지 않습니다. 병합 방법은 `evals/README.md`의 사람 심사 병합 절을 참고합니다.
 
 ```json
 {

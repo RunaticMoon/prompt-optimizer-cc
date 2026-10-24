@@ -13,6 +13,13 @@
 - Node **>= 24.12** (네이티브 TypeScript 타입 스트리핑과 동기 `module.registerHooks` 사용). npm 의존성·빌드 단계·생성된 타입 선언은 필요하지 않습니다.
 - 실제 모델 실행은 기본 경로가 아닙니다. `--live`와 신뢰하는 로컬 어댑터를 명시해야만 합니다.
 
+## 실행기 단위 테스트
+
+```bash
+# 실행기만 독립 테스트 (npm test나 CI에는 포함되지 않음)
+node --test evals/runner/
+```
+
 ## 명령
 
 ```bash
@@ -28,7 +35,7 @@ node evals/runner/run.mjs --mock --suite holdout --repeats 1 --out /tmp/popt-eva
 node evals/runner/compare.mjs --baseline /tmp/base.json --candidate /tmp/change.json --out /tmp/comparison.md
 ```
 
-`--out`은 **배타적 생성**입니다. 이미 있는 파일을 덮어쓰지 않으며, 결과 JSON은 상세 trace를 담습니다. `--out`이 없으면 표준출력에는 집계 요약만 나옵니다.
+`--out`은 **배타적 생성**입니다. 이미 있는 파일을 덮어쓰지 않으며, 첫 어댑터 호출·첫 실행 전에 경로를 선점합니다. 그래서 live 실행이 호출을 소비한 뒤에 출력 경로 충돌로 결과를 버리는 일이 없고, 실행이 끝까지 가지 못하면 선점 파일은 다시 지워집니다. 결과 JSON은 상세 trace를 담습니다. `--out`이 없으면 표준출력에는 집계 요약만 나옵니다.
 
 ### 실제 모델 실행 (설계만, 이 저장소에서 실행하지 않음)
 
@@ -83,7 +90,8 @@ node evals/runner/run.mjs --live \
 ```
 
 - `context.text`는 사용자의 실제 저장소·세션이 아니라 **합성 근거**입니다. 실행기는 이 텍스트를 그대로 `buildModelRequest`에 넣습니다.
-- `answers`는 모델이 `question`을 반환한 뒤에만 다음 라운드로 전달됩니다. `when.questionIncludes`/`when.option1Includes`가 맞지 않으면 `scenario-diverged`로 멈추고 사용자의 선택을 지어내지 않습니다.
+- `answers`는 모델이 `question`을 반환한 뒤에만 다음 라운드로 전달됩니다. `when.questionIncludes`/`when.option1Includes`가 맞지 않으면 `scenario-diverged`로 멈추고 사용자의 선택을 지어내지 않습니다. 이때 시도한 답변 텍스트와 게이트 조건, 모델이 실제로 반환한 질문·첫 선택지가 `round.answerAttempted`와 반복 `error`에 기록되어 진단에 쓰입니다.
+- `answers`마다 **답변 뒤의 응답**이 필요합니다. 스키마는 `mockResponses.length >= answers.length + 1`을 요구하므로, 마지막 답변을 먹인 뒤 실행할 라운드가 없어 실행 중 `mock-response-missing`으로 실패하는 사례는 로딩 시점에 거부됩니다.
 - `rules`는 `includes`, `excludes`, `questionNull`, `questionPresent`, `maxOptions`, `jsonContract`만 지원합니다. 범위는 정수 라운드, `each`, `final`입니다. 정규식·eval·외부 URL은 없습니다.
 - `constraints`는 사람 심사용이며 모델에 보내지 않습니다. 최소 하나는 `critical`/`major`여야 합니다.
 - `mockResponses`는 해당 사례에서 새로 실행할 라운드 수보다 많을 수 없습니다. 질문이 `null`이면 에피소드가 일찍 끝납니다.
@@ -99,6 +107,41 @@ node evals/runner/run.mjs --live \
 | `--live` | 명시적 어댑터 1회 호출 | 실제 모델/provider 동작은 별도 검증 필요 |
 
 mock 보고서에는 항상 **pipeline/rule rehearsal only — no semantic-quality conclusion**이 표시됩니다. 규칙 실패는 동의어 누락을 자동으로 의미 누락으로 판정하지 않습니다. 심사되지 않은 의미 비율은 `N/A`이며 0이 아닙니다.
+
+파싱 실패는 **모델 원문 텍스트가 존재했지만 파싱에 실패한 라운드**만 셉니다. 타임아웃·어댑터 오류·mock 응답 누락처럼 원문 자체가 없는 전송 실패는 파싱 실패에 섞이지 않고 에피소드 상태(`timeout`, `failed`, `unsupported`)와 실패 버킷으로 별도 집계됩니다.
+
+## 사람 심사 병합 (라이브러리 함수)
+
+사람 심사 기록을 결과 JSON의 `cases[].repeats[].humanReview`에 붙이는 것은 실행기의 라이브러리 함수이며 v1에는 전용 CLI가 없습니다. `evals/runner/judge.mjs`의 `mergeHumanReview(repeat, review, options)`를 호출합니다. 함수는 다음을 검증하고 어긋나면 `JudgeError`로 거부합니다.
+
+- `reviewVersion: 1`, `caseId`/`caseHash`/`repeat` 일치, `reviewerId`·`blindLabel`·`reviewedAt` 존재
+- `quote`가 이 반복의 어느 라운드 `rawText`에 **그대로** 나타나는지 (JSON 이스케이프가 섞인 문자열이 아닌 평문 인용)
+- 같은 기준(`criterionId` + `constraint-omission`의 `constraintId`) 항목의 중복 거부 — 비율 분모가 심사 항목 수로 부풀지 않도록
+- `constraintId`가 `constraint-omission`에서만 쓰이고, `constraints`를 넘겼다면 그 사례의 제약 id 중 하나인지
+
+호출 예시 (임시 스크립트나 `node --input-type=module -e`로 실행):
+
+```js
+import { readFile, writeFile } from 'node:fs/promises'
+import { mergeHumanReview } from './evals/runner/judge.mjs'
+
+const resultPath = process.argv[2]
+const result = JSON.parse(await readFile(resultPath, 'utf8'))
+const review = JSON.parse(await readFile(process.argv[3], 'utf8'))
+const caseRecord = result.cases.find(item => item.caseId === review.caseId)
+const repeat = caseRecord?.repeats.find(item => item.repeat === review.repeat)
+if (caseRecord === undefined || repeat === undefined) throw new Error('심사 대상 반복이 결과에 없습니다')
+if (repeat.humanReview !== null) throw new Error('이 반복에는 이미 심사가 병합되어 있습니다')
+const merged = mergeHumanReview(repeat, review, {
+  caseId: caseRecord.caseId,
+  caseHash: caseRecord.caseHash,
+  constraints: caseRecord.constraints,
+})
+caseRecord.repeats[caseRecord.repeats.indexOf(repeat)] = merged
+await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`)
+```
+
+분모 규칙: `reviewedConstraints`는 `constraint-omission` 판정의 **서로 다른 제약 수**, `reviewedScopeEpisodes`는 `scope-addition` 판정이 있는 **에피소드 수**입니다. 병합이 중복을 거부하므로 비율이 1을 넘을 수 없고, 병합 없이 손으로 넣은 기록은 비교 보고서에서도 중복을 한 번만 셉니다.
 
 ## 결과·메타데이터
 
@@ -123,7 +166,9 @@ mock 사용량은 `{known:true, synthetic:true, counts:0}`입니다. live 응답
 
 허용된 변경은 `confounded: true`로 표시하고 어떤 설정 필드가 바뀌었는지 나열합니다. 인과적 프롬프트 개선으로 주장하지 않습니다. 실제 모델 ID가 없으면 미해결 조건으로 표시합니다. 누락된 사례를 통과로 계산하지 않으며, 완료 라운드 수 차이는 결과로 기록합니다.
 
-비교 보고서는 규칙 개선/회귀, 제약 누락률·범위 추가율의 원시 분자/분모, 질문 수, 작업당 라운드·토큰, 중앙값·p90 지연, 실패·분기·시간 초과를 구분합니다. 모델 텍스트는 Markdown 표를 깨거나 HTML을 주입하지 못하도록 escape됩니다.
+한쪽이라도 `metadata.comparable === false`이거나 `metadata.sensitiveFindings`가 비어 있지 않으면(예: live 응답에서 자격 증명 모양 텍스트를 지운 실행) 비교는 **아예 거부**됩니다. 지워지거나 오염된 출력은 짝 비교 근거로 제시될 수 없습니다. 이는 실패 닫힘(fail-closed) 동작이며 `--allow-change`로 우회할 수 없습니다.
+
+비교 보고서에는 양쪽의 버전·실행 조건 표(저장소 SHA·dirty 여부, 패키지·Node·러너/스키마/루브릭 버전, guidance 프로필 해시, 요청/실제 모델)가 들어가고, 의미 비율은 항상 원시 분자/분모 `(n/d)`와 함께 표시됩니다.
 
 ## 비밀값·출력 정책
 
@@ -136,6 +181,8 @@ mock 사용량은 `{known:true, synthetic:true, counts:0}`입니다. live 응답
 
 `holdout/`은 공개·동결 코퍼스이며 비밀이나 통계적으로 독립된 표본이 아닙니다. 개발 실행은 `holdout/`을 읽지 않고, 릴리스 평가에서만 `--suite holdout`을 명시합니다. 보류 사례 실패를 이용해 프롬프트를 조정했다면 그 사례를 `cases/`로 승격하고, 같은 도메인의 새 사례를 별도 검토로 `holdout/`에 교체합니다. 기존 ID·이력은 보존하며 코퍼스 해시가 다른 실행을 개선으로 비교하지 않습니다. 사례 수가 작으므로 통계적 유의성을 주장하지 않습니다.
 
+독립성 기록: 초기 보류 사례 `holdout-export-report-formatting`(CSV 내보내기)은 2026-10-24 리뷰에서 `docs/smoke.md`의 역사적 CSV 조정 시나리오("CSV 일괄 변경")와 도메인이 인접하다고 지적되어, 평가에 쓰인 결과가 하나도 없는 시점에 스케줄러·시간대 도메인의 `holdout-job-timezone-schedule`로 교체되었다. 교체 전 사례로 수집된 심사·비교 근거는 없으며, 코퍼스 해시가 바뀐 것은 이 기록으로 설명된다.
+
 ## 어댑터 계약과 지연된 범위
 
 ```js
@@ -146,10 +193,13 @@ export async function complete(request, { signal }) {
     usage,                // 없으면 {known:false}
     modelId,              // 실제 모델 ID(없으면 null)
     provider,             // 제공자 이름(없으면 null)
-    settingsApplied,      // 적용한 설정. maxTokens/effort/cache가 요청과 다르면 실패
+    settingsApplied,      // 필수. maxTokens/effort/cache 키를 모두 보고해야 하며
+                          // 하나라도 없거나 요청과 다르면 그 호출은 실패(unsupported)로 기록됨
   }
 }
 ```
+
+- `settingsApplied`가 없거나 `maxTokens`/`effort`/`cache` 키가 하나라도 빠지면 설정 적용을 확인할 수 없으므로, 호출은 성공으로 기록되지 않고 `unsupported`로 끝납니다. 설정을 조용히 버리는 transport가 성공으로 위장하지 못합니다.
 
 - 어댑터는 `buildModelRequest`가 만든 요청을 **한 번** 전달받습니다. 자격 증명은 어댑터의 환경/인증 기구 안에만 두고 사례 JSON·인자·stdout·보고서에 넣지 않습니다.
 - 기본 어댑터는 없습니다. `claude -p`나 유료 API를 호출하는 프로덕션 transport는 이 이슈에서 구현하지 않았습니다. 실제 인증·provider 동작·내부 재시도·의미 품질은 **검증되지 않은 별도 후속 범위**입니다.
