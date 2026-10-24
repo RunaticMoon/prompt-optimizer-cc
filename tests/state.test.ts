@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type {
+  AnswerSource,
   BypassTicket,
   ContextSnapshot,
   ModelUsage,
@@ -253,14 +254,14 @@ describe('reduce — start', () => {
   test('installs a workflow when none is active', () => {
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state(), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toBe(wf)
+    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
   })
 
   test('replaces a workflow that is already idle', () => {
     const old = workflow({ id: 'wf-old', phase: 'idle' })
     const wf = workflow({ id: 'wf-new', phase: 'idle' })
     const next = reduce(state({ workflow: old }), { type: 'start', workflow: wf }, 100)
-    expect(next.workflow).toBe(wf)
+    expect(next.workflow).toEqual({ ...wf, decisions: { entries: [], nextId: 1 }, questionId: null })
   })
 
   test('ignores a start while a run is in progress', () => {
@@ -619,14 +620,14 @@ describe('reduce — instruct', () => {
     expect(next.workflow?.phase).toBe('reviewing')
     expect(next.workflow?.dialogue).toEqual([
       { role: 'optimizer', text: '초안' },
-      { role: 'user', text: '더 짧게' },
+      { role: 'user', text: '더 짧게', decisionId: 'd1' },
     ])
   })
 
   test('a failed workflow also takes a supplement', () => {
     const current = state({ workflow: workflow({ phase: 'failed' }) })
     const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '다시' }, 1)
-    expect(next.workflow?.dialogue).toEqual([{ role: 'user', text: '다시' }])
+    expect(next.workflow?.dialogue).toEqual([{ role: 'user', text: '다시', decisionId: 'd1' }])
   })
 
   test('clears the stored question and options while keeping the message', () => {
@@ -836,6 +837,372 @@ describe('reduce — raw mode', () => {
     const next = reduce(current, { type: 'reset', sessionId: SESSION }, 50)
     expect(next.rawMode).toBeNull()
     expect(next.usage).toEqual(current.usage)
+  })
+})
+
+describe('reduce — decision evidence', () => {
+  test('start gives a fixture workflow an empty ledger and no pending question id', () => {
+    const started = reduce(state(), { type: 'start', workflow: workflow({ phase: 'idle' }) }, 1)
+    expect(started.workflow?.decisions).toEqual({ entries: [], nextId: 1 })
+    expect(started.workflow?.questionId).toBeNull()
+  })
+
+  test('a successful reply mints a fresh question id, and null when there is no question', () => {
+    const first = reduce(
+      state({ workflow: workflow({ phase: 'generating', rounds: 0 }) }),
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ question: '어느 쪽인가요?' }), usage: usage() },
+      1,
+    )
+    expect(first.workflow?.questionId).toBe('q:wf-1:1:1')
+
+    const second = reduce(
+      state({ workflow: workflow({ phase: 'generating', rounds: 2 }) }),
+      { type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ question: null }), usage: usage() },
+      1,
+    )
+    expect(second.workflow?.questionId).toBeNull()
+  })
+
+  test('an exact "1번" answer keeps the question, options and resolved choice', () => {
+    const current = state({
+      workflow: workflow({
+        phase: 'reviewing',
+        rounds: 1,
+        questionId: 'q:wf-1:1:1',
+        message: '비교 기준을 확인합니다.',
+        question: '기존 image는 무엇과 비교할까요?',
+        options: ['변화 이력의 직전 값', '배포 기준'],
+      }),
+    })
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '1번' }, 2)
+    const ledger = next.workflow?.decisions
+    expect(ledger?.entries).toHaveLength(1)
+    const entry = ledger?.entries[0]
+    expect(entry?.id).toBe('d1')
+    expect(entry?.text).toBe('1번')
+    expect(entry?.source).toEqual({
+      kind: 'user-answer',
+      questionId: 'q:wf-1:1:1',
+      question: '기존 image는 무엇과 비교할까요?',
+      options: ['변화 이력의 직전 값', '배포 기준'],
+      answeredAfterRound: 1,
+    })
+    expect(entry?.selectedOption).toEqual({ index: 1, text: '변화 이력의 직전 값' })
+    expect(next.workflow?.dialogue).toEqual([
+      { role: 'user', text: '1번', decisionId: 'd1' },
+    ])
+    // The pending question is cleared exactly as before.
+    expect(next.workflow?.question).toBeNull()
+    expect(next.workflow?.questionId).toBeNull()
+    expect(next.workflow?.options).toEqual([])
+  })
+
+  test('a button label answer resolves the same way as its number', () => {
+    const current = state({
+      workflow: workflow({
+        phase: 'reviewing', rounds: 1, question: '어느 쪽?', options: ['변화 이력', '배포 기준'],
+      }),
+    })
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '배포 기준' }, 1)
+    expect(next.workflow?.decisions?.entries[0]?.selectedOption).toEqual({ index: 2, text: '배포 기준' })
+  })
+
+  test('an out-of-range, ambiguous or prose answer stays verbatim and unresolved', () => {
+    for (const text of ['7번', '첫 번째', '배포 기준일 수도 있어요', '1, 2']) {
+      const current = state({
+        workflow: workflow({ phase: 'reviewing', rounds: 1, question: '어느 쪽?', options: ['A', 'B'] }),
+      })
+      const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text }, 1)
+      const entry = next.workflow?.decisions?.entries[0]
+      expect(entry?.text).toBe(text)
+      expect(entry?.selectedOption).toBeUndefined()
+    }
+  })
+
+  test('several questions get distinct ids and keep their own sources', () => {
+    let current = state({ workflow: workflow({ phase: 'generating', rounds: 0 }) })
+    current = reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ question: '처리 위치는?', options: ['로컬', '서버'] }), usage: usage(),
+    }, 1)
+    const firstQuestion = current.workflow?.questionId
+    current = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '로컬' }, 2)
+    current = reduce({ ...current, workflow: current.workflow === null ? null : { ...current.workflow, phase: 'generating' } }, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ question: '출력 방식은?', options: ['화면', '파일'] }), usage: usage(),
+    }, 3)
+    const secondQuestion = current.workflow?.questionId
+    current = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '화면' }, 4)
+
+    expect(firstQuestion).not.toBe(secondQuestion)
+    const entries = current.workflow?.decisions?.entries ?? []
+    expect(entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(entries[0]?.source.questionId).toBe(firstQuestion)
+    expect(entries[1]?.source.questionId).toBe(secondQuestion)
+    expect(entries[0]?.source.question).toBe('처리 위치는?')
+    expect(entries[1]?.source.options).toEqual(['화면', '파일'])
+  })
+
+  test('model draft and change notes never enter user evidence', () => {
+    const current = state({
+      workflow: workflow({ phase: 'reviewing', rounds: 1, question: '어느 쪽?', options: ['A', 'B'] }),
+    })
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    const serialized = JSON.stringify(next.workflow?.decisions)
+    expect(serialized).toContain('"text":"A"')
+    expect(serialized).not.toContain('개선안')
+    expect(serialized).not.toContain('더 짧게 만들었습니다')
+    expect(next.workflow?.decisions?.entries).toHaveLength(1)
+  })
+
+  test('a failed later round keeps the recorded source and clears the pending question', () => {
+    const reviewed = state({
+      workflow: workflow({
+        phase: 'reviewing', rounds: 1, questionId: 'q:wf-1:1:1', question: '어느 쪽?', options: ['A', 'B'],
+      }),
+    })
+    const instructed = reduce(reviewed, { type: 'instruct', workflowId: 'wf-1', text: '1번' }, 1)
+    const failed = reduce({ ...instructed, workflow: instructed.workflow === null ? null : { ...instructed.workflow, phase: 'generating' } }, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 2)
+    expect(failed.workflow?.phase).toBe('failed')
+    expect(failed.workflow?.decisions?.entries[0]?.source.question).toBe('어느 쪽?')
+    expect(failed.workflow?.decisions?.entries[0]?.selectedOption).toEqual({ index: 1, text: 'A' })
+  })
+
+  test('cancel and reset release the ledger with the workflow', () => {
+    const current = state({ workflow: workflow({ phase: 'reviewing' }) })
+    const withDecision = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    expect(reduce(withDecision, { type: 'cancel', workflowId: 'wf-1' }, 2).workflow).toBeNull()
+    expect(reduce(withDecision, { type: 'reset', sessionId: SESSION }, 2).workflow).toBeNull()
+  })
+
+  test('a frozen ledger is not mutated by a later answer', () => {
+    const current = deepFreeze(state({
+      workflow: workflow({ phase: 'reviewing', question: '어느 쪽?', options: ['A', 'B'] }),
+    }))
+    const snapshot = JSON.stringify(current)
+    const next = reduce(current, { type: 'instruct', workflowId: 'wf-1', text: '1번' }, 1)
+    expect(JSON.stringify(current)).toBe(snapshot)
+    expect(next.workflow?.decisions?.entries).toHaveLength(1)
+  })
+
+  test('a reply or failure event never appends a user decision', () => {
+    const current = state({
+      workflow: workflow({
+        phase: 'generating', question: '어느 쪽?', options: ['A', 'B'],
+        decisions: { entries: [], nextId: 1 },
+      }),
+    })
+    const replyNext = reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '모델 초안', message: '모델 메모', question: '다른 질문?', options: ['X', 'Y'] }),
+      usage: usage(),
+    }, 1)
+    expect(replyNext.workflow?.decisions).toEqual({ entries: [], nextId: 1 })
+    const failedNext = reduce(current, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 1)
+    expect(failedNext.workflow?.decisions).toEqual({ entries: [], nextId: 1 })
+  })
+})
+
+
+describe('reduce — budget refusal', () => {
+  const NOTICE =
+    '확정 결정과 필수 입력이 요청 한도(18000자)를 초과했습니다. 결정을 정정하거나 새 작업으로 나눠 주세요. 모델은 호출하지 않았습니다.'
+
+  function refusedState(): RuntimeState {
+    return state({
+      workflow: workflow({
+        phase: 'generating',
+        rounds: 2,
+        roundLimit: 7,
+        draft: '보존할 초안',
+        progress: { stage: 'generating', startedAt: 1, updatedAt: 1 },
+        dialogue: [{ role: 'user', text: '보존할 대화', decisionId: 'd1' }],
+        decisions: { entries: [{ id: 'd1', text: '로컬에서만', source: answerSourceFor() }], nextId: 2 },
+        usage: usage({ input_tokens: 9 }),
+        question: '보존할 질문?',
+        options: ['A', 'B'],
+        questionAsk: 'pending',
+        limitAsk: 'pending',
+      }),
+      usage: totals({ calls: 2, input: 9, updatedAt: 4 }),
+    })
+  }
+
+  function answerSourceFor(): {
+    kind: 'user-answer'
+    questionId: string | null
+    question: string | null
+    options: readonly string[]
+    answeredAfterRound: number
+  } {
+    return { kind: 'user-answer', questionId: 'q:wf-1:1:1', question: '어느 쪽?', options: ['A', 'B'], answeredAfterRound: 1 }
+  }
+
+  test('turns a generating run into a recoverable failure without spending a round or tokens', () => {
+    const current = refusedState()
+    const event: OptimizerEvent = {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }
+    const next = reduce(current, event, 9)
+
+    expect(next.workflow?.phase).toBe('failed')
+    expect(next.workflow?.progress).toBeUndefined()
+    expect(next.workflow?.lastError).toBe(NOTICE)
+    expect(next.workflow?.budgetError).toEqual({
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    })
+    expect(next.workflow?.budgetError?.decisionIds).not.toBe(event.decisionIds)
+    // Records survive by reference and no counter moves.
+    expect(next.workflow?.draft).toBe(current.workflow?.draft)
+    expect(next.workflow?.dialogue).toBe(current.workflow?.dialogue)
+    expect(next.workflow?.decisions).toBe(current.workflow?.decisions)
+    expect(next.workflow?.question).toBe('보존할 질문?')
+    expect(next.workflow?.options).toEqual(['A', 'B'])
+    // A refused round ends review, so neither dialog marker may stay pending:
+    // the engine's later close would be dropped and correction would stay
+    // blocked until cancel.
+    expect(next.workflow?.questionAsk).toBeUndefined()
+    expect(next.workflow?.limitAsk).toBeUndefined()
+    expect(next.workflow?.rounds).toBe(2)
+    expect(next.workflow?.roundLimit).toBe(7)
+    expect(next.workflow?.usage).toBe(current.workflow?.usage)
+    expect(next.usage).toBe(current.usage)
+  })
+
+  test('duplicate, stale, cross-session and non-generating events are ignored', () => {
+    const applied = reduce(refusedState(), {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 9)
+    expect(reduce(applied, {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 9)).toBe(applied)
+
+    for (const event of [
+      { type: 'budget-blocked', workflowId: 'wf-1', generation: 2, sessionId: SESSION, requiredChars: 1, limitChars: 1, decisionIds: [] },
+      { type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: 'other', requiredChars: 1, limitChars: 1, decisionIds: [] },
+      { type: 'budget-blocked', workflowId: 'other', generation: 1, sessionId: SESSION, requiredChars: 1, limitChars: 1, decisionIds: [] },
+    ] as const) {
+      const current = refusedState()
+      expect(reduce(current, event, 9)).toBe(current)
+    }
+    const reviewing = state({ workflow: workflow({ phase: 'reviewing', decisions: { entries: [], nextId: 1 } }) })
+    expect(reduce(reviewing, {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 1, limitChars: 1, decisionIds: [],
+    }, 9)).toBe(reviewing)
+  })
+
+  test('a successful reply clears the budget failure record', () => {
+    const failed = reduce(refusedState(), {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 9)
+    const recovered = reduce(failed, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '회복된 초안' }), usage: usage(),
+    }, 10)
+    expect(recovered.workflow?.phase).toBe('reviewing')
+    expect(recovered.workflow?.budgetError).toBeUndefined()
+    expect('lastError' in (recovered.workflow ?? {})).toBe(false)
+  })
+})
+
+
+describe('reduce — explicit decision correction', () => {
+  function source(): AnswerSource {
+    return {
+      kind: 'user-answer',
+      questionId: 'q:wf-1:1:1',
+      question: '처리 위치는?',
+      options: ['로컬', '외부'],
+      answeredAfterRound: 1,
+    }
+  }
+
+  function reviewed(): RuntimeState {
+    return state({
+      workflow: workflow({
+        phase: 'reviewing',
+        rounds: 1,
+        draft: '보존할 초안',
+        question: '이전 질문?',
+        questionId: 'q:wf-1:1:1',
+        options: ['A', 'B'],
+        decisions: { entries: [{ id: 'd1', text: '로컬', source: source(), selectedOption: { index: 1, text: '로컬' } }], nextId: 2 },
+      }),
+    })
+  }
+
+  test('appends a superseding entry with the old source and clears the stale question', () => {
+    const current = reviewed()
+    const next = reduce(current, {
+      type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '외부 서비스 대신 로컬 유지',
+    }, 2)
+    const entries = next.workflow?.decisions?.entries ?? []
+    expect(entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(entries[1]?.text).toBe('외부 서비스 대신 로컬 유지')
+    expect(entries[1]?.source).toBe(entries[0]?.source)
+    expect(entries[1]?.supersedes).toBe('d1')
+    // A correction is free text, not a choice re-resolution.
+    expect(entries[1]?.selectedOption).toBeUndefined()
+    expect(next.workflow?.dialogue).toEqual([
+      { role: 'user', text: '외부 서비스 대신 로컬 유지', decisionId: 'd2' },
+    ])
+    expect(next.workflow?.question).toBeNull()
+    expect(next.workflow?.questionId).toBeNull()
+    expect(next.workflow?.options).toEqual([])
+    expect(next.workflow?.draft).toBe('보존할 초안')
+    expect(next.workflow?.rounds).toBe(1)
+    expect(next.workflow?.correctionPending).toBe(true)
+  })
+
+  test('a successful reply applies the correction, while a failure keeps it pending', () => {
+    const corrected = reduce(reviewed(), {
+      type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '로컬 유지',
+    }, 2)
+    const replied = reduce(corrected, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '정정 반영 초안', message: '' }), usage: usage(),
+    }, 3)
+    expect(replied.workflow?.correctionPending).toBe(false)
+    expect(replied.workflow?.dialogue).toEqual(corrected.workflow?.dialogue)
+
+    const failed = reduce(corrected, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 3)
+    expect(failed.workflow?.correctionPending).toBe(true)
+  })
+
+  test('unknown, replaced, blank or in-flight corrections are ignored', () => {
+    const current = reviewed()
+    expect(reduce(current, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd9', text: 'x' }, 1)).toBe(current)
+    expect(reduce(current, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: '   ' }, 1)).toBe(current)
+    for (const phase of ['idle', 'collecting', 'generating', 'transferring', 'sending'] as const) {
+      const busy = state({ workflow: workflow({ phase, decisions: { entries: [{ id: 'd1', text: 'A', source: source() }], nextId: 2 } }) })
+      expect(reduce(busy, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: 'B' }, 1)).toBe(busy)
+    }
+    const corrected = reduce(current, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: 'B' }, 1)
+    expect(reduce(corrected, { type: 'decision-corrected', workflowId: 'wf-1', targetId: 'd1', text: 'C' }, 2)).toBe(corrected)
+  })
+
+  test('a model reply or failure cannot create a supersession', () => {
+    const current = reviewed()
+    const replied = reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '모델 초안', message: '모델 메모' }), usage: usage(),
+    }, 1)
+    expect(replied.workflow?.decisions?.entries.some(entry => entry.supersedes !== undefined)).toBe(false)
+    const failed = reduce(current, {
+      type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom',
+    }, 1)
+    expect(failed.workflow?.decisions?.entries.some(entry => entry.supersedes !== undefined)).toBe(false)
   })
 })
 

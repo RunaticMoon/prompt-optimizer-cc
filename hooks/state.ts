@@ -13,6 +13,7 @@
  * session reset all resolve here, before any side effect runs.
  */
 import type {
+  AnswerSource,
   ModelUsage,
   OptimizerEvent,
   OptimizerMessage,
@@ -22,6 +23,8 @@ import type {
   UsageTotals,
   Workflow,
 } from './contracts'
+import { appendAnswer, appendCorrection, emptyLedger, isActiveDecision, questionIdFor } from './decisions'
+import { REQUEST_BUDGET_NOTICE } from './model'
 
 /**
  * The only legal `phase` moves. Everything else — including a move to the same
@@ -116,7 +119,16 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const current = base.workflow
       // One run per session: an in-flight run cannot be displaced by another.
       if (current !== null && current.phase !== 'idle') return base
-      return { ...base, workflow: event.workflow }
+      // Every real run starts with a ledger and a null pending-question id;
+      // fixture workflows that predate the fields get the same defaults.
+      return {
+        ...base,
+        workflow: {
+          ...event.workflow,
+          decisions: event.workflow.decisions ?? emptyLedger(),
+          questionId: event.workflow.questionId ?? null,
+        },
+      }
     }
 
     case 'phase': {
@@ -162,23 +174,33 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const current = matchWorkflow(base, event.workflowId, event.generation)
       if (current === null) return usage === base.usage ? base : { ...base, usage }
 
+      const question = event.reply.question
       const updated: Workflow = {
         ...current,
         phase: 'reviewing',
         progress: undefined,
         draft: event.reply.draft,
         message: event.reply.message,
-        question: event.reply.question,
+        question,
+        // A fresh id per successful reply; the reply's other fields remain
+        // unconfirmed model output, never user evidence.
+        questionId: question === null || question === ''
+          ? null
+          : questionIdFor(current.id, current.generation, current.rounds + 1),
         options: event.reply.options ?? [],
         rounds: current.rounds + 1,
         usage: addUsage(current.usage, event.usage),
       }
       const entry = dialogueEntry(event.reply)
       if (entry !== null) updated.dialogue = [...current.dialogue, entry]
-      // A recovery reply clears the failure that preceded it.
+      // A recovery reply clears the failure that preceded it, and a successful
+      // draft applies any correction recorded before it. `false` (not a
+      // deletion) records that even when the reply adds no dialogue entry.
       delete updated.lastError
+      delete updated.budgetError
       delete updated.questionAsk
       delete updated.limitAsk
+      if (current.correctionPending === true) updated.correctionPending = false
       return { ...base, usage, workflow: updated }
     }
 
@@ -232,6 +254,32 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       return { ...base, usage, workflow: updated }
     }
 
+    case 'budget-blocked': {
+      // A local refusal never belongs to another session, a cancelled run or a
+      // settled one (a duplicate event must not repaint a chosen failure).
+      if (event.sessionId !== base.sessionId) return base
+      const current = matchWorkflow(base, event.workflowId, event.generation)
+      if (current === null || current.phase !== 'generating') return base
+      const updated: Workflow = {
+        ...current,
+        phase: 'failed',
+        progress: undefined,
+        // The actual counts stay in status details; the visible line names
+        // the configured limit without blaming decision text alone.
+        lastError: REQUEST_BUDGET_NOTICE,
+        budgetError: {
+          requiredChars: event.requiredChars,
+          limitChars: event.limitChars,
+          decisionIds: [...event.decisionIds],
+        },
+      }
+      // A refused round ends review like a generic failure. A lingering
+      // question marker would reject its close and keep correction blocked.
+      delete updated.questionAsk
+      delete updated.limitAsk
+      return { ...base, workflow: updated }
+    }
+
     case 'usage': {
       // Same ownership rule as `reply`/`failed`: another session's completion
       // never moves this session's totals.
@@ -259,13 +307,59 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       const current = base.workflow
       if (current === null || current.id !== event.workflowId) return base
       if (current.phase !== 'reviewing' && current.phase !== 'failed') return base
+      // Capture the question/options before clearing them: a bare "1번" is
+      // meaningless once its source is gone. Blank text is not an answer and
+      // adds no ledger entry.
+      const ledger = current.decisions ?? emptyLedger()
+      const captured = event.text.trim() === ''
+        ? null
+        : appendAnswer(ledger, event.text, answerSource(current))
+      const userTurn: OptimizerMessage = captured === null
+        ? { role: 'user', text: event.text }
+        : { role: 'user', text: event.text, decisionId: captured.decision.id }
       // Phase stays put: the caller emits `phase generating` right after.
       return {
         ...base,
         workflow: {
           ...current,
-          dialogue: [...current.dialogue, { role: 'user', text: event.text }],
+          decisions: captured === null ? current.decisions : captured.ledger,
+          dialogue: [...current.dialogue, userTurn],
           question: null,
+          questionId: null,
+          options: [],
+          questionAsk: undefined,
+          limitAsk: undefined,
+        },
+      }
+    }
+
+    case 'decision-corrected': {
+      const current = base.workflow
+      if (current === null || current.id !== event.workflowId) return base
+      if (current.phase !== 'reviewing' && current.phase !== 'failed') return base
+      const ledger = current.decisions ?? emptyLedger()
+      // Independently gated here too: an unknown, replaced or blank correction
+      // changes nothing even if a caller skipped its own validation.
+      if (event.text.trim() === '' || !isActiveDecision(ledger, event.targetId)) return base
+      const target = ledger.entries.find(entry => entry.id === event.targetId)
+      if (target === undefined) return base
+      const corrected = appendCorrection(ledger, target, event.text)
+      return {
+        ...base,
+        workflow: {
+          ...current,
+          decisions: corrected.ledger,
+          dialogue: [
+            ...current.dialogue,
+            { role: 'user', text: event.text, decisionId: corrected.decision.id },
+          ],
+          // A limit extension and retry must still be possible after the
+          // answered question is gone; only a successful reply clears this.
+          correctionPending: true,
+          // The old question belonged to the replaced value; a later retry
+          // must not answer it by accident.
+          question: null,
+          questionId: null,
           options: [],
           questionAsk: undefined,
           limitAsk: undefined,
@@ -365,6 +459,20 @@ function addTotals(totals: UsageTotals, usage: ModelUsage, now: number): UsageTo
     cacheRead: totals.cacheRead + usage.cache_read_input_tokens,
     cacheWrite: totals.cacheWrite + usage.cache_creation_input_tokens,
     updatedAt: now,
+  }
+}
+
+/**
+ * Captures the question/options on screen when an answer arrives. The options
+ * are copied so a later workflow update cannot mutate recorded evidence.
+ */
+function answerSource(workflow: Readonly<Workflow>): AnswerSource {
+  return {
+    kind: 'user-answer',
+    questionId: workflow.questionId ?? null,
+    question: workflow.question ?? null,
+    options: [...(workflow.options ?? [])],
+    answeredAfterRound: workflow.rounds,
   }
 }
 

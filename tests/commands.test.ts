@@ -132,7 +132,7 @@ describe('parseOptimizeArgs', () => {
   })
 
   test('argument-less commands reject trailing text but accept the exact word in any case', () => {
-    const words = ['on', 'off', 'accept', 'send', 'raw', 'cancel', 'more', 'status', 'help'] as const
+    const words = ['on', 'off', 'accept', 'send', 'raw', 'cancel', 'more', 'status', 'decisions', 'help'] as const
     for (const word of words) {
       // The exact word, any case, with surrounding whitespace, stays the command.
       expect(parseOptimizeArgs(word)).toEqual({ kind: word })
@@ -148,6 +148,25 @@ describe('parseOptimizeArgs', () => {
       kind: 'error',
       message: '/optimize send 명령은 추가 인자를 받지 않습니다. 이 문장을 개선하려면 /optimize -- send ... 처럼 입력하세요.',
     })
+  })
+
+  test('decisions takes no argument and correct needs an id and a body', () => {
+    expect(parseOptimizeArgs('decisions')).toEqual({ kind: 'decisions' })
+    expect(parseOptimizeArgs('  DECISIONS  ')).toEqual({ kind: 'decisions' })
+    expect(parseOptimizeArgs('correct d1 로컬에서만 처리')).toEqual({
+      kind: 'correct', id: 'd1', text: '로컬에서만 처리',
+    })
+    expect(parseOptimizeArgs('CORRECT   d12   두  번째  결정')).toEqual({
+      kind: 'correct', id: 'd12', text: '두  번째  결정',
+    })
+
+    for (const args of ['correct', 'correct d1', 'correct   d1   ', 'correct  ']) {
+      const parsed = parseOptimizeArgs(args)
+      expect(parsed.kind).toBe('error')
+      if (parsed.kind === 'error') expect(parsed.message).toContain('정정할 결정 id와 내용이 필요합니다')
+    }
+    // An unknown id still parses as a correction, never as a new start.
+    expect(parseOptimizeArgs('correct d99 whatever').kind).toBe('correct')
   })
 
   test('the `--` escape always starts an optimization', () => {
@@ -226,6 +245,21 @@ describe('formatStatus', () => {
     const failed = formatStatus(config(), liveState({ workflow: workflow({ phase: 'failed', lastError: '타임아웃' }) }))
     expect(failed).toContain('단계 failed')
     expect(failed).toContain('마지막 오류: 타임아웃')
+  })
+
+  test('reports the last preflight budget refusal with its counts and ids', () => {
+    const text = formatStatus(config(), liveState({
+      workflow: workflow({
+        phase: 'failed',
+        lastError: '확정 결정과 필수 입력이 요청 한도(18000자)를 초과했습니다.',
+        budgetError: { requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1', 'd3'] },
+      }),
+    }))
+    expect(text).toContain('마지막 요청 한도 초과: 필요 18500자 / 한도 18000자 · 보호된 결정 d1, d3')
+    const empty = formatStatus(config(), liveState({
+      workflow: workflow({ phase: 'failed', budgetError: { requiredChars: 18_001, limitChars: 18_000, decisionIds: [] } }),
+    }))
+    expect(empty).toContain('· 보호된 결정 없음')
   })
 
   test('reports always mode and an empty system prompt file without a line for it', () => {
@@ -324,7 +358,7 @@ interface Rig {
   /** Which UI choice `chooseUi` answers with. */
   uiChoice: 'pane' | 'composer'
   /** What each controller action returns; success unless a test overrides one. */
-  results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds', ActionResult>
+  results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision', ActionResult>
   /** Callbacks the deferred `$.clock.after` captured, in order. */
   scheduled: Array<() => void>
   /** Every `ui.toast` the hook made. */
@@ -346,7 +380,7 @@ function rig(
     setResult?: { ok: false; error: string }
     configSetResult?: { value?: unknown; deny?: string }
     configSetError?: unknown
-    results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds', ActionResult>>
+    results?: Partial<Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision', ActionResult>>
     /**
      * When the key is present, the controller exposes `getGuidanceStatus`
      * (returning this value); when absent, the controller is the legacy facade.
@@ -363,12 +397,13 @@ function rig(
   const sendCalls: Array<{ method: 'draft' | 'original'; workflowId: string | undefined }> = []
   const current = opts.current ?? liveState()
   const currentConfig = opts.config ?? config()
-  const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds', ActionResult> = {
+  const results: Record<'accept' | 'sendDraft' | 'sendOriginal' | 'cancel' | 'extendRounds' | 'correctDecision', ActionResult> = {
     accept: { ok: true },
     sendDraft: { ok: true },
     sendOriginal: { ok: true },
     cancel: { ok: true },
     extendRounds: { ok: true },
+    correctDecision: { ok: true },
     ...opts.results,
   }
 
@@ -386,6 +421,10 @@ function rig(
     extendRounds: async () => {
       calls.push('extendRounds')
       return results.extendRounds
+    },
+    correctDecision: (id, text) => {
+      calls.push(`correctDecision(${id},${text})`)
+      return results.correctDecision
     },
     accept: async () => {
       calls.push('accept')
@@ -668,6 +707,80 @@ describe('registerCommands — settings intents', () => {
 })
 
 describe('registerCommands — controller intents', () => {
+  test('decisions lists the recorded sources without any controller action', async ($, on) => {
+    const r = rig({
+      current: liveState({
+        workflow: workflow({
+          decisions: {
+            entries: [{
+              id: 'd1',
+              text: '경영진',
+              source: {
+                kind: 'user-answer',
+                questionId: 'q:wf-1:1:1',
+                question: '대상 독자는?',
+                options: ['경영진', '개발팀'],
+                answeredAfterRound: 1,
+              },
+              selectedOption: { index: 1, text: '경영진' },
+            }],
+            nextId: 2,
+          },
+        }),
+      }),
+    })
+    wire(on, r)
+    const result = await run($, 'decisions')
+    expect(r.calls).toEqual([])
+    expect(result.text).toContain('확정된 사용자 결정:')
+    expect(result.text).toContain('원문: 사용자 원문')
+    expect(result.text).toContain('d1 · 활성')
+    expect(result.text).toContain('질문 q:wf-1:1:1')
+    expect(result.text).toContain('1) 경영진 / 2) 개발팀')
+    expect(result.text).toContain('답변: 경영진')
+    expect(result.text).toContain('선택: 1) 경영진')
+    expect(result.text).toContain('/optimize correct <id> <내용>')
+  })
+
+  test('correct passes the id and body to the controller and returns its line', async ($, on) => {
+    const r = rig()
+    wire(on, r)
+    const result = await run($, 'correct d1 로컬에서만 처리')
+    expect(r.calls).toEqual(['correctDecision(d1,로컬에서만 처리)'])
+    expect(result.text).toBe('결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.')
+  })
+
+  test('a correction at the round limit returns the approval-first line', async ($, on) => {
+    const r = rig({ current: liveState({ workflow: workflow({ rounds: 5 }) }) })
+    wire(on, r)
+    const result = await run($, 'correct d1 로컬')
+    expect(r.calls).toEqual(['correctDecision(d1,로컬)'])
+    expect(result.text).toBe(
+      '결정을 정정했습니다. 라운드 한도에 도달했으니 /optimize more 로 승인한 뒤 /optimize retry 로 반영하세요.',
+    )
+  })
+
+  test('correction refusals, no-workflow and invalid shapes never start a run', async ($, on) => {
+    const refused = rig({
+      results: { correctDecision: { ok: false, reason: '결정 d9을(를) 찾지 못했습니다.' } },
+    })
+    wire(on, refused)
+    expect((await run($, 'correct d9 내용')).text).toBe('결정 d9을(를) 찾지 못했습니다.')
+    expect(refused.calls).toEqual(['correctDecision(d9,내용)'])
+
+    const none = rig({ current: liveState({ workflow: null }) })
+    wire(on, none)
+    expect((await run($, 'decisions')).text).toContain('진행 중인 개선 작업이 없습니다')
+    expect((await run($, 'correct d1 내용')).text).toContain('진행 중인 개선 작업이 없습니다')
+    expect(none.calls).toEqual([])
+
+    const invalid = rig()
+    wire(on, invalid)
+    expect((await run($, 'correct d1')).text).toContain('사용법 오류')
+    expect((await run($, 'decisions extra')).text).toContain('사용법 오류')
+    expect(invalid.calls).toEqual([])
+  })
+
   test('a plain sentence starts an explicit run with the chosen UI', async ($, on) => {
     const r = rig()
     r.uiChoice = 'composer'

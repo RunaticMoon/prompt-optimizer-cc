@@ -24,6 +24,7 @@ import type { ModelCompleteRequest, ModelCompleteResult, ModelTextBlock } from '
 
 import {
   DEFAULT_EFFORT,
+  type DecisionLedger,
   type EnginePorts,
   MAX_REPLY_OPTION_CHARS,
   MAX_REPLY_OPTIONS,
@@ -35,6 +36,7 @@ import {
   type RewriteResult,
   type Workflow,
 } from './contracts'
+import { activeDecisions, supersededBy } from './decisions'
 
 /** A usage record with every token count at zero. */
 function zeroUsage(): ModelUsage {
@@ -77,11 +79,160 @@ function lastUserInstruction(dialogue: readonly OptimizerMessage[]): string | un
   return undefined
 }
 
+/**
+ * A recoverable preflight refusal: the protected content (original, active
+ * user decisions with their source, an uncaptured explicit instruction, a
+ * pending question and the fixed formatting) cannot fit in one request even
+ * after every optional section is dropped. No model call is made.
+ */
+export class RequestBudgetError extends Error {
+  /** Prompt plus system length the protected content needs. */
+  readonly requiredChars: number
+  /** The request limit it exceeded. */
+  readonly limitChars: number
+  /** Active decision ids that are protected. */
+  readonly decisionIds: readonly string[]
+
+  constructor(requiredChars: number, limitChars: number, decisionIds: readonly string[]) {
+    super(REQUEST_BUDGET_NOTICE)
+    this.name = 'RequestBudgetError'
+    this.requiredChars = requiredChars
+    this.limitChars = limitChars
+    this.decisionIds = decisionIds
+  }
+}
+
+/** The exact user-facing notice for a {@link RequestBudgetError}. */
+export const REQUEST_BUDGET_NOTICE =
+  `확정 결정과 필수 입력이 요청 한도(${MAX_REQUEST_CHARS}자)를 초과했습니다. 결정을 정정하거나 새 작업으로 나눠 주세요. 모델은 호출하지 않았습니다.`
+
+/** Fixed instructions that frame the captured decision evidence. */
+const DECISION_RULES = [
+  '아래 JSON만 사용자가 직접 쓴 확정 결정과 그 출처다.',
+  'selectedOption은 사용자가 선택지에서 고른 확정 선택이다.',
+  'current_draft·context·변경 메모는 사용자 합의가 아니며 미확정 제안이다.',
+  'supersedes로 대체된 id의 결정은 비활성이다. 활성 결정과 모순되면 활성 결정을 따른다.',
+]
+
+/** One deduplicated question/option payload referenced by decisions. */
+interface EvidenceSource {
+  key: string
+  questionId: string | null
+  question: string | null
+  options: readonly string[]
+  answeredAfterRound: number
+}
+
+/** One active decision in the request's JSON evidence. */
+interface EvidenceDecision {
+  id: string
+  text: string
+  source: string
+  selectedOption?: { index: number; text: string }
+  supersedes?: string
+}
+
+/**
+ * Escapes `<` and `>` inside the serialized evidence. The replacement is the
+ * JSON escape `\u003c`/`\u003e`, so the text still parses back exactly while a
+ * captured `</user_decisions>` cannot end the section early.
+ */
+function escapeJsonAngles(json: string): string {
+  return json.replace(/</g, '\\u003c').replace(/>/g, '\\u003e')
+}
+
+/**
+ * Renders active decisions outside the cached original/context prefix. The
+ * source payload is deduplicated by question id; entries that were superseded
+ * are left to local inspection, not sent as operative constraints.
+ */
+function decisionSection(ledger: DecisionLedger): string | null {
+  const active = activeDecisions(ledger)
+  if (active.length === 0) return null
+  const sources: EvidenceSource[] = []
+  const byKey = new Map<string, EvidenceSource>()
+  const decisions: EvidenceDecision[] = []
+  for (const entry of active) {
+    // A question id identifies one identical source payload; an answer with no
+    // question id keeps its own single source.
+    const key = entry.source.questionId ?? `${entry.id}:source`
+    if (!byKey.has(key)) {
+      const source: EvidenceSource = {
+        key,
+        questionId: entry.source.questionId,
+        question: entry.source.question,
+        options: [...entry.source.options],
+        answeredAfterRound: entry.source.answeredAfterRound,
+      }
+      byKey.set(key, source)
+      sources.push(source)
+    }
+    decisions.push({
+      id: entry.id,
+      text: entry.text,
+      source: key,
+      ...(entry.selectedOption === undefined ? {} : { selectedOption: { ...entry.selectedOption } }),
+      ...(entry.supersedes === undefined ? {} : { supersedes: entry.supersedes }),
+    })
+  }
+  const json = escapeJsonAngles(JSON.stringify({ decisions, sources }))
+  return `<user_decisions>\n${DECISION_RULES.join('\n')}\n${json}\n</user_decisions>`
+}
+
+/** Renders the current unanswered question/choices as protected JSON, if any. */
+function pendingQuestionSection(workflow: Readonly<Workflow>): string | null {
+  const question = workflow.question
+  if (question === null || question === undefined || question.trim() === '') return null
+  const json = escapeJsonAngles(JSON.stringify({
+    questionId: workflow.questionId ?? null,
+    question,
+    options: [...(workflow.options ?? [])],
+  }))
+  return `<pending_question>\n${json}\n</pending_question>`
+}
+
+/**
+ * The dialogue turns that may still be sent. A captured answer whose decision
+ * was superseded never appears as operative dialogue; once the ledger records
+ * a correction, optimizer turns up to the LATEST correction are omitted too,
+ * since an earlier turn can repeat a value the person has since replaced.
+ */
+function operativeDialogue(
+  dialogue: readonly OptimizerMessage[],
+  ledger: DecisionLedger,
+): OptimizerMessage[] {
+  const replaced = supersededBy(ledger)
+  const correctionIds = new Set(
+    ledger.entries.filter(entry => entry.supersedes !== undefined).map(entry => entry.id),
+  )
+  const lastCorrection = dialogue.findLastIndex(
+    message => message.decisionId !== undefined && correctionIds.has(message.decisionId),
+  )
+  return dialogue.filter((message, index) => {
+    if (message.role === 'user' && message.decisionId !== undefined && replaced.has(message.decisionId)) {
+      return false
+    }
+    if (lastCorrection !== -1 && index <= lastCorrection && message.role === 'optimizer') return false
+    return true
+  })
+}
+
+/** Whether an explicit instruction is already one of the active decisions. */
+function isCapturedInstruction(ledger: DecisionLedger, instruction: string): boolean {
+  return instruction !== '' && activeDecisions(ledger).some(entry => entry.text === instruction)
+}
+
 /** The parts of the request prompt, already selected for the budget. */
 interface PromptParts {
   context: string
   original: string
+  /** Pre-rendered active-decision section, or null when there is no ledger. */
+  decisions: string | null
+  /** Pre-rendered pending-question section, or null. */
+  pending: string | null
   draft: string | null
+  /** Whether to label the draft as an unconfirmed proposal (ledger runs only). */
+  labelDraft: boolean
   dialogue: readonly OptimizerMessage[]
   instruction: string
   round: number
@@ -97,7 +248,7 @@ interface PromptParts {
  */
 export function neutralizeTags(text: string): string {
   return text.replace(
-    /<(\s*\/?\s*(?:context|original_prompt|current_draft|dialogue|instruction|refinement_round)\b)/gi,
+    /<(\s*\/?\s*(?:context|original_prompt|current_draft|dialogue|instruction|refinement_round|user_decisions|pending_question)\b)/gi,
     '‹$1',
   )
 }
@@ -127,7 +278,14 @@ function renderPrompt(parts: PromptParts): RenderedPrompt {
   // here (rather than searching for `</original_prompt>`) keeps the split exact
   // even when the user's own text contains that look-alike tag.
   const prefixEnd = blocks.join('\n\n').length
-  if (parts.draft !== null) blocks.push(`<current_draft>\n${parts.draft}\n</current_draft>`)
+  // Decision evidence sits after the cached prefix but before the generated
+  // draft, so the model reads confirmed user intent first.
+  if (parts.decisions !== null) blocks.push(parts.decisions)
+  if (parts.pending !== null) blocks.push(parts.pending)
+  if (parts.draft !== null) {
+    const label = parts.labelDraft ? '\n[미확정 모델 제안: 활성 user_decisions가 우선한다]' : ''
+    blocks.push(`<current_draft>${label}\n${parts.draft}\n</current_draft>`)
+  }
   if (parts.dialogue.length > 0) {
     // Selection is newest-first (see buildModelRequest); the kept turns read
     // oldest first here so the model follows the conversation in order.
@@ -152,11 +310,15 @@ function renderPrompt(parts: PromptParts): RenderedPrompt {
  * from the config. `instruction` is used as the `<instruction>` section when
  * given, else the dialogue's most recent user supplement.
  *
- * When the prompt plus `system` exceeds {@link MAX_REQUEST_CHARS}, the newest
- * dialogue turns are kept (the oldest are dropped first), then context and the
- * generated draft are trimmed. The latest question/answer stays together and
- * the original prompt is never truncated. Oversized user input alone can
- * exceed the budget; it is never silently rewritten or discarded here.
+ * A workflow with a decision ledger keeps every active answer and its exact
+ * question/options in a `<user_decisions>` section (and a pending question in
+ * `<pending_question>`) outside the cached context/original prefix. When the
+ * prompt plus `system` exceeds {@link MAX_REQUEST_CHARS}, dialogue is dropped
+ * oldest first, then the context tail, then the generated draft tail; the
+ * protected evidence is never trimmed. If even protected content cannot fit,
+ * {@link RequestBudgetError} is thrown rather than silently dropping a
+ * decision. A fixture without a ledger keeps the older behavior, including
+ * protecting the latest exchange.
  *
  * `options.cache` defaults to `false`, which keeps `prompt`/`system` as plain
  * strings (the older shape every engine takes). When `true`, both become
@@ -175,45 +337,107 @@ export function buildModelRequest(
 ): ModelCompleteRequest {
   const original = workflow.original
   let draft = workflow.draft !== '' && workflow.draft !== original ? workflow.draft : null
-  const instructionText = instruction !== undefined ? instruction : lastUserInstruction(workflow.dialogue) ?? ''
-
-  const dialogue = workflow.dialogue.slice()
-  // An answer such as "the first option" is meaningless without its question.
-  // Keep the latest optimizer question and subsequent answers as one exchange.
-  const lastOptimizer = dialogue.findLastIndex(message => message.role === 'optimizer')
-  const protectedTurns = dialogue.length === 0 ? 0
-    : lastOptimizer < 0 ? 1 : dialogue.length - lastOptimizer
+  const fallbackInstruction = instruction !== undefined
+    ? instruction
+    : lastUserInstruction(workflow.dialogue) ?? ''
+  const ledger = workflow.decisions
+  // A supplement already recorded as a decision is protected there; don't pay
+  // for the same text twice in `<instruction>`.
+  const instructionText = ledger !== undefined && isCapturedInstruction(ledger, fallbackInstruction)
+    ? ''
+    : fallbackInstruction
+  const decisions = ledger === undefined ? null : decisionSection(ledger)
+  const pending = ledger === undefined ? null : pendingQuestionSection(workflow)
+  let dialogue = ledger === undefined
+    ? workflow.dialogue.slice()
+    : operativeDialogue(workflow.dialogue, ledger)
   let context = workflow.context?.text ?? ''
 
   const build = (): RenderedPrompt =>
     renderPrompt({
-      context, original, draft, dialogue, instruction: instructionText,
+      context, original, decisions, pending, draft,
+      labelDraft: ledger !== undefined, dialogue, instruction: instructionText,
       round: workflow.rounds + 1, maxRounds: config.maxRounds,
     })
 
   let prompt = build()
 
-  // 1) Drop the oldest dialogue turns until the request fits.
-  while (prompt.text.length + system.length > MAX_REQUEST_CHARS && dialogue.length > protectedTurns) {
-    dialogue.shift()
-    prompt = build()
-  }
+  if (ledger === undefined) {
+    // Legacy fixture path: keep the latest question/answer pair protected and
+    // never throw, so the older no-ledger tests and callers still work.
+    const lastOptimizer = dialogue.findLastIndex(message => message.role === 'optimizer')
+    const protectedTurns = dialogue.length === 0 ? 0
+      : lastOptimizer < 0 ? 1 : dialogue.length - lastOptimizer
 
-  // 2) Trim the context from its tail, keeping its head.
-  if (prompt.text.length + system.length > MAX_REQUEST_CHARS && context !== '') {
-    const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
-    context = context.slice(0, Math.max(0, context.length - overflow))
-    prompt = build()
-  }
+    // 1) Drop the oldest dialogue turns until the request fits.
+    while (prompt.text.length + system.length > MAX_REQUEST_CHARS && dialogue.length > protectedTurns) {
+      dialogue.shift()
+      prompt = build()
+    }
 
-  // Large prior drafts are replaceable summaries. Preserve the user's original
-  // and latest decision before preserving generated prose, and flag truncation.
-  if (prompt.text.length + system.length > MAX_REQUEST_CHARS && draft !== null) {
-    const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
-    const marker = '\n[Earlier draft truncated; retain the original request and user decisions.]'
-    const keep = Math.max(0, draft.length - overflow - marker.length)
-    draft = keep > 0 ? draft.slice(0, keep) + marker : null
-    prompt = build()
+    // 2) Trim the context from its tail, keeping its head.
+    if (prompt.text.length + system.length > MAX_REQUEST_CHARS && context !== '') {
+      const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
+      context = context.slice(0, Math.max(0, context.length - overflow))
+      prompt = build()
+    }
+
+    // Large prior drafts are replaceable summaries. Preserve the user's original
+    // and latest decision before preserving generated prose, and flag truncation.
+    if (prompt.text.length + system.length > MAX_REQUEST_CHARS && draft !== null) {
+      const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
+      const marker = '\n[Earlier draft truncated; retain the original request and user decisions.]'
+      const keep = Math.max(0, draft.length - overflow - marker.length)
+      draft = keep > 0 ? draft.slice(0, keep) + marker : null
+      prompt = build()
+    }
+  } else {
+    // Refuse before spending a call when the protected evidence alone is over
+    // budget. The count is the exact prompt+system the evidence needs.
+    const protectedPrompt = renderPrompt({
+      context: '', original, decisions, pending, draft: null, labelDraft: true,
+      dialogue: [], instruction: instructionText,
+      round: workflow.rounds + 1, maxRounds: config.maxRounds,
+    })
+    const requiredChars = protectedPrompt.text.length + system.length
+    if (requiredChars > MAX_REQUEST_CHARS) {
+      throw new RequestBudgetError(
+        requiredChars,
+        MAX_REQUEST_CHARS,
+        activeDecisions(ledger).map(entry => entry.id),
+      )
+    }
+
+    // 1) Ordinary dialogue yields first, oldest to newest. The ledger already
+    // carries every captured answer, so even the latest exchange may go.
+    while (prompt.text.length + system.length > MAX_REQUEST_CHARS && dialogue.length > 0) {
+      dialogue.shift()
+      prompt = build()
+    }
+
+    // 2) Trim the context from its tail, keeping its head.
+    if (prompt.text.length + system.length > MAX_REQUEST_CHARS && context !== '') {
+      const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
+      context = context.slice(0, Math.max(0, context.length - overflow))
+      prompt = build()
+    }
+
+    // 3) Trim the generated draft tail; the decisions section outranks it.
+    if (prompt.text.length + system.length > MAX_REQUEST_CHARS && draft !== null) {
+      const overflow = prompt.text.length + system.length - MAX_REQUEST_CHARS
+      const marker = '\n[Earlier draft truncated; retain the original request and user decisions.]'
+      const keep = Math.max(0, draft.length - overflow - marker.length)
+      draft = keep > 0 ? draft.slice(0, keep) + marker : null
+      prompt = build()
+    }
+
+    // 4) Drop any remaining optional section and recompute. The protected
+    // check above guarantees the result now fits.
+    if (prompt.text.length + system.length > MAX_REQUEST_CHARS) {
+      context = ''
+      draft = null
+      prompt = build()
+    }
   }
 
   const text = prompt.text

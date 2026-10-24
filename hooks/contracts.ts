@@ -69,6 +69,42 @@ export interface WorkflowProgress {
   updatedAt: number
 }
 
+/**
+ * Provenance for one user-authored answer: the question and choices that were
+ * on screen when the person answered. Captured before `instruct` clears them.
+ */
+export interface AnswerSource {
+  kind: 'user-answer'
+  /** Id minted with the question (null when the answer had no question). */
+  questionId: string | null
+  /** The question exactly as the model returned it, or null. */
+  question: string | null
+  /** The answer choices exactly as offered, empty when there were none. */
+  options: readonly string[]
+  /** Round count at the time (a failed attempt is still recorded as a round). */
+  answeredAfterRound: number
+}
+
+/** One user-authored decision, kept verbatim with its source. */
+export interface UserDecision {
+  /** Workflow-local id (`d1`, `d2`, …); never reused. */
+  id: string
+  /** The exact user text after the existing input normalization. */
+  text: string
+  source: AnswerSource
+  /** The choice the answer resolved to, when it matched an option exactly. */
+  selectedOption?: { index: number; text: string }
+  /** Earlier decision this entry explicitly replaced. */
+  supersedes?: string
+}
+
+/** Every decision a workflow has recorded, including replaced history. */
+export interface DecisionLedger {
+  entries: readonly UserDecision[]
+  /** Next id number to mint; a high-water mark, never reused. */
+  nextId: number
+}
+
 /** One optimization run over one original prompt. */
 export interface Workflow {
   /** Stable id for this run, unique per session. */
@@ -111,6 +147,28 @@ export interface Workflow {
   options?: readonly string[]
   /** Engine question dialog for this reply; absent when only the pane is used. */
   questionAsk?: 'pending' | 'closed'
+  /** Recorded user-authored answers with their exact question/option provenance. */
+  decisions?: DecisionLedger
+  /**
+   * A correction recorded after the newest successful draft has not been
+   * applied yet; the next successful reply clears it. Failures and budget
+   * refusals keep it, so an extension can still approve the applying round.
+   */
+  correctionPending?: boolean
+  /** Id of the question awaiting an answer; minted by a successful reply, null when none. */
+  questionId?: string | null
+  /** Last preflight refusal whose protected evidence exceeded the request budget. */
+  budgetError?: BudgetFailure
+}
+
+/** Counts and decision ids for one local preflight budget refusal. */
+export interface BudgetFailure {
+  /** Prompt plus system length the protected content needed. */
+  requiredChars: number
+  /** The request limit it exceeded. */
+  limitChars: number
+  /** Active decision ids that were protected. */
+  decisionIds: readonly string[]
 }
 
 /** A one-shot permit that lets one restored draft bypass interception. */
@@ -173,6 +231,8 @@ export interface OptimizerMessage {
   role: 'user' | 'optimizer'
   /** The message text. */
   text: string
+  /** Ledger entry for a user turn captured as a decision (absent for optimizer turns). */
+  decisionId?: string
 }
 
 /** Token counts for one or more completions (mirrors the engine's usage). */
@@ -302,6 +362,19 @@ export type OptimizerEvent =
       usage: ModelUsage
     }
   | { type: 'failed'; workflowId: string; generation: number; sessionId: string; error: string; usage?: ModelUsage }
+  /**
+   * A local preflight refusal: the protected decisions and inputs cannot fit.
+   * No completion was made, so no usage is charged and no round is spent.
+   */
+  | {
+      type: 'budget-blocked'
+      workflowId: string
+      generation: number
+      sessionId: string
+      requiredChars: number
+      limitChars: number
+      decisionIds: readonly string[]
+    }
   | { type: 'limit-ask'; workflowId: string; round: number; status: 'pending' | 'closed' | 'declined' }
   | { type: 'limit-extended'; workflowId: string; round: number; maxRounds: number }
   | { type: 'usage'; workflowId: string; generation: number; sessionId: string; usage: ModelUsage }
@@ -314,6 +387,8 @@ export type OptimizerEvent =
   | { type: 'context'; workflowId: string; generation: number; context: ContextSnapshot }
   /** The user sent a refinement instruction; appended to the dialogue before the next completion. */
   | { type: 'instruct'; workflowId: string; text: string }
+  /** The user explicitly replaced one active decision; state only, no model call. */
+  | { type: 'decision-corrected'; workflowId: string; targetId: string; text: string }
   /** The user edited the restored draft in the composer; the bypass follows the edited text. */
   | { type: 'bypass-edited'; sessionId: string; text: string }
   /** The bypass permit was revoked (another fill, cleared draft, session end, expiry). */

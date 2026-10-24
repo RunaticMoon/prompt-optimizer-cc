@@ -28,15 +28,21 @@ import type {
   OptimizerConfig,
   RuntimeState,
 } from './contracts'
-import { IN_FLIGHT_REASON, type ActionResult } from './controller'
-import { workflowRoundLimit } from './state'
+import {
+  CORRECTION_LIMIT_NOTICE,
+  CORRECTION_NOTICE,
+  IN_FLIGHT_REASON,
+  type ActionResult,
+} from './controller'
+import { formatDecisions } from './decision-view'
+import { canStartRound, workflowRoundLimit } from './state'
 import type { UiPorts } from './ui/ui-ports'
 
 /** The `/optimize` command spec; task L passes it to `$.command.register`. */
 export const OPTIMIZE_COMMAND: CommandSpec = {
   name: 'optimize',
   description: '프롬프트 옵티마이저: 개선 시작·승인·전송·설정',
-  argumentHint: '[text|on|off|accept|send|raw|cancel|retry|more|status|model <id>]',
+  argumentHint: '[text|on|off|accept|send|raw|cancel|retry|more|status|decisions|correct <id> <text>|model <id>]',
   immediate: true,
 }
 
@@ -79,6 +85,8 @@ export interface CommandController {
   retry(ports: EnginePorts, instruction?: string): Promise<void>
   /** Explicitly approves five more rounds for the active job. */
   extendRounds(ports: EnginePorts): Promise<ActionResult>
+  /** Explicitly replaces one active decision; absent on an older host. */
+  correctDecision?(id: string, text: string): ActionResult
   /** Restores the draft into the composer. */
   accept(ports: EnginePorts): Promise<ActionResult>
   /** Sends the improved draft now. */
@@ -138,6 +146,8 @@ export type ParsedCommand =
   | { kind: 'retry'; instruction?: string }
   | { kind: 'more' }
   | { kind: 'status' }
+  | { kind: 'decisions' }
+  | { kind: 'correct'; id: string; text: string }
   | { kind: 'model'; model: string }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
@@ -151,9 +161,11 @@ const HELP_TEXT = [
   '/optimize send — 개선안을 지금 보내기',
   '/optimize raw — 원문을 그대로 보내기',
   '/optimize retry [instruction] — 보완 내용으로 다시 다듬기',
-  '/optimize more — 미해결 질문이 남은 이번 작업에 5회 더 허용',
+  '/optimize more — 미해결 질문이나 반영할 정정이 남은 이번 작업에 5회 더 허용',
   '/optimize cancel — 개선 작업 취소',
   '/optimize status — 설정과 진행 상황 보기',
+  '/optimize decisions — 확정 결정과 출처 보기',
+  '/optimize correct <id> <내용> — 결정 정정 후 /optimize retry로 반영',
   '/optimize model <id> — 옵티마이저 모델 변경',
   '/optimize -- <text> — 예약어로 시작하는 문장도 개선 시작',
 ].join('\n')
@@ -162,9 +174,10 @@ const HELP_TEXT = [
  * Parses the argument string after `/optimize`.
  *
  * The first whitespace-delimited token, compared case-insensitively, selects a
- * reserved command. `retry` and `model` take the rest as their argument, but
- * every other reserved command takes none: trailing text after it is a usage
- * error rather than silently dropped, and the error points at the `--` escape.
+ * reserved command. `retry` and `model` take the rest as their argument, and
+ * `correct` takes an id plus the rest as its replacement text; every other
+ * reserved command takes none: trailing text after it is a usage error rather
+ * than silently dropped, and the error points at the `--` escape.
  * `model` without an argument, or an unknown shape, becomes an `error`. Any
  * non-reserved first token (or a `--` escape) makes the whole trimmed argument
  * the optimization text, and an empty argument starts from the current
@@ -202,6 +215,10 @@ export function parseOptimizeArgs(args: string): ParsedCommand {
       return rest === '' ? { kind: 'more' } : rejectExtraArgument(head)
     case 'status':
       return rest === '' ? { kind: 'status' } : rejectExtraArgument(head)
+    case 'decisions':
+      return rest === '' ? { kind: 'decisions' } : rejectExtraArgument(head)
+    case 'correct':
+      return parseCorrection(rest)
     case 'help':
       return rest === '' ? { kind: 'help' } : rejectExtraArgument(head)
     case 'retry':
@@ -223,6 +240,29 @@ function rejectExtraArgument(head: string): ParsedCommand {
     kind: 'error',
     message: `/optimize ${head} 명령은 추가 인자를 받지 않습니다. 이 문장을 개선하려면 /optimize -- ${head} ... 처럼 입력하세요.`,
   }
+}
+
+/**
+ * Parses `correct <id> <text>`. Both parts are required; an unknown id stays a
+ * correction (answered as an error by the controller), never a new start.
+ */
+function parseCorrection(rest: string): ParsedCommand {
+  const gap = rest.search(/\s/)
+  if (rest === '' || gap === -1) {
+    return {
+      kind: 'error',
+      message: '정정할 결정 id와 내용이 필요합니다. 예: /optimize correct d1 로컬에서만 처리',
+    }
+  }
+  const id = rest.slice(0, gap).trim()
+  const text = rest.slice(gap + 1).trim()
+  if (id === '' || text === '') {
+    return {
+      kind: 'error',
+      message: '정정할 결정 id와 내용이 필요합니다. 예: /optimize correct d1 로컬에서만 처리',
+    }
+  }
+  return { kind: 'correct', id, text }
 }
 
 /**
@@ -261,6 +301,14 @@ export function formatStatus(
   } else {
     lines.push(`진행 중인 개선 작업: ${workflow.id} · 단계 ${workflow.phase} · ${workflow.rounds}/${workflowRoundLimit(workflow, config.maxRounds)}회`)
     if (workflow.lastError !== undefined) lines.push(`마지막 오류: ${workflow.lastError}`)
+    if (workflow.budgetError !== undefined) {
+      const ids = workflow.budgetError.decisionIds.length === 0
+        ? '없음'
+        : workflow.budgetError.decisionIds.join(', ')
+      lines.push(
+        `마지막 요청 한도 초과: 필요 ${workflow.budgetError.requiredChars}자 / 한도 ${workflow.budgetError.limitChars}자 · 보호된 결정 ${ids}`,
+      )
+    }
   }
 
   const usage = state.usage
@@ -455,6 +503,24 @@ async function dispatch(
           deps.controller.getGuidanceStatus?.() ?? null,
         ),
       }
+    case 'decisions': {
+      const workflow = deps.controller.getState().workflow
+      return { text: workflow === null ? NO_WORKFLOW : formatDecisions(workflow) }
+    }
+    case 'correct': {
+      if (!hasWorkflow(deps)) return { text: NO_WORKFLOW }
+      const correct = deps.controller.correctDecision
+      if (correct === undefined) return { text: '결정 정정을 지원하지 않는 호스트입니다.' }
+      const result = correct.call(deps.controller, command.id, command.text)
+      if (!result.ok) return { text: result.reason }
+      // Match the controller's notice: only a round below the limit can apply
+      // the correction directly.
+      return {
+        text: canStartRound(deps.controller.getState(), deps.settings.get().maxRounds)
+          ? CORRECTION_NOTICE
+          : CORRECTION_LIMIT_NOTICE,
+      }
+    }
     case 'help':
       return { text: HELP_TEXT }
     case 'error':

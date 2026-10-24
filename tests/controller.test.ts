@@ -13,13 +13,15 @@ import type {
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { EnginePorts, ModelUsage, OptimizerConfig, RuntimeState } from '../hooks/contracts'
-import { DEFAULT_CONFIG } from '../hooks/contracts'
+import { DEFAULT_CONFIG, MAX_REQUEST_CHARS } from '../hooks/contracts'
 import {
   createController,
   PANE_ID,
   type ControllerDeps,
   type OptimizerController,
 } from '../hooks/controller'
+import { activeDecisions, hasPendingCorrection } from '../hooks/decisions'
+import { REQUEST_BUDGET_NOTICE } from '../hooks/model'
 import type { RawEditFacts } from '../hooks/raw-mode'
 
 const USAGE: ModelUsage = {
@@ -1293,7 +1295,7 @@ describe('refine — the improvement dialogue', () => {
     expect(h.notices).toContain('개선 횟수 한도에 도달했습니다')
   })
 
-  test('puts a refinement instruction in the request exactly once', async () => {
+  test('does not duplicate a refinement instruction in <instruction>', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
@@ -1302,15 +1304,15 @@ describe('refine — the improvement dialogue', () => {
     await h.controller.refine(h.ports, '더 짧게')
 
     const refined = requestText(h.completes.at(-1)?.prompt)
-    // The supplement is rendered once, in the dialogue; the request must not
-    // also repeat it in an `<instruction>` section.
-    expect(refined.split('더 짧게')).toHaveLength(2)
+    // The supplement is rendered in the decision evidence and the dialogue;
+    // the request must not also repeat it in an `<instruction>` section.
+    expect(refined.split('더 짧게')).toHaveLength(3)
     expect(refined).not.toContain('<instruction>')
 
     await h.controller.retry(h.ports, '조금 더')
 
     const retried = requestText(h.completes.at(-1)?.prompt)
-    expect(retried.split('조금 더')).toHaveLength(2)
+    expect(retried.split('조금 더')).toHaveLength(3)
     expect(retried).not.toContain('<instruction>')
   })
 
@@ -1358,11 +1360,104 @@ describe('refine — the improvement dialogue', () => {
     await h.controller.refine(h.ports, '더 짧게')
     await h.controller.retry(h.ports)
 
-    // The supplement is already in the dialogue; a bare retry must not also
-    // re-render it as the `<instruction>` section.
+    // The supplement is already in the decision evidence and the dialogue; a
+    // bare retry must not also re-render it as the `<instruction>` section.
     const retried = requestText(h.completes.at(-1)?.prompt)
-    expect(retried.split('더 짧게')).toHaveLength(2)
+    expect(retried.split('더 짧게')).toHaveLength(3)
     expect(retried).not.toContain('<instruction>')
+  })
+})
+
+
+describe('preflight request budget', () => {
+  test('a first refusal keeps the run, spends nothing and never restores the original', async () => {
+    const h = harness()
+    const timers = progressClock(h)
+    h.controller.onSessionStart('sess-1')
+    const original = 'O'.repeat(17500)
+    await h.controller.startExplicit(h.ports, original, 'pane')
+    await h.flush()
+
+    expect(h.calls.complete).toBe(0)
+    expect(h.calls.fork).toBe(0)
+    const state = h.controller.getState()
+    expect(state.usage.calls).toBe(0)
+    expect(state.workflow?.rounds).toBe(0)
+    expect(state.workflow?.phase).toBe('failed')
+    expect(state.workflow?.lastError).toBe(REQUEST_BUDGET_NOTICE)
+    expect(state.workflow?.budgetError?.limitChars).toBe(MAX_REQUEST_CHARS)
+    expect(state.workflow?.budgetError?.requiredChars).toBeGreaterThan(MAX_REQUEST_CHARS)
+    expect(state.workflow?.decisions?.entries).toHaveLength(0)
+    expect(h.notices).toContain(REQUEST_BUDGET_NOTICE)
+    // The first-failure restore path did not run.
+    expect(h.fills).toHaveLength(0)
+    expect(timers.every(timer => timer.cancelled)).toBe(true)
+
+    // Retrying the unchanged protected content refuses again, still at no cost.
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(0)
+    expect(h.controller.getState().workflow?.rounds).toBe(0)
+
+    // Cancel stays available and restores the original through the normal path.
+    const cancelled = await h.controller.cancel(h.ports)
+    expect(cancelled.ok).toBe(true)
+    expect(h.fills.at(-1)?.text).toBe(original)
+  })
+
+  test('a later refusal keeps the draft, counters and guidance and leaves accept available', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    const before = h.controller.getState()
+    const guidance = h.controller.getGuidanceStatus()
+    const timers = progressClock(h)
+
+    const huge = 'X'.repeat(17000)
+    await h.controller.refine(h.ports, huge)
+    const after = h.controller.getState()
+
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.fork).toBe(0)
+    expect(after.usage).toEqual(before.usage)
+    expect(after.workflow?.usage).toEqual(before.workflow?.usage)
+    expect(after.workflow?.rounds).toBe(before.workflow?.rounds)
+    expect(after.workflow?.roundLimit).toBe(before.workflow?.roundLimit)
+    expect(after.workflow?.draft).toBe(before.workflow?.draft)
+    expect(after.workflow?.phase).toBe('failed')
+    expect(after.workflow?.decisions?.entries).toHaveLength(1)
+    expect(after.workflow?.decisions?.entries[0]?.text).toBe(huge)
+    expect(after.workflow?.budgetError?.decisionIds).toEqual(['d1'])
+    expect(h.controller.getGuidanceStatus()).toBe(guidance)
+    expect(h.notices).toContain(REQUEST_BUDGET_NOTICE)
+    expect(h.fills).toHaveLength(0)
+    expect(timers.every(timer => timer.cancelled)).toBe(true)
+
+    const accepted = await h.controller.accept(h.ports)
+    expect(accepted.ok).toBe(true)
+    expect(h.fills.at(-1)?.text).toBe(before.workflow?.draft)
+  })
+
+  test('a budget refusal still allows the oversized decision to be corrected, and retry applies it', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    await h.controller.refine(h.ports, 'X'.repeat(17000))
+    expect(h.controller.getState().workflow?.phase).toBe('failed')
+    expect(h.controller.getState().workflow?.budgetError?.decisionIds).toEqual(['d1'])
+    const before = h.calls.complete
+
+    const corrected = h.controller.correctDecision('d1', '짧은 결정')
+    expect(corrected).toEqual({ ok: true })
+    expect(h.calls.complete).toBe(before)
+    expect(h.controller.getState().workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(before + 1)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('짧은 결정')
+    expect(prompt).not.toContain('X'.repeat(1000))
   })
 })
 
@@ -2430,6 +2525,148 @@ async function startQuestion(h: Harness, ui: 'pane' | 'composer' = 'pane') {
   await h.flush()
 }
 
+
+describe('explicit decision correction', () => {
+  test('replaces an active decision without a call and the retry request uses only the new text', async () => {
+    const h = harness({
+      complete: async (_request, _signal, call) => call === 1 ? questionReply() : answered(`개선안 ${call}`),
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '외부 서비스 사용')
+    const before = h.calls.complete
+
+    const corrected = h.controller.correctDecision('d1', '로컬에서만 처리')
+    expect(corrected).toEqual({ ok: true })
+    expect(h.calls.complete).toBe(before)
+    const workflow = h.controller.getState().workflow
+    expect(workflow?.rounds).toBe(2)
+    expect(workflow?.draft).toBe('개선안 2')
+    expect(workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(workflow?.decisions?.entries[1]?.text).toBe('로컬에서만 처리')
+    expect(workflow?.decisions?.entries[1]?.supersedes).toBe('d1')
+    expect(workflow?.decisions?.entries[1]?.source).toBe(workflow?.decisions?.entries[0]?.source)
+    expect(h.notices).toContain('결정을 정정했습니다. /optimize retry로 개선안에 반영하세요.')
+
+    await h.controller.retry(h.ports)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('로컬에서만 처리')
+    expect(prompt).not.toContain('외부 서비스 사용')
+  })
+
+  test('a second correction cuts the retry dialogue that reasoned from the replaced value', async () => {
+    const h = harness({
+      complete: async (_request, _signal, call) => {
+        if (call === 1) return answered('개선안 1', 'R1-QUESTION', ASK_QUESTION, ASK_OPTIONS)
+        if (call === 2) return answered('개선안 2', 'R2-INTERMEDIATE')
+        if (call === 3) return answered('개선안 3', 'R3-FOR-D2')
+        return answered('개선안 4', 'R4-FINAL')
+      },
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '외부 서비스 사용')
+    expect(h.controller.correctDecision('d1', '로컬에서만 처리').ok).toBe(true)
+    await h.controller.retry(h.ports)
+    expect(h.controller.correctDecision('d2', '로컬 전용, 외부 호출 금지').ok).toBe(true)
+
+    await h.controller.retry(h.ports)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('로컬 전용, 외부 호출 금지')
+    for (const stale of ['R1-QUESTION', 'R2-INTERMEDIATE', 'R3-FOR-D2']) {
+      expect(prompt).not.toContain(stale)
+    }
+    expect(prompt).not.toContain('user: 로컬에서만 처리')
+    expect(prompt).not.toContain('"id":"d2"')
+  })
+
+  test('a correction is allowed at the exhausted round limit and leaves unrelated decisions active', async () => {
+    const h = harness({
+      config: { maxRounds: 3 },
+      complete: async (_request, _signal, call) => call === 1 ? questionReply() : answered(`개선안 ${call}`),
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    await h.controller.refine(h.ports, '둘째 결정')
+    const before = h.calls.complete
+    expect(h.controller.getState().workflow?.rounds).toBe(3)
+
+    const corrected = h.controller.correctDecision('d1', '첫 결정 정정')
+    expect(corrected.ok).toBe(true)
+    expect(h.calls.complete).toBe(before)
+    expect(h.controller.getState().workflow?.rounds).toBe(3)
+    const active = activeDecisions(h.controller.getState().workflow?.decisions ?? { entries: [], nextId: 1 })
+    expect(active.map(entry => entry.text)).toEqual(['둘째 결정', '첫 결정 정정'])
+    // At the limit the notice names the approval step; the bare retry below
+    // cannot apply the correction until /optimize more approves a round.
+    expect(h.notices).toContain(
+      '결정을 정정했습니다. 라운드 한도에 도달했으니 /optimize more 로 승인한 뒤 /optimize retry 로 반영하세요.',
+    )
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(before)
+
+    expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow?.roundLimit).toBe(8)
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(before + 1)
+    expect(hasPendingCorrection(h.controller.getState().workflow)).toBe(false)
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('첫 결정 정정')
+    expect(prompt).not.toContain('"id":"d1"')
+  })
+
+  test('an open host choice dialog blocks correction instead of clearing its marker', async () => {
+    const dialog = questionDialog()
+    const h = harness({ ui: { ask: dialog.ask }, complete: async () => questionReply() })
+    await startQuestion(h)
+    expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
+
+    const corrected = h.controller.correctDecision('d1', '로컬')
+    expect(corrected.ok).toBe(false)
+    expect(corrected.reason).toBe('열린 선택 창을 먼저 닫아 주세요.')
+    expect(h.notices).toContain('열린 선택 창을 먼저 닫아 주세요.')
+    expect(h.calls.complete).toBe(1)
+    expect(h.controller.getState().workflow?.decisions?.entries).toHaveLength(0)
+  })
+
+  test('missing, blank, replaced and no-workflow corrections fail without a call', async () => {
+    const empty = harness()
+    empty.controller.onSessionStart('sess-1')
+    expect(empty.controller.correctDecision('d1', 'x').reason).toBe('진행 중인 개선 작업이 없습니다.')
+
+    const h = harness({ complete: async (_request, _signal, call) => call === 1 ? questionReply() : answered('개선안') })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    const before = h.calls.complete
+    expect(h.controller.correctDecision('d9', 'x').ok).toBe(false)
+    expect(h.controller.correctDecision('d1', '   ').ok).toBe(false)
+    expect(h.controller.correctDecision('d1', '정정 결정').ok).toBe(true)
+    expect(h.controller.correctDecision('d1', '다시 정정').ok).toBe(false)
+    expect(h.calls.complete).toBe(before)
+  })
+
+  test('a failed later generation keeps the correction and still accepts another', async () => {
+    let call = 0
+    const h = harness({
+      complete: async () => {
+        call += 1
+        if (call === 1) return questionReply()
+        if (call === 2) return answered('두 번째 개선안')
+        return apiError()
+      },
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    expect(h.controller.correctDecision('d1', '정정 결정').ok).toBe(true)
+
+    await h.controller.retry(h.ports)
+    const failed = h.controller.getState().workflow
+    expect(failed?.phase).toBe('failed')
+    expect(failed?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2'])
+    expect(failed?.decisions?.entries[1]?.text).toBe('정정 결정')
+    expect(h.controller.correctDecision('d2', '실패 뒤 재정정').ok).toBe(true)
+    expect(h.controller.getState().workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2', 'd3'])
+  })
+})
+
 describe('round extensions — explicit approval and workflow isolation', () => {
   test('the default fifth round asks for approval before preserving and asking its unresolved question', async () => {
     const approval = questionDialog()
@@ -2509,6 +2746,9 @@ describe('round extensions — explicit approval and workflow isolation', () => 
       if (disposition === 'decline') approval.resolve('현재 개선안 유지')
       if (disposition === 'escape') approval.reject(new Error('Esc'))
       await h.waitFor(() => h.controller.getState().workflow?.limitAsk === (disposition === 'decline' ? 'declined' : 'closed'))
+      if (disposition === 'decline') {
+        expect(h.notices).toContain('추가 호출 없이 현재 개선안과 미해결 질문을 유지합니다.')
+      }
 
       await h.controller.refine(h.ports, '승인 없이 계속')
       await h.controller.retry(h.ports, '승인 없이 재시도')
@@ -2528,6 +2768,57 @@ describe('round extensions — explicit approval and workflow isolation', () => 
       expect(followup.calls).toHaveLength(1)
     })
   }
+
+  test('declining a correction-only extension keeps the correction and names the approval path', async () => {
+    const approval = questionDialog()
+    const h = harness({
+      config: { maxRounds: 2 },
+      ui: { ask: approval.ask },
+      // One choice keeps the question dialog closed so the only ask below is
+      // the correction-only round-extension dialog.
+      complete: async (_r, _s, n) => n === 1 ? answered('개선안', '독자를 확인합니다', ASK_QUESTION) : answered('개선안 2'),
+    })
+    await startQuestion(h)
+    await h.controller.refine(h.ports, '첫 결정')
+    const atLimit = h.controller.getState().workflow!
+    expect(atLimit.rounds).toBe(2)
+    expect(atLimit.question).toBeNull()
+    expect(h.controller.correctDecision('d1', '정정 결정').ok).toBe(true)
+    expect(hasPendingCorrection(h.controller.getState().workflow)).toBe(true)
+
+    await h.controller.retry(h.ports)
+    expect(approval.calls).toHaveLength(1)
+    expect(approval.calls[0]?.question).toContain('정정한 결정이 아직 반영되지 않았습니다')
+    expect(approval.calls[0]?.question).not.toContain('미해결 질문')
+    approval.resolve('현재 개선안 유지')
+    await h.waitFor(() => h.controller.getState().workflow?.limitAsk === 'declined')
+
+    expect(h.notices).toContain(
+      '추가 라운드를 승인하지 않았습니다. 정정한 결정은 유지되며 /optimize more 로 다시 승인할 수 있습니다.',
+    )
+    expect(h.notices).not.toContain('추가 호출 없이 현재 개선안과 미해결 질문을 유지합니다.')
+    const after = h.controller.getState().workflow!
+    expect(after.question).toBeNull()
+    expect(after.draft).toBe('개선안 2')
+    expect(hasPendingCorrection(after)).toBe(true)
+    expect(h.calls.complete).toBe(2)
+  })
+
+  test('refuses an extension at the limit with no question or pending correction', async () => {
+    const h = harness({ config: { maxRounds: 1 }, complete: async () => answered('개선안') })
+    await startQuestion(h)
+    const before = h.controller.getState().workflow!
+    expect(before.rounds).toBe(1)
+    expect(before.question).toBeNull()
+    expect(hasPendingCorrection(before)).toBe(false)
+
+    expect(await h.controller.extendRounds(h.ports)).toEqual({
+      ok: false,
+      reason: '한도에 도달하고 미해결 질문이나 반영할 정정이 남아 있을 때만 연장할 수 있습니다.',
+    })
+    expect(h.controller.getState().workflow?.roundLimit).toBeUndefined()
+    expect(h.calls.complete).toBe(1)
+  })
 
   test('clears a stale extension dialog after the configured limit changes and it is dismissed', async () => {
     const approval = questionDialog()
@@ -2741,7 +3032,9 @@ describe('ui.ask — detached questions and pane fallback', () => {
       dialog.resolve(answer)
       await h.waitFor(() => h.controller.getState().workflow?.rounds === 2)
       expect(h.calls.complete).toBe(2)
-      expect(h.controller.getState().workflow?.dialogue.filter(m => m.role === 'user')).toEqual([{ role: 'user', text: answer }])
+      expect(h.controller.getState().workflow?.dialogue.filter(m => m.role === 'user')).toEqual([
+        { role: 'user', text: answer, decisionId: 'd1' },
+      ])
     })
   }
 
