@@ -7,7 +7,7 @@ import type {
 } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import type { SubmitTarget, TransferTarget } from '../hooks/contracts'
+import type { RestoreCheck, RestoreGuard, SubmitTarget, TransferTarget } from '../hooks/contracts'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from '../hooks/delivery'
 
 /**
@@ -21,6 +21,10 @@ interface EngineHooks {
    * array is handed to successive `$.prompt.read()` calls, '' once exhausted.
    */
   box?: string | readonly string[]
+  /** Overrides `$.prompt.read`, so a test can hold one read open. */
+  read?: () => { text: string; cursor: number } | Promise<{ text: string; cursor: number }>
+  /** Overrides `$.ui.close`, so a test can hold the pane close open. */
+  close?: () => Promise<void>
   /** Overrides the default successful fill result. */
   fill?: (input: PromptFillArgs) => PromptFilled | Promise<PromptFilled>
   fillError?: unknown
@@ -38,6 +42,8 @@ interface FakeEngine {
   fills: PromptFillArgs[]
   submits: PromptSubmitArgs[]
   closes: string[]
+  /** The live box, so a test can prove a dispatched fill cannot be retracted. */
+  boxText(): string
 }
 
 function fakeEngine(hooks: EngineHooks = {}): FakeEngine {
@@ -55,6 +61,7 @@ function fakeEngine(hooks: EngineHooks = {}): FakeEngine {
       close: async ({ id }: { id: string }): Promise<void> => {
         calls.push(`ui.close(${id})`)
         closes.push(id)
+        if (hooks.close !== undefined) return hooks.close()
         if (hooks.closeError !== undefined) throw hooks.closeError
       },
     },
@@ -62,6 +69,7 @@ function fakeEngine(hooks: EngineHooks = {}): FakeEngine {
       read: async (): Promise<{ text: string; cursor: number }> => {
         calls.push('prompt.read')
         if (hooks.readError !== undefined) throw hooks.readError
+        if (hooks.read !== undefined) return hooks.read()
         const text = queue !== null ? (queue.shift() ?? '') : live
         return { text, cursor: text.length }
       },
@@ -83,7 +91,7 @@ function fakeEngine(hooks: EngineHooks = {}): FakeEngine {
       },
     },
   }
-  return { engine: engine as unknown as EngineInterface, calls, fills, submits, closes }
+  return { engine: engine as unknown as EngineInterface, calls, fills, submits, closes, boxText: () => live }
 }
 
 function transfer(over: Partial<TransferTarget> = {}): TransferTarget {
@@ -100,6 +108,41 @@ function submitTarget(over: Partial<SubmitTarget> = {}): SubmitTarget {
     ...over,
   }
 }
+
+/** A promise a test settles by hand, for holding a read, close or fill open. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(yes => { resolve = yes })
+  return { promise, resolve }
+}
+
+/** Spins microtasks until `predicate` holds, so a detached transfer is observable. */
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return
+    await Promise.resolve()
+  }
+  throw new Error('waitFor: condition never held')
+}
+
+/** A mutable stand-in restore guard, moved by the test at each boundary. */
+function fakeGuard(initial: RestoreCheck = 'current', recovery?: string): {
+  guard: RestoreGuard
+  set(check: RestoreCheck, text?: string): void
+} {
+  let check = initial
+  let text = recovery
+  return {
+    guard: { check: () => check, recoveryText: () => text },
+    set(next, nextText) {
+      check = next
+      text = nextText
+    },
+  }
+}
+
+/** One prompt-box snapshot as `$.prompt.read` returns it. */
+type BoxSnapshot = { text: string; cursor: number }
 
 describe('transferDraft — pane close and call order', () => {
   test('closes the pane before reading and filling', async () => {
@@ -244,6 +287,217 @@ describe('transferDraft — draft conflict', () => {
 
     expect(result.kind).toBe('filled')
     expect(calls).toEqual(['prompt.fill(insert)'])
+  })
+})
+
+describe('transferDraft — restore guard', () => {
+  test('a read that resolves after an observed edit cannot fill', async () => {
+    const read = deferred<BoxSnapshot>()
+    const { engine, fills } = fakeEngine({ read: () => read.promise })
+    const g = fakeGuard()
+
+    const pending = transferDraft(engine, transfer(), { now: 0, guard: g.guard })
+    g.set('edited', '새로 작성한 요청')
+    read.resolve({ text: '', cursor: 0 })
+
+    expect(await pending).toEqual({
+      kind: 'refused',
+      reason: 'draft-conflict',
+      recoveryText: '새로 작성한 요청',
+    })
+    expect(fills).toHaveLength(0)
+  })
+
+  test('a revision change refuses even when the read text is unchanged (ABA)', async () => {
+    const read = deferred<BoxSnapshot>()
+    const { engine, fills } = fakeEngine({ read: () => read.promise })
+    const g = fakeGuard()
+
+    const pending = transferDraft(engine, transfer(), { now: 0, guard: g.guard })
+    // The box read comes back as the target text, which `canReplace` alone
+    // would accept; the changed revision is the evidence of the edit.
+    g.set('edited')
+    read.resolve({ text: '개선된 초안', cursor: 6 })
+
+    expect(await pending).toEqual({ kind: 'refused', reason: 'draft-conflict' })
+    expect(fills).toHaveLength(0)
+  })
+
+  test('an edit already pending before the call refuses without touching the box', async () => {
+    const g = fakeGuard('edited', '작성 중이던 내용')
+    const { engine, calls, fills } = fakeEngine({ box: '' })
+
+    expect(await transferDraft(engine, transfer(), { now: 0, guard: g.guard })).toEqual({
+      kind: 'refused',
+      reason: 'draft-conflict',
+      recoveryText: '작성 중이던 내용',
+    })
+    expect(calls).toEqual([])
+    expect(fills).toHaveLength(0)
+  })
+
+  test('an owner change during the pane close stops the restore', async () => {
+    const close = deferred<void>()
+    const { engine, fills } = fakeEngine({ box: '', close: () => close.promise })
+    const g = fakeGuard()
+
+    const pending = transferDraft(engine, transfer(), { now: 0, paneId: 'pane-1', guard: g.guard })
+    await waitFor(() => fills.length === 0)
+    g.set('stale')
+    close.resolve()
+
+    expect(await pending).toEqual({ kind: 'refused', reason: 'stale-owner' })
+    expect(fills).toHaveLength(0)
+  })
+
+  test('an owner change while the read is pending stops the restore', async () => {
+    const read = deferred<BoxSnapshot>()
+    const { engine, fills } = fakeEngine({ read: () => read.promise })
+    const g = fakeGuard()
+
+    const pending = transferDraft(engine, transfer(), { now: 0, guard: g.guard })
+    g.set('stale')
+    read.resolve({ text: '', cursor: 0 })
+
+    expect(await pending).toEqual({ kind: 'refused', reason: 'stale-owner' })
+    expect(fills).toHaveLength(0)
+  })
+
+  test('an edit observed during the fill refuses with its recovery text and no ticket', async () => {
+    const fill = deferred<PromptFilled>()
+    const { engine, fills } = fakeEngine({ box: '', fill: () => fill.promise })
+    const g = fakeGuard()
+
+    const pending = transferDraft(engine, transfer(), { now: 0, guard: g.guard })
+    await waitFor(() => fills.length === 1)
+    g.set('edited', '새로 작성한 요청')
+    fill.resolve({ isFilled: true, text: '개선된 초안', cursor: 6 })
+
+    const result = await pending
+    expect(result).toEqual({
+      kind: 'refused',
+      reason: 'draft-conflict',
+      recoveryText: '새로 작성한 요청',
+    })
+    expect('ticket' in result).toBe(false)
+    expect(fills).toHaveLength(1)
+  })
+
+  test('an owner change after the dispatch returns stale-owner and cannot undo the fill', async () => {
+    const fill = deferred<PromptFilled>()
+    let box = ''
+    const { engine, fills } = fakeEngine({
+      box: '',
+      fill: input =>
+        fill.promise.then(() => {
+          box = input.text
+          return { isFilled: true, text: box, cursor: box.length }
+        }),
+    })
+    const g = fakeGuard()
+
+    const pending = transferDraft(engine, transfer(), { now: 0, guard: g.guard })
+    await waitFor(() => fills.length === 1)
+    g.set('stale')
+    fill.resolve({ isFilled: true, text: '', cursor: 0 })
+
+    const result = await pending
+    expect(result).toEqual({ kind: 'refused', reason: 'stale-owner' })
+    expect('ticket' in result).toBe(false)
+    expect(fills).toHaveLength(1)
+    // The host mutation already happened; the plugin can only report it.
+    expect(box).toBe('개선된 초안')
+  })
+
+  test('an edit observed during the fallback read withholds the ticket', async () => {
+    let reads = 0
+    const second = deferred<BoxSnapshot>()
+    const { engine, fills } = fakeEngine({
+      read: () => {
+        reads += 1
+        return reads === 1 ? { text: '', cursor: 0 } : second.promise
+      },
+      fill: () => ({ isFilled: true, text: '', cursor: 0 }),
+    })
+    const g = fakeGuard()
+
+    const pending = transferDraft(engine, transfer(), { now: 0, guard: g.guard })
+    await waitFor(() => fills.length === 1 && reads === 2)
+    g.set('edited', '새로 작성한 요청')
+    second.resolve({ text: '새로 작성한 요청', cursor: 8 })
+
+    const result = await pending
+    expect(result).toEqual({
+      kind: 'refused',
+      reason: 'draft-conflict',
+      recoveryText: '새로 작성한 요청',
+    })
+    expect('ticket' in result).toBe(false)
+  })
+
+  test('an unchanged guard still fills a box holding the normalized target', async () => {
+    const g = fakeGuard()
+    const { engine, fills } = fakeEngine({ box: '  개선된 초안  ' })
+
+    const result = await transferDraft(engine, transfer(), { now: 0, guard: g.guard })
+
+    expect(result.kind).toBe('filled')
+    expect(fills).toHaveLength(1)
+  })
+
+  test('append keeps its behavior with a current guard', async () => {
+    const g = fakeGuard()
+    const { engine, fills } = fakeEngine({ box: '기존 초안' })
+
+    const result = await transferDraft(engine, transfer({ text: ' + 추가', mode: 'append' }), {
+      now: 0,
+      guard: g.guard,
+    })
+
+    expect(result).toMatchObject({ kind: 'filled', text: '기존 초안 + 추가' })
+    expect(fills).toHaveLength(1)
+  })
+
+  test('append refuses before the dispatch when the guard is stale', async () => {
+    const g = fakeGuard('stale')
+    const { engine, fills } = fakeEngine({ box: '기존 초안' })
+
+    expect(
+      await transferDraft(engine, transfer({ text: ' + 추가', mode: 'append' }), { now: 0, guard: g.guard }),
+    ).toEqual({ kind: 'refused', reason: 'stale-owner' })
+    expect(fills).toHaveLength(0)
+  })
+
+  test('a fill refusal keeps the engine cause when the guard only saw an edit', async () => {
+    const g = fakeGuard()
+    const { engine } = fakeEngine({
+      box: '',
+      fill: () => {
+        g.set('edited', '작성 중')
+        return { isFilled: false, refusal: 'no_composer', text: '', cursor: 0 }
+      },
+    })
+
+    expect(await transferDraft(engine, transfer(), { now: 0, guard: g.guard })).toEqual({
+      kind: 'refused',
+      reason: 'no_composer',
+    })
+  })
+
+  test('a thrown fill reports stale ownership when the call is obsolete', async () => {
+    const g = fakeGuard()
+    const { engine } = fakeEngine({
+      box: '',
+      fill: () => {
+        g.set('stale')
+        throw new Error('boom')
+      },
+    })
+
+    expect(await transferDraft(engine, transfer(), { now: 0, guard: g.guard })).toEqual({
+      kind: 'refused',
+      reason: 'stale-owner',
+    })
   })
 })
 

@@ -537,12 +537,40 @@ export interface TransferTarget {
 export type TransferMode = 'replace' | 'append' | 'insert'
 
 /** Why a restore did not place text in the prompt box. */
-export type TransferRefusal = 'no_composer' | 'dialog' | 'draft-conflict' | 'hook-refused' | 'unknown'
+export type TransferRefusal =
+  | 'no_composer'
+  | 'dialog'
+  | 'draft-conflict'
+  | 'hook-refused'
+  /** The restore's session/workflow/operation no longer owns the box. */
+  | 'stale-owner'
+  | 'unknown'
 
-/** The outcome of restoring a draft: filled (with its permit) or refused. */
+/**
+ * The outcome of restoring a draft: filled (with its permit) or refused.
+ * A conflict detected after the read may carry the exact external text seen
+ * during the restore, for the caller's manual-recovery notice.
+ */
 export type TransferResult =
   | { kind: 'filled'; text: string; ticket: BypassTicket }
-  | { kind: 'refused'; reason: TransferRefusal }
+  | { kind: 'refused'; reason: TransferRefusal; recoveryText?: string }
+
+/** How one observed restore guard sees the box right now. */
+export type RestoreCheck = 'current' | 'edited' | 'stale'
+
+/**
+ * Best-effort protection for one restore, over events this plugin actually
+ * observed (`prompt.edit`, foreign `prompt.fill`, autocomplete and session
+ * changes). The host exposes no compare-and-set, so this catches edits seen
+ * before a fill, not one that arrives after the last synchronous check; see
+ * `docs/DESIGN.md`.
+ */
+export interface RestoreGuard {
+  /** `current` only while the owner, operation and observed revision match. */
+  check(): RestoreCheck
+  /** Latest complete external box observation since capture; undefined means unknown. */
+  recoveryText(): string | undefined
+}
 
 /** What an approved send should submit and where its metadata comes from. */
 export interface SubmitTarget {

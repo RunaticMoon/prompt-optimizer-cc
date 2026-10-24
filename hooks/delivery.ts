@@ -18,6 +18,7 @@ import type { PromptFilled, PromptSubmitResult } from 'claude-code'
 import type {
   BypassTicket,
   EnginePorts,
+  RestoreGuard,
   SubmitTarget,
   TransferRefusal,
   TransferResult,
@@ -39,6 +40,14 @@ export interface TransferOptions {
   expectedDraft?: string | readonly string[]
   /** Pane holding the dialogue, closed before the fill. */
   paneId?: string
+  /**
+   * Best-effort ownership/observed-edit guard. When supplied, every async
+   * boundary re-checks it and a changed box stops the restore before (or, for
+   * a change during the fill, right after) the dispatch; the host exposes no
+   * compare-and-set, so a change not yet observed can still land. Absent, the
+   * helper keeps its original read/fill behavior for standalone callers.
+   */
+  guard?: RestoreGuard
 }
 
 /** The outcome of an explicit send. */
@@ -52,10 +61,13 @@ export type SendResult =
  *
  * Order (fixed by the design): close the pane, refuse to overwrite a fresh
  * draft the person typed, fill, and issue a permit only for a fill that landed.
+ * With a {@link RestoreGuard}, the same boundaries also re-check ownership and
+ * observed edits: a change before the fill stops it, a change during it is
+ * reported as a conflict (never repaired with a second fill).
  *
  * @param $ the engine
  * @param target where the text goes and how it lands
- * @param opts restore options: `now`, the expected draft, and an optional pane
+ * @param opts restore options: `now`, the expected draft, an optional pane and guard
  * @returns `filled` with the bypass permit, or `refused` with the reason
  */
 export async function transferDraft(
@@ -63,6 +75,13 @@ export async function transferDraft(
   target: TransferTarget,
   opts: TransferOptions,
 ): Promise<TransferResult> {
+  const guard = opts.guard
+
+  // A restore that is already obsolete, or whose box changed before this call,
+  // does no work at all: no pane close, no read, no fill.
+  const entered = guardRefusal(guard)
+  if (entered !== null) return entered
+
   // 1. Close the pane holding the dialogue first, when one is open. A pane
   //    that is already gone (or a close that fails) must not stop the restore.
   if (opts.paneId !== undefined) {
@@ -71,6 +90,8 @@ export async function transferDraft(
     } catch {
       // Swallow and continue: the pane may already be closed.
     }
+    const closed = guardRefusal(guard)
+    if (closed !== null) return closed
   }
 
   // 2. Never overwrite text the person typed themselves. `append` and `insert`
@@ -83,21 +104,44 @@ export async function transferDraft(
       // The box could not be read, so it cannot be safely replaced.
       return { kind: 'refused', reason: 'unknown' }
     }
+    // The read's snapshot is already old once an edit was observed while it
+    // was pending: a changed revision refuses even if the text is unchanged
+    // (a person could have typed and undone it, ABA).
+    const read = guardRefusal(guard)
+    if (read !== null) return read
     if (!canReplace(current, opts.expectedDraft, target.text)) {
       return { kind: 'refused', reason: 'draft-conflict' }
     }
   }
 
-  // 3. Place the text in the box.
+  // 3. Place the text in the box. The final synchronous check leaves no await
+  //    between it and the dispatch; a change during the fill is caught below.
+  const dispatched = guardRefusal(guard)
+  if (dispatched !== null) return dispatched
   let filled: PromptFilled
   try {
     filled = await $.prompt.fill({ text: target.text, mode: target.mode })
   } catch {
-    return { kind: 'refused', reason: 'unknown' }
+    // An obsolete call reports the stronger cause; otherwise nothing landed.
+    const after = guardRefusal(guard)
+    return after !== null && after.kind === 'refused' && after.reason === 'stale-owner'
+      ? after
+      : { kind: 'refused', reason: 'unknown' }
   }
+
   if (!filled.isFilled) {
+    // A refusal keeps the engine's own cause, unless the caller no longer owns
+    // the box at all (then the outcome is moot).
+    const after = guardRefusal(guard)
+    if (after !== null && after.kind === 'refused' && after.reason === 'stale-owner') return after
     return { kind: 'refused', reason: refusalToTransfer(filled.refusal) }
   }
+
+  // A conflict here may already have overwritten the person's text: the host
+  // offers no conditional fill. Do not fill again; report it with the observed
+  // recovery text so the caller can publish it.
+  const landed = guardRefusal(guard)
+  if (landed !== null) return landed
 
   // 4. A permit is issued only for a fill that actually landed, over the text
   //    the box now holds (`append`/`insert` keep what was already there). The
@@ -115,6 +159,10 @@ export async function transferDraft(
       // the last available record of what the caller meant to place.
       text = ''
     }
+    // The fallback read must not outrun the guard: a box observed as changed
+    // during it means the restored text is no longer the box's content.
+    const reread = guardRefusal(guard)
+    if (reread !== null) return reread
   }
   if (text === '') text = target.text
   const ticket: BypassTicket = {
@@ -150,6 +198,21 @@ export async function sendApproved($: EnginePorts, target: SubmitTarget): Promis
   }
   if (result.drop !== undefined) return { kind: 'dropped', reason: result.drop }
   return { kind: 'sent', text: result.text }
+}
+
+/**
+ * The refusal for a guard that is no longer current, or `null` when it still
+ * is (or no guard was supplied). Stale ownership outranks an observed edit.
+ */
+function guardRefusal(guard: RestoreGuard | undefined): TransferResult | null {
+  if (guard === undefined) return null
+  const verdict = guard.check()
+  if (verdict === 'current') return null
+  if (verdict === 'stale') return { kind: 'refused', reason: 'stale-owner' }
+  const recoveryText = guard.recoveryText()
+  return recoveryText === undefined
+    ? { kind: 'refused', reason: 'draft-conflict' }
+    : { kind: 'refused', reason: 'draft-conflict', recoveryText }
 }
 
 /**
