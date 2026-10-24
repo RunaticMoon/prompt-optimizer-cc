@@ -192,7 +192,7 @@ If the pane cannot be laid out or `uiMode` is `composer`, the improvement dialog
 
 ### 4.6 The `/optimize` command
 
-Command name `optimize`, description `프롬프트 옵티마이저: 개선 시작·승인·전송·설정` ("Prompt Optimizer: start, approve, send, configure improvements"), argument hint `[text|on|off|accept|send|raw|cancel|retry|more|status|model <id>]` (`hooks/commands.ts`). The first token is compared case-insensitively against the reserved words, and the rest are the arguments.
+Command name `optimize`, description `프롬프트 옵티마이저: 개선 시작·승인·전송·설정` ("Prompt Optimizer: start, approve, send, configure improvements"), argument hint `[text|on|off|accept|send|raw|cancel|retry|more|status|model <id>]` (`hooks/commands.ts`). The first token is compared case-insensitively against the reserved words. `retry` and `model` take the whole rest as their argument; every other reserved word takes none, so trailing text after it returns a usage error.
 
 | Command | Behavior |
 |---|---|
@@ -209,7 +209,7 @@ Command name `optimize`, description `프롬프트 옵티마이저: 개선 시�
 | `/optimize -- <text>` | Starts improvement even for a sentence that begins with a reserved word. |
 | `/optimize help` | Shows command help. |
 
-- If it is not a reserved word (or is escaped with `--`), the entire argument is used as the improvement text. Use `/optimize -- more ...` for a prompt starting with the new reserved word `more`.
+- If it is not a reserved word (or is escaped with `--`), the entire argument is used as the improvement text. `on`/`off`/`accept`/`send`/`raw`/`cancel`/`more`/`status`/`help` accept no trailing text: `/optimize send this prompt later` is now a usage error, and to improve that sentence use `/optimize -- send this prompt later` (previously the first word alone selected the command and the rest was dropped). Use `/optimize -- more ...` for a prompt starting with the new reserved word `more`.
 - `model` with no argument returns a usage error.
 - Calling `accept`/`send`/`raw`/`cancel`/`retry`/`more` when there is no job in progress returns a single line `진행 중인 개선 작업이 없습니다. ...` ("There is no improvement job in progress. ...").
 - The settings line in `/optimize status` keeps the configured `maxRounds`, while the active-job line shows its approved limit (for example, `5/10회`).

@@ -131,16 +131,30 @@ describe('parseOptimizeArgs', () => {
     expect(parseOptimizeArgs('MODEL claude-3-5-haiku')).toEqual({ kind: 'model', model: 'claude-3-5-haiku' })
   })
 
-  test('a reserved word with a trailing sentence still selects the command', () => {
-    // Escaping is what `--` is for.
-    expect(parseOptimizeArgs('status 페이지를 고쳐줘')).toEqual({ kind: 'status' })
-    expect(parseOptimizeArgs('on 하고 나서 뭐하지')).toEqual({ kind: 'on' })
+  test('argument-less commands reject trailing text but accept the exact word in any case', () => {
+    const words = ['on', 'off', 'accept', 'send', 'raw', 'cancel', 'more', 'status', 'help'] as const
+    for (const word of words) {
+      // The exact word, any case, with surrounding whitespace, stays the command.
+      expect(parseOptimizeArgs(word)).toEqual({ kind: word })
+      expect(parseOptimizeArgs(`  ${word.toUpperCase()}  `)).toEqual({ kind: word })
+      // Trailing text is refused, with the lowercased head and the `--` escape.
+      expect(parseOptimizeArgs(`${word} 내용`)).toEqual({
+        kind: 'error',
+        message: `/optimize ${word} 명령은 추가 인자를 받지 않습니다. 이 문장을 개선하려면 /optimize -- ${word} ... 처럼 입력하세요.`,
+      })
+    }
+    // The message never repeats the rest of the typed line.
+    expect(parseOptimizeArgs('SEND this prompt later')).toEqual({
+      kind: 'error',
+      message: '/optimize send 명령은 추가 인자를 받지 않습니다. 이 문장을 개선하려면 /optimize -- send ... 처럼 입력하세요.',
+    })
   })
 
   test('the `--` escape always starts an optimization', () => {
     expect(parseOptimizeArgs('-- status 명령을 설명해줘')).toEqual({ kind: 'start', text: 'status 명령을 설명해줘' })
     expect(parseOptimizeArgs('--  raw  ')).toEqual({ kind: 'start', text: 'raw' })
     expect(parseOptimizeArgs('-- more details')).toEqual({ kind: 'start', text: 'more details' })
+    expect(parseOptimizeArgs('-- send this prompt later')).toEqual({ kind: 'start', text: 'send this prompt later' })
     expect(parseOptimizeArgs('--')).toEqual({ kind: 'start' })
     // A longer token that merely begins with `--` is not the escape.
     expect(parseOptimizeArgs('--status')).toEqual({ kind: 'start', text: '--status' })
@@ -853,6 +867,44 @@ describe('registerCommands — controller intents', () => {
       expect(result.text).toContain('진행 중인 개선 작업이 없습니다')
     }
     expect(r.calls).toEqual([])
+    expect(r.sets).toEqual([])
+  })
+
+  test('trailing text after an argument-less command changes nothing', async ($, on) => {
+    // A sendable draft is active, so `send`/`raw`/`cancel`/`off` would each act
+    // if the parser dropped the trailing text; the usage error must pre-empt it.
+    const r = rig()
+    wire(on, r)
+    for (const args of [
+      'send 내용',
+      'raw 내용',
+      'cancel 내용',
+      'off 내용',
+      'accept 내용',
+      'more 내용',
+      'on 내용',
+      'status 내용',
+      'help 내용',
+    ]) {
+      const result = await run($, args)
+      expect(result.text).toContain('사용법 오류:')
+    }
+    expect(r.calls).toEqual([])
+    expect(r.sets).toEqual([])
+    expect(r.configSets).toEqual([])
+    expect(r.scheduled).toEqual([])
+    expect(r.ui).toEqual([])
+  })
+
+  test('a trailing-text syntax error reads the same with no active workflow', async ($, on) => {
+    const r = rig({ current: liveState({ workflow: null }) })
+    wire(on, r)
+    const result = await run($, 'send 내용')
+    expect(result.text).toBe(
+      '사용법 오류: /optimize send 명령은 추가 인자를 받지 않습니다. 이 문장을 개선하려면 /optimize -- send ... 처럼 입력하세요.',
+    )
+    expect(r.calls).toEqual([])
+    expect(r.scheduled).toEqual([])
     expect(r.sets).toEqual([])
   })
 
