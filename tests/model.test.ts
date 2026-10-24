@@ -47,7 +47,7 @@ import {
 } from '../hooks/model'
 import { initialState, reduce } from '../hooks/state'
 import { BASE_SYSTEM_PROMPT, composeSystemPrompt } from '../hooks/system-prompt'
-import { DEEP_SYSTEM_PROMPT } from './fixtures/deep-system-prompt'
+import { DEEP_SYSTEM_PROMPTS } from './fixtures/deep-system-prompt'
 
 const FULL_USAGE: ModelUsage = {
   input_tokens: 120,
@@ -1106,8 +1106,10 @@ describe('composeSystemPrompt — assembly', () => {
 })
 
 describe('composeSystemPrompt — refinement levels', () => {
-  test('deep reproduces the captured v0.13.0 prompt byte-for-byte', () => {
-    expect(composeSystemPrompt('', 'common')).toBe(DEEP_SYSTEM_PROMPT)
+  test('deep reproduces the captured v0.13.0 prompt byte-for-byte for every profile', () => {
+    for (const profile of PROFILES) {
+      expect(composeSystemPrompt('', profile, 'deep')).toBe(DEEP_SYSTEM_PROMPTS[profile])
+    }
   })
 
   test('an omitted level equals explicit deep for every profile and extra', () => {
@@ -1176,6 +1178,22 @@ describe('composeSystemPrompt — refinement levels', () => {
     const standard = composeSystemPrompt('', 'common', 'standard')
     expect(standard).toContain('의존성 순서로 하나씩 묻는다')
     expect(standard).toContain('선택적인 이름·형식·정렬·반올림')
+  })
+
+  test('standard never asks the user for repository-discoverable facts', () => {
+    // execution-checkable facts always become investigation items; only
+    // optional naming/format/sort/rounding may be asked, and only when the
+    // request requires them or they change the contract.
+    const standard = composeSystemPrompt('', 'common', 'standard')
+    expect(standard).toContain(
+      '저장소에서 찾을 수 있거나 실행 에이전트가 확인할 사실은 사용자에게 묻지 않고 draft의 조사 항목으로 남긴다',
+    )
+    expect(standard).toContain(
+      '선택적인 이름·형식·정렬·반올림은 명시적으로 요구됐거나 계약에 영향을 줄 때만 묻고',
+    )
+    expect(standard).not.toContain(
+      '실행 에이전트가 확인할 사실과 선택적인 이름·형식·정렬·반올림은 명시적으로 요구됐거나 계약에 영향을 줄 때만 묻고',
+    )
   })
 
   test('round exhaustion never silently resolves an unresolved decision', () => {

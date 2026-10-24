@@ -335,16 +335,6 @@ function parseDiffBaseline(rest: string): ParsedCommand {
   return { kind: 'error', message: DIFF_USAGE }
 }
 
-/**
- * The `/optimize status` body: the effective settings, the active run's stage
- * and rounds, this session's summed usage, the target model applied to the
- * last request actually sent, and the last classified composer submission's
- * verdict with its reason. Pure, so it is easy to test.
- *
- * `guidance` is the controller's stored last-applied snapshot; `status` reads
- * it directly and never calls the model getter or any other port. The same
- * holds for `submission`, the controller's stored last-submission diagnostic.
- */
 /** The status label for each refinement level; the config union is exhaustive. */
 function describeRefinementLevel(level: RefinementLevel): string {
   switch (level) {
@@ -357,6 +347,16 @@ function describeRefinementLevel(level: RefinementLevel): string {
   }
 }
 
+/**
+ * The `/optimize status` body: the effective settings, the active run's stage
+ * and rounds, this session's summed usage, the target model applied to the
+ * last request actually sent, and the last classified composer submission's
+ * verdict with its reason. Pure, so it is easy to test.
+ *
+ * `guidance` is the controller's stored last-applied snapshot; `status` reads
+ * it directly and never calls the model getter or any other port. The same
+ * holds for `submission`, the controller's stored last-submission diagnostic.
+ */
 export function formatStatus(
   config: OptimizerConfig,
   state: Readonly<RuntimeState>,
