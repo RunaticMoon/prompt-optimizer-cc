@@ -968,16 +968,29 @@ export function createController(deps: ControllerDeps): OptimizerController {
       return
     }
 
+    let workflow: Workflow | null = null
     try {
       resetExtra()
-      const workflow = makeWorkflow(source, [], ui)
+      workflow = makeWorkflow(source, [], ui)
       apply({ type: 'start', workflow })
+      const scheduledWorkflow = workflow
       scheduleTask(
-        () => consumeAndRun(ports, workflow, [workflow.original]),
+        () => consumeAndRun(ports, scheduledWorkflow, [scheduledWorkflow.original]),
         cause => `개선을 시작하지 못했습니다: ${describeError(cause)}`,
       )
       consumedPrompt = { workflowId: workflow.id, texts: [workflow.original] }
     } catch (cause) {
+      // Undo a half-started run, as the Enter path does, so the person is not
+      // stuck behind a workflow that never had a clock to run on. `consumedPrompt`
+      // is set only after `scheduleTask`, so a failed attempt never owns it and
+      // an older run's entry stays untouched.
+      if (workflow !== null) {
+        try {
+          apply({ type: 'cancel', workflowId: workflow.id })
+        } catch {
+          // A throwing state listener must not swallow the failure notice.
+        }
+      }
       notify(`개선을 시작하지 못했습니다: ${describeError(cause)}`)
     }
   }
