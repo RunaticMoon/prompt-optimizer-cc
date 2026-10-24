@@ -192,7 +192,7 @@ claude --plugin-dir /path/to/prompt-optimizer
 
 ### 4.6 `/optimize` 명령
 
-명령 이름 `optimize`, 설명 `프롬프트 옵티마이저: 개선 시작·승인·전송·설정`, 인자 힌트 `[text|on|off|accept|send|raw|cancel|retry|more|status|model <id>]`(`hooks/commands.ts`). 첫 토큰을 대소문자 구분 없이 예약어로 비교하고, 나머지가 인자다.
+명령 이름 `optimize`, 설명 `프롬프트 옵티마이저: 개선 시작·승인·전송·설정`, 인자 힌트 `[text|on|off|accept|send|raw|cancel|retry|more|status|model <id>]`(`hooks/commands.ts`). 첫 토큰을 대소문자 구분 없이 예약어로 비교한다. `retry`와 `model`은 나머지 전체를 인자로 받고, 나머지 예약어는 인자를 받지 않으므로 뒤에 남는 텍스트가 있으면 사용법 오류를 반환한다.
 
 | 명령 | 동작 |
 |---|---|
@@ -209,7 +209,7 @@ claude --plugin-dir /path/to/prompt-optimizer
 | `/optimize -- <text>` | 예약어로 시작하는 문장도 개선 시작. |
 | `/optimize help` | 명령 도움말 표시. |
 
-- 예약어가 아니면(또는 `--` 이스케이프) 전체 인자를 개선 텍스트로 쓴다. 새 예약어 `more`로 시작하는 원문은 `/optimize -- more ...`로 입력한다.
+- 예약어가 아니면(또는 `--` 이스케이프) 전체 인자를 개선 텍스트로 쓴다. `on`/`off`/`accept`/`send`/`raw`/`cancel`/`more`/`status`/`help` 뒤에 남는 텍스트는 받지 않는다. 예를 들어 `/optimize send this prompt later`는 이제 사용법 오류를 반환하며, 이 문장을 개선하려면 `/optimize -- send this prompt later`로 입력한다(이전에는 첫 단어만 명령으로 읽고 남는 문장을 버렸다). 새 예약어 `more`로 시작하는 원문은 `/optimize -- more ...`로 입력한다.
 - `model`에 인자가 없으면 사용법 오류를 반환한다.
 - 진행 중인 작업이 없는데 `accept`/`send`/`raw`/`cancel`/`retry`/`more`를 부르면 `진행 중인 개선 작업이 없습니다. ...` 한 줄을 반환한다.
 - `/optimize status`의 설정 줄은 기존 `maxRounds`를, 진행 중인 작업 줄은 승인으로 늘어난 현재 한도(예: `5/10회`)를 표시한다.

@@ -162,10 +162,13 @@ const HELP_TEXT = [
  * Parses the argument string after `/optimize`.
  *
  * The first whitespace-delimited token, compared case-insensitively, selects a
- * reserved command; the rest is its argument. `model` without an argument, or
- * an unknown shape, becomes an `error`. Any non-reserved first token (or a
- * `--` escape) makes the whole trimmed argument the optimization text, and an
- * empty argument starts from the current composer draft.
+ * reserved command. `retry` and `model` take the rest as their argument, but
+ * every other reserved command takes none: trailing text after it is a usage
+ * error rather than silently dropped, and the error points at the `--` escape.
+ * `model` without an argument, or an unknown shape, becomes an `error`. Any
+ * non-reserved first token (or a `--` escape) makes the whole trimmed argument
+ * the optimization text, and an empty argument starts from the current
+ * composer draft.
  */
 export function parseOptimizeArgs(args: string): ParsedCommand {
   const trimmed = args.trim()
@@ -184,29 +187,41 @@ export function parseOptimizeArgs(args: string): ParsedCommand {
 
   switch (head) {
     case 'on':
-      return { kind: 'on' }
+      return rest === '' ? { kind: 'on' } : rejectExtraArgument(head)
     case 'off':
-      return { kind: 'off' }
+      return rest === '' ? { kind: 'off' } : rejectExtraArgument(head)
     case 'accept':
-      return { kind: 'accept' }
+      return rest === '' ? { kind: 'accept' } : rejectExtraArgument(head)
     case 'send':
-      return { kind: 'send' }
+      return rest === '' ? { kind: 'send' } : rejectExtraArgument(head)
     case 'raw':
-      return { kind: 'raw' }
+      return rest === '' ? { kind: 'raw' } : rejectExtraArgument(head)
     case 'cancel':
-      return { kind: 'cancel' }
+      return rest === '' ? { kind: 'cancel' } : rejectExtraArgument(head)
     case 'more':
-      return { kind: 'more' }
+      return rest === '' ? { kind: 'more' } : rejectExtraArgument(head)
     case 'status':
-      return { kind: 'status' }
+      return rest === '' ? { kind: 'status' } : rejectExtraArgument(head)
     case 'help':
-      return { kind: 'help' }
+      return rest === '' ? { kind: 'help' } : rejectExtraArgument(head)
     case 'retry':
       return rest === '' ? { kind: 'retry' } : { kind: 'retry', instruction: rest }
     case 'model':
       return rest === '' ? { kind: 'error', message: '모델 이름이 필요합니다. 예: /optimize model haiku' } : { kind: 'model', model: rest }
     default:
       return { kind: 'start', text: trimmed }
+  }
+}
+
+/**
+ * The usage error for trailing text after an argument-less command. It names
+ * the lowercased head and the escape example, and never repeats the rest of
+ * the typed line back as if it were input.
+ */
+function rejectExtraArgument(head: string): ParsedCommand {
+  return {
+    kind: 'error',
+    message: `/optimize ${head} 명령은 추가 인자를 받지 않습니다. 이 문장을 개선하려면 /optimize -- ${head} ... 처럼 입력하세요.`,
   }
 }
 
