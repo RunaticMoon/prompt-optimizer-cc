@@ -427,6 +427,12 @@ claude --plugin-dir . -p "type generation" \
 | `npm run version:bump` | `node scripts/bump-version.mjs <major\|minor\|patch\|X.Y.Z>` | 세 파일(`plugin.json`·`package.json`·`package-lock.json`)의 버전을 함께 올리고 새 버전을 출력 |
 | `npm run check:version` | `node scripts/bump-version.mjs --check` | 세 파일의 버전이 서로 일치하는지 확인 |
 
+**PR 검사**
+
+`.github/workflows/pr-checks.yml`는 `main` 대상 PR과 수동 실행(`workflow_dispatch`)에서 `version`(버전 일치), `package`(추적 파일에 생성 타입·참조 없음), `validate`(마켓플레이스·매니페스트·훅), `test (cli 2.1.292)`·`test (cli 2.1.304)`(최소 지원·현재 검증 CLI에서 mock 테스트)를 독립 검사로 실행한다. CLI 버전은 workflow의 `env`에 한 번만 적어 두었다. `test (cli latest)`는 최신 CLI를 추적하는 탐색용 검사로 `continue-on-error`이며 필수가 아니다.
+
+`typecheck`는 PR CI에서 실행하지 않는다. 생성 선언(`.claude-plugin/types/`)을 만들려면 실제 모델 호출이 필요하기 때문이다(위 `scripts/check-types.mjs` 안내). PR workflow는 그 사실을 job summary에 남기며 타입 검사를 통과했다고 표시하지 않는다. 실모델 의미 평가도 PR CI에서 실행하지 않는다. 이 workflow는 `contents: read`만 쓰고 secret을 쓰지 않는다. 이 검사를 필수 체크로 지정할지는 저장소 설정에서 별도로 정한다.
+
 파일 구조:
 
 ```text
@@ -440,6 +446,7 @@ claude --plugin-dir . -p "type generation" \
   types/               # CLI가 생성, gitignore, 커밋 금지
 .github/
   workflows/
+    pr-checks.yml      # PR: 버전·패키지·매니페스트·mock 테스트 매트릭스(읽기 전용)
     version-bump.yml   # main 머지 후 버전 범프·커밋·태그
 hooks/
   hooks.json           # {"modules":["./register.ts"]}
