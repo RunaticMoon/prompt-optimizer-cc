@@ -403,8 +403,16 @@ function harness(options: HarnessOptions = {}): Harness {
         observeEditInput: markObserved(rawController.observeEditInput),
         onFill: markObserved(rawController.onFill),
         onSubmit: (ports, e, ui) => {
-          if (e.origin.kind === 'composer' && !observedDraft) {
-            rawController.observeEditInput({ key: { key: 'a' }, inputText: '' })
+          // A submit of the live permit's own text is the host releasing that
+          // draft, not new typing: giving it a synthetic edit would both move
+          // the permit and count as an observed edit against a restore.
+          const bypass = rawController.getState().bypass
+          const releasing = bypass !== null && e.text === bypass.text
+          if (e.origin.kind === 'composer' && !observedDraft && !releasing) {
+            const token = rawController.observeEditInput({ key: { key: 'a' }, inputText: '' })
+            // The synthetic edit only informs the classifier: settle it without
+            // a box text so it does not rewrite the permit or a paste snapshot.
+            rawController.finishPromptEdit(token, undefined)
           }
           observedDraft = false
           return rawController.onSubmit(ports, e, ui)
@@ -2090,7 +2098,7 @@ describe('accept and send', () => {
     const state = h.controller.getState()
     expect(state.workflow?.phase).toBe('reviewing')
     expect(state.bypass).toBeNull()
-    expect(h.notices).toContain('입력창에 새로 작성한 내용이 있어 덮어쓰지 않았습니다')
+    expect(h.notices).toContain('입력 변경을 감지해 복원을 완료하지 못했습니다.')
   })
 
   test('sendDraft submits once and dismisses the run', async () => {
@@ -2419,7 +2427,7 @@ describe('action results', () => {
 
     expect(await h.controller.accept(h.ports)).toEqual({
       ok: false,
-      reason: '입력창에 새로 작성한 내용이 있어 덮어쓰지 않았습니다',
+      reason: '입력 변경을 감지해 복원을 완료하지 못했습니다.',
     })
   })
 
@@ -3890,7 +3898,7 @@ describe('restore — a submission racing the fill', () => {
     expect(h.controller.getState().workflow).toBeNull()
   })
 
-  test('a submission racing a cancel restore with other text is still classified normally', async () => {
+  test('a different submission during the cancel restore starts a new run and stops the old one', async () => {
     const { h, pending } = heldFill()
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
@@ -3900,12 +3908,17 @@ describe('restore — a submission racing the fill', () => {
     await h.waitFor(() => h.calls.fill === 1)
     expect(h.controller.getState().bypass?.text).toBe('원문 요청')
 
+    // New typing while the original is being placed: the submission is
+    // classified normally and starts its own run.
     const raced = await h.controller.onSubmit(h.ports, submit('다른 요청'), 'pane')
     expect(raced).toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
     expect(h.controller.getState().workflow?.original).toBe('다른 요청')
 
     pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
-    expect(await cancelling).toEqual({ ok: true })
+    // The new workflow owns the box now: the stale cancel restore reports
+    // nothing, does not dismiss the new run, and cannot retract the fill.
+    expect(await cancelling).toEqual({ ok: false, reason: '' })
+    expect(h.controller.getState().workflow?.original).toBe('다른 요청')
     await h.flush()
     expect(h.calls.complete).toBe(2)
   })
@@ -3925,23 +3938,35 @@ describe('restore — a submission racing the fill', () => {
     expect(h.controller.getState().bypass).toBeNull()
   })
 
-  test('a person edit during the restore keeps the edited permit', async () => {
+  test('a person edit during the restore revokes the edited permit as a conflict', async () => {
     const { h, pending } = heldFill()
     h.controller.onSessionStart('sess-1')
     await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
     await h.flush()
 
+    const logs: string[] = []
+    h.ports.ui.log = text => {
+      logs.push(text)
+    }
+
     const cancelling = h.controller.cancel(h.ports)
     await h.waitFor(() => h.calls.fill === 1)
 
-    // A real edit moves the live permit onto the person's own correction.
-    h.controller.onPromptEdit('사람이 고친 원문')
+    // A real edit hook completes with the corrected box while the fill is
+    // still pending: the permit follows the edit, and the restore notices.
+    const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '사람이 고친 원문' })
+    h.controller.finishPromptEdit(token, '사람이 고친 원문', h.ports)
     expect(h.controller.getState().bypass?.text).toBe('사람이 고친 원문')
 
     pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
-    await cancelling
-    // The fill's own text must not overwrite the person's edit.
-    expect(h.controller.getState().bypass?.text).toBe('사람이 고친 원문')
+    expect((await cancelling).ok).toBe(false)
+    // The permit derived from this restore is gone; the fill must not
+    // resurrect it, and the dispatched fill cannot be undone or repeated.
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(logs).toContain('복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.')
+    expect(logs).toContain('복원 중 감지한 입력입니다. 필요한 내용을 복사하세요:\n사람이 고친 원문')
+    expect(h.fills.filter(fill => fill.text === '원문 요청')).toHaveLength(1)
   })
 
   test('an uncontested restore adopts the fill’s own text as the permit', async () => {
@@ -4432,5 +4457,337 @@ describe('bounded preparation', () => {
     expect(h.calls.stat).toBe(0)
     expect(h.notices.some(notice => notice?.includes('일부 문맥'))).toBe(false)
     expect(h.calls.complete).toBe(1)
+  })
+})
+
+describe('restore — observed edits and ownership (#28)', () => {
+  const CONFLICT = '입력 변경을 감지해 복원을 완료하지 못했습니다.'
+  const SHORT = '복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.'
+  const RECOVERY = '복원 중 감지한 입력입니다. 필요한 내용을 복사하세요:\n'
+
+  /** Overrides `prompt.read` so the restore's own read stays open. */
+  function heldRead(h: Harness, skip = 0): { started(): boolean; resolve(text: string): void } {
+    const pending = deferred<{ text: string; cursor: number }>()
+    let reads = 0
+    let started = false
+    h.ports.prompt.read = () => {
+      reads += 1
+      if (reads <= skip) return Promise.resolve({ text: '', cursor: 0 })
+      started = true
+      return pending.promise
+    }
+    return {
+      started: () => started,
+      resolve: text => pending.resolve({ text, cursor: text.length }),
+    }
+  }
+
+  /** Captures `ports.ui.log` output for the rest of the test. */
+  function captureLogs(h: Harness): string[] {
+    const logs: string[] = []
+    h.ports.ui.log = text => {
+      logs.push(text)
+    }
+    return logs
+  }
+
+  /** A controller in `reviewing` after one settled round. */
+  async function reviewing(ui: 'pane' | 'composer' = 'pane'): Promise<Harness> {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), ui)
+    await h.flush()
+    return h
+  }
+
+  for (const path of ['accept', 'cancel', 'first failure'] as const) {
+    test(`a delayed ${path} read cannot fill over an observed edit`, async () => {
+      const h = path === 'first failure' ? harness({ complete: async () => apiError() }) : harness()
+      h.controller.onSessionStart('sess-1')
+      await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+      const logs = captureLogs(h)
+
+      if (path === 'first failure') {
+        // The composer clear reads first; the original-restore read is second.
+        const read = heldRead(h, 1)
+        const running = h.flush()
+        await h.waitFor(read.started)
+        const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '새로 작성한 요청' })
+        h.controller.finishPromptEdit(token, '새로 작성한 요청', h.ports)
+        // The stale snapshot is empty, so only the observed revision can refuse.
+        read.resolve('')
+        await running
+        expect(h.calls.fill).toBe(0)
+        expect(h.controller.getState().workflow?.phase).toBe('failed')
+        expect(
+          h.notices.some(notice => notice?.includes('원문을 입력창에 복원하지 못했습니다')),
+        ).toBe(true)
+      } else {
+        await h.flush()
+        const read = heldRead(h)
+        const pending = path === 'accept'
+          ? h.controller.accept(h.ports)
+          : h.controller.cancel(h.ports)
+        await h.waitFor(read.started)
+        const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '새로 작성한 요청' })
+        h.controller.finishPromptEdit(token, '새로 작성한 요청', h.ports)
+        read.resolve('')
+        const result = await pending
+        expect(h.calls.fill).toBe(0)
+        expect(result.ok).toBe(false)
+        if (path === 'accept') {
+          expect(result).toEqual({ ok: false, reason: CONFLICT })
+          expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+          expect(h.controller.getState().bypass).toBeNull()
+        } else {
+          // A dismissed cancel still carries its only copyable original.
+          expect(result.ok === false ? result.reason : '').toContain('복원할 원문입니다')
+          expect(result.ok === false ? result.reason : '').toContain('원문 요청')
+        }
+      }
+
+      expect(logs).toContain(SHORT)
+      expect(logs).toContain(`${RECOVERY}새로 작성한 요청`)
+    })
+  }
+
+  test('a pending edit refuses at once and publishes its snapshot when it settles', async () => {
+    const h = await reviewing()
+    const logs = captureLogs(h)
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '입력 중' })
+    read.resolve('')
+
+    // The restore must not wait for the edit chain to finish.
+    expect(await accepting).toEqual({ ok: false, reason: CONFLICT })
+    expect(h.calls.fill).toBe(0)
+    expect(logs).toContain(SHORT)
+    expect(logs.some(line => line.startsWith('복원 중 감지한 입력입니다'))).toBe(false)
+
+    // Its completion still belongs to this operation: publish, then retire it.
+    h.controller.finishPromptEdit(token, '새로 작성한 요청', h.ports)
+    expect(logs).toContain(`${RECOVERY}새로 작성한 요청`)
+
+    // No pending token is left behind: the next restore runs normally.
+    expect(await h.controller.accept(h.ports)).toEqual({ ok: true })
+    expect(h.calls.fill).toBe(1)
+  })
+
+  test('a fill that lands before a pending edit settles conflicts and later recovers', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '새로 작성한 요청' })
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+
+    // The fill already dispatched, so the mutation cannot be retracted; the
+    // restore still refuses, revokes its permit and keeps the operation open.
+    expect(await accepting).toEqual({ ok: false, reason: CONFLICT })
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(logs).toContain(SHORT)
+    expect(logs.some(line => line.startsWith('복원 중 감지한 입력입니다'))).toBe(false)
+
+    h.controller.finishPromptEdit(token, '새로 작성한 요청', h.ports)
+    expect(logs).toContain(`${RECOVERY}새로 작성한 요청`)
+    expect(h.calls.fill).toBe(1)
+  })
+
+  test('an observed deletion is recovered as an empty captured text', async () => {
+    const h = await reviewing()
+    const logs = captureLogs(h)
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    const token = h.controller.observeEditInput({ key: { key: 'Backspace' }, inputText: '' })
+    h.controller.finishPromptEdit(token, '', h.ports)
+    read.resolve('')
+
+    expect((await accepting).ok).toBe(false)
+    // Empty is a real deletion; the target text must not replace it.
+    expect(logs).toContain(RECOVERY)
+    expect(h.calls.fill).toBe(0)
+  })
+
+  test('a session change during the fill returns stale-owner and stays silent', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    h.controller.onSessionStart('sess-2')
+    // The reset itself repaints; the stale restore must add nothing.
+    const repaints = h.changes.length
+    const notices = h.notices.length
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 4 })
+
+    expect(await accepting).toEqual({ ok: false, reason: '' })
+    expect(h.notices.length).toBe(notices)
+    expect(h.changes.length).toBe(repaints)
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.calls.fill).toBe(1)
+  })
+
+  test('a replacement run in the same session stales the old restore', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('새 원문'), 'pane')
+    pending.resolve({ isFilled: true, text: '개선된 요청', cursor: 6 })
+
+    expect(await accepting).toEqual({ ok: false, reason: '' })
+    expect(h.controller.getState().workflow?.original).toBe('새 원문')
+    await h.flush()
+  })
+
+  test('an unchanged autocomplete display does not invalidate the restore', async () => {
+    const h = await reviewing()
+    h.controller.observeComposer('같은 표시')
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    h.controller.observeComposer('같은 표시')
+    read.resolve('')
+
+    expect(await accepting).toEqual({ ok: true })
+    expect(h.calls.fill).toBe(1)
+  })
+
+  test('a changed autocomplete display invalidates the restore', async () => {
+    const h = await reviewing()
+    h.controller.observeComposer('이전 표시')
+    const logs = captureLogs(h)
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    h.controller.observeComposer('바뀐 표시')
+    read.resolve('')
+
+    expect(await accepting).toEqual({ ok: false, reason: CONFLICT })
+    expect(h.calls.fill).toBe(0)
+    expect(logs).toContain(`${RECOVERY}바뀐 표시`)
+  })
+
+  test('a foreign fill during the restore invalidates it with the whole box', async () => {
+    const h = await reviewing()
+    const logs = captureLogs(h)
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    // A foreign append writes only a fragment; the guard read owns the box.
+    const fill = h.controller.beginForeignFill()
+    h.controller.finishForeignFill(fill, '기존 초안 + 외부 조각', h.ports)
+    read.resolve('')
+
+    expect(await accepting).toEqual({ ok: false, reason: CONFLICT })
+    expect(h.calls.fill).toBe(0)
+    expect(logs).toContain(SHORT)
+    expect(logs).toContain(`${RECOVERY}기존 초안 + 외부 조각`)
+  })
+
+  test('a foreign fill with no readable box invalidates without claiming recovery', async () => {
+    const h = await reviewing()
+    const logs = captureLogs(h)
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    // An append fragment is not a full box: no snapshot is claimed.
+    const fill = h.controller.beginForeignFill()
+    h.controller.finishForeignFill(fill, undefined, h.ports)
+    read.resolve('')
+
+    expect((await accepting).ok).toBe(false)
+    expect(logs).toContain(SHORT)
+    expect(logs.some(line => line.startsWith('복원 중 감지한 입력입니다'))).toBe(false)
+  })
+
+  test('a rejecting log port cannot change the refusal', async () => {
+    const h = await reviewing()
+    h.ports.ui.log = () => Promise.reject(new Error('log down'))
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '새로 작성한 요청' })
+    h.controller.finishPromptEdit(token, '새로 작성한 요청', h.ports)
+    read.resolve('')
+
+    expect(await accepting).toEqual({ ok: false, reason: CONFLICT })
+    // Let the absorbed rejection settle; an unhandled one would fail here.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(h.calls.fill).toBe(0)
+  })
+
+  test('composer mode logs the captured text as durably as pane mode', async () => {
+    const h = await reviewing('composer')
+    const logs = captureLogs(h)
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '새로 작성한 요청' })
+    h.controller.finishPromptEdit(token, '새로 작성한 요청', h.ports)
+    read.resolve('')
+
+    expect((await accepting).ok).toBe(false)
+    expect(logs).toContain(`${RECOVERY}새로 작성한 요청`)
+  })
+
+  test('an old session edit completion cannot publish into the new session', async () => {
+    const h = await reviewing()
+    const logs = captureLogs(h)
+    const read = heldRead(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(read.started)
+    const token = h.controller.observeEditInput({ key: { key: 'a' }, inputText: '입력 중' })
+    read.resolve('')
+    expect((await accepting).ok).toBe(false)
+    expect(logs).toContain(SHORT)
+
+    h.controller.onSessionStart('sess-2')
+    // The old edit chain finishes after the session moved: neither its text
+    // nor a recovery notice may leak into the new session.
+    h.controller.finishPromptEdit(token, '이전 세션의 입력', h.ports)
+    expect(logs.some(line => line.includes('이전 세션의 입력'))).toBe(false)
+  })
+
+  test('a successful restore still lets a later edit move the permit', async () => {
+    const h = await reviewing()
+    await h.controller.accept(h.ports)
+    expect(h.controller.getState().bypass?.text).toBe('개선된 요청')
+
+    h.controller.onPromptEdit('개선된 요청을 고침')
+    expect(h.controller.getState().bypass?.text).toBe('개선된 요청을 고침')
+
+    // A consumed permit stays consumed; the edit must not resurrect it.
+    await h.controller.onSubmit(h.ports, submit('개선된 요청을 고침'), 'pane')
+    expect(h.controller.getState().bypass).toBeNull()
+    h.controller.onPromptEdit('다시 고침')
+    expect(h.controller.getState().bypass).toBeNull()
   })
 })

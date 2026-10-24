@@ -941,3 +941,103 @@ describe('wired ui.ask questions', () => {
     expect(JSON.stringify(requests[1]?.prompt)).toContain('개발팀')
   })
 })
+
+describe('register — restore guard wiring (#28)', () => {
+  test(
+    'prompt.edit: a throwing chain is rethrown and still settles its token',
+    { options: { uiMode: 'composer' } },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered(DRAFT) }))
+      on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+      on('prompt.edit', () => {
+        throw new Error('edit chain failed')
+      })
+      on('prompt.fill', (_$, e) => ({ isFilled: true, text: e.text }))
+
+      await $.session.start(SESSION_START)
+      let rejected = false
+      try {
+        await ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptBox> }).edit({
+          origin: { kind: 'composer' },
+          key: { key: 'a' },
+          text: '',
+          cursor: 0,
+          start: 0,
+          end: 0,
+          inputText: '',
+        })
+      } catch {
+        rejected = true
+      }
+      expect(rejected).toBe(true)
+
+      // The failed edit left no pending token: a normal accept still fills.
+      await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+      const accepted = await $.command.run({ ...COMMAND_RUN, args: 'accept' })
+      expect(accepted.text).toContain('입력창으로 가져왔습니다')
+    },
+  )
+
+  test(
+    'prompt.fill: a foreign fill during the restore invalidates it',
+    { options: { uiMode: 'composer' }, plugins: [FOREIGN_FILL] },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const logs: string[] = []
+      let box = ''
+      let releaseOwn: (() => void) | undefined
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', () => ({ value: answered(DRAFT) }))
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.fill', (_$, e) => {
+        if (e.origin.kind === 'plugin' && e.origin.name === 'prompt-optimizer' && e.text === DRAFT) {
+          // Hold the optimizer's own restore fill open.
+          return new Promise(resolve => {
+            releaseOwn = () => {
+              box = e.text
+              resolve({ isFilled: true, text: box })
+            }
+          })
+        }
+        box = e.mode === 'append' ? box + e.text : e.text
+        return { isFilled: true, text: box }
+      })
+      on('ui.log', (_$, e) => {
+        logs.push(e.text)
+        return { value: undefined }
+      })
+      on('ui.status', () => ({ value: undefined }))
+      on('ui.invalidate', () => ({ value: undefined }))
+      on('ui.toast', () => ({ value: undefined }))
+
+      await $.session.start(SESSION_START)
+      await typedEdit($, '원문 요청')
+      await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false })
+      await clock.advance(1)
+
+      const accepting = $.command.run({ ...COMMAND_RUN, args: 'accept' })
+      for (let i = 0; i < 100 && releaseOwn === undefined; i++) await Promise.resolve()
+      expect(releaseOwn !== undefined).toBe(true)
+
+      // Another plugin rewrites the box while our own fill is still pending.
+      const foreign = await $.command.run(FOREIGN_RUN)
+      expect(foreign.text).toBe('foreign landed')
+      expect(box).toBe(FOREIGN_FILL_TEXT)
+      releaseOwn?.()
+
+      const accepted = await accepting
+      expect(accepted.text).toContain('복원을 완료하지 못했습니다')
+      expect(logs).toContain('복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.')
+      expect(logs.some(line => line.includes(FOREIGN_FILL_TEXT))).toBe(true)
+    },
+  )
+})

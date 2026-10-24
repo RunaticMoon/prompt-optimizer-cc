@@ -708,7 +708,7 @@ describe('integration — session isolation and delivery accuracy', () => {
 
       expect(w.box()).toBe(PASTE_PLACEHOLDER)
       expect(w.fills).toHaveLength(0)
-      expect(await w.run('accept')).toContain('새로 작성한 내용')
+      expect(await w.run('accept')).toContain('입력 변경을 감지해')
       expect(w.box()).toBe(PASTE_PLACEHOLDER)
       expect(w.fills).toHaveLength(0)
       expect(w.completes).toHaveLength(1)
@@ -732,7 +732,7 @@ describe('integration — session isolation and delivery accuracy', () => {
 
     expect(w.box()).toBe(PASTE_PLACEHOLDER)
     expect(w.fills).toHaveLength(0)
-    expect(await w.run('accept')).toContain('새로 작성한 내용')
+    expect(await w.run('accept')).toContain('입력 변경을 감지해')
     expect(w.box()).toBe(PASTE_PLACEHOLDER)
     expect(w.fills).toHaveLength(0)
     expect(w.completes).toHaveLength(2)
@@ -769,7 +769,7 @@ describe('integration — session isolation and delivery accuracy', () => {
       expect(w.box()).toBe(replacement)
       expect(w.fills).toHaveLength(0)
       expect(w.completes).toHaveLength(1)
-      expect(await w.run('accept')).toContain('새로 작성한 내용')
+      expect(await w.run('accept')).toContain('입력 변경을 감지해')
       expect(w.box()).toBe(replacement)
       expect(w.fills).toHaveLength(0)
       expect(w.submits).toHaveLength(0)
