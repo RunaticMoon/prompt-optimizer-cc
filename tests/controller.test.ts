@@ -1491,6 +1491,131 @@ describe('the last-submission diagnostic for /optimize status', () => {
   })
 })
 
+describe('smart trigger — the opt-in approval pass-through', () => {
+  test('an observed typed approval submits the exact original and schedules nothing', async () => {
+    const h = harness({ config: { triggerMode: 'smart' }, simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '  응  ' })
+
+    const outcome = await h.controller.onSubmit(h.ports, submit('  응  '), 'pane')
+
+    expect(outcome).toEqual({ action: 'next', text: '  응  ' })
+    expect(h.controller.getState().workflow).toBeNull()
+    await h.flush()
+    expect(h.calls.complete).toBe(0)
+    expect(h.calls.submit).toBe(0)
+    expect(h.calls.promptRead).toBe(0)
+    // The diagnostic keeps the smart verdict with the typed input source.
+    expect(h.controller.getSubmissionStatus()).toEqual({
+      kind: 'pass',
+      passReason: 'smart-continuation',
+      composition: { pasted: false, reason: 'typed' },
+    })
+  })
+
+  test('the same approval as an active dialogue answer refines that workflow', async () => {
+    const h = harness({ config: { triggerMode: 'smart' } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('첫 원문'), 'composer')
+    await h.flush()
+    expect(h.controller.getState().workflow?.rounds).toBe(1)
+
+    const outcome = await h.controller.onSubmit(h.ports, submit('응'), 'composer')
+
+    expect(outcome).toEqual({ action: 'drop', reason: '보완 요청을 옵티마이저에 전달했습니다.' })
+    await h.flush()
+    expect(h.calls.complete).toBe(2)
+    expect(h.controller.getState().workflow?.dialogue.at(-2)).toEqual({ role: 'user', text: '응' })
+  })
+
+  test('a recalled typed approval passes through again under smart mode', async () => {
+    const h = harness({ config: { triggerMode: 'smart' }, simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '계속' })
+    await h.controller.onSubmit(h.ports, submit('계속'), 'pane')
+
+    // ↑ recall re-submits the same text with no event; the remembered typed
+    // verdict feeds the same smart pass.
+    h.controller.onSessionStart('sess-2')
+    expect(await h.controller.onSubmit(h.ports, submit('계속'), 'pane')).toEqual({
+      action: 'next',
+      text: '계속',
+    })
+    expect(h.controller.getSubmissionStatus()).toEqual({
+      kind: 'pass',
+      passReason: 'smart-continuation',
+      composition: { pasted: false, reason: 'history', previousReason: 'typed' },
+    })
+  })
+
+  test('an explicit /optimize start is not smart-filtered', async () => {
+    const h = harness({ config: { triggerMode: 'smart' } })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.startExplicit(h.ports, '응', 'pane')
+    await h.flush()
+
+    expect(h.controller.getState().workflow?.original).toBe('응')
+    expect(h.calls.complete).toBe(1)
+  })
+
+  test('the smart prefix starts despite a pasted classification', async () => {
+    const h = harness({ config: { triggerMode: 'smart' }, simulateTyping: false })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ inputText: '?? 운영 DB 스키마를 정리해줘' })
+
+    const outcome = await h.controller.onSubmit(h.ports, submit('?? 운영 DB 스키마를 정리해줘'), 'pane')
+
+    expect(outcome).toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+    await h.flush()
+    expect(h.calls.complete).toBe(1)
+    expect(h.controller.getState().workflow?.original).toBe('운영 DB 스키마를 정리해줘')
+    expect(h.controller.getSubmissionStatus()).toEqual({
+      kind: 'optimize',
+      trigger: 'prefix',
+      composition: { pasted: true, reason: 'keyless-long-insert' },
+    })
+  })
+
+  test('unknown, negative and mixed-approval texts still optimize', async () => {
+    const h = harness({ config: { triggerMode: 'smart' } })
+    h.controller.onSessionStart('sess-1')
+
+    for (const text of ['운영 DB 삭제해', '아니', '응, 대신 DB 구조도 바꿔줘']) {
+      expect(await h.controller.onSubmit(h.ports, submit(text), 'pane')).toEqual({
+        action: 'drop',
+        reason: '프롬프트를 다듬는 중입니다.',
+      })
+      await h.flush()
+      expect(h.calls.complete).toBe(1)
+      expect(h.controller.getState().workflow?.original).toBe(text)
+      await h.controller.cancel(h.ports)
+      h.calls.complete = 0
+    }
+  })
+
+  test('a classification failure under smart mode still passes the exact original', async () => {
+    const h = harness({
+      config: { triggerMode: 'smart' },
+      simulateTyping: false,
+      deps: {
+        getConfig: () => {
+          throw new Error('config unreadable')
+        },
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeEditInput({ key: { key: 'a' }, inputText: '응' })
+
+    expect(await h.controller.onSubmit(h.ports, submit('응'), 'pane')).toEqual({
+      action: 'next',
+      text: '응',
+    })
+    expect(h.calls.complete).toBe(0)
+    expect(h.controller.getSubmissionStatus()).toBeNull()
+  })
+})
+
 describe('clearRawMode and startExplicit', () => {
   test('clearRawMode drops an armed mode and is a no-op otherwise', () => {
     const h = harness()

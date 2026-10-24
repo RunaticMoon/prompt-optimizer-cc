@@ -306,6 +306,29 @@ describe('formatStatus', () => {
     expect(text).not.toContain('시스템 프롬프트 파일')
   })
 
+  test('names the smart mode by what passes through, keeping the other modes verbatim', () => {
+    const smart = formatStatus(config({ triggerMode: 'smart' }), liveState({ workflow: null }))
+    expect(smart).toContain('트리거: smart (명확한 승인·이어가기 통과) · UI: auto')
+
+    const always = formatStatus(config(), liveState({ workflow: null }))
+    expect(always).toContain('트리거: 항상')
+
+    const prefix = formatStatus(config({ triggerMode: 'prefix' }), liveState({ workflow: null }))
+    expect(prefix).toContain('트리거: 접두어 "?? "')
+  })
+
+  test('combines the smart decision with its input source and recovery route', () => {
+    const text = formatStatus(
+      config({ triggerMode: 'smart' }),
+      liveState({ workflow: null }),
+      null,
+      { kind: 'pass', passReason: 'smart-continuation', composition: { pasted: false, reason: 'typed' } },
+    )
+    expect(text).toContain('최근 제출 분류: 원문 통과 (명확한 승인·이어가기) · 입력: 직접 입력')
+    expect(text).toContain('직접 최적화: /optimize -- <원문>')
+    expect(text.indexOf('트리거: smart')).toBeLessThan(text.indexOf('최근 제출 분류'))
+  })
+
   test('separates the optimizer model from the model-guidance toggle', () => {
     const on = formatStatus(config({ model: 'haiku', modelGuidance: true }), liveState())
     expect(on).toContain('옵티마이저 모델: haiku · 최대 토큰')
