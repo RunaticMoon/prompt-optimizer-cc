@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { ModelUsage, OptimizerReply, RuntimeState, Workflow } from '../hooks/contracts'
-import { MAX_REVISIONS, revisionIdFor } from '../hooks/revisions'
+import { MAX_REVISIONS, revisionIdFor, undoTarget } from '../hooks/revisions'
 import { reduce } from '../hooks/state'
 
 const SESSION = 'sess-1'
@@ -209,5 +209,23 @@ describe('successful reply snapshots', () => {
     expect(first?.dialogue).toHaveLength(1)
     expect(second?.dialogue).not.toBe(first?.dialogue)
     expect(second?.dialogue?.slice(0, 1)).toEqual(first?.dialogue)
+  })
+})
+
+describe('undo planning', () => {
+  test('targets the preceding success and drops the undone branch', () => {
+    const current = runSuccesses(3)
+    const plan = undoTarget(current.workflow as Workflow, current.workflow?.currentRevisionId)
+    expect(plan?.target.id).toBe('r2')
+    expect(plan?.target.draft).toBe('초안 2')
+    expect(plan?.revisions.map(revision => revision.id)).toEqual(['r1', 'r2'])
+  })
+
+  test('no plan without history, at the first success, or for an unknown pointer', () => {
+    expect(undoTarget(workflow(), undefined)).toBeNull()
+    expect(undoTarget(runSuccesses(1).workflow as Workflow, 'r1')).toBeNull()
+    expect(undoTarget(runSuccesses(2).workflow as Workflow, 'r9')).toBeNull()
+    const empty = state({ workflow: workflow({ revisions: [], nextRevisionId: 1 }) })
+    expect(undoTarget(empty.workflow as Workflow, 'r1')).toBeNull()
   })
 })

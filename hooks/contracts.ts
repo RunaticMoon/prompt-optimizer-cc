@@ -138,7 +138,13 @@ export interface Workflow {
   id: string
   /** Session the run belongs to. */
   sessionId: string
-  /** Always 0; workflow ids are unique per session, which is what makes late replies stale. */
+  /**
+   * Monotonic state epoch for this run. Unique workflow ids already make a
+   * late result from another run stale; undo also bumps this epoch, so a
+   * pre-undo reply, answer or scheduled callback is rejected even when the
+   * round count and question text still match. Snapshots never restore an
+   * older epoch.
+   */
   generation: number
   /** Current stage (see {@link Phase}). */
   phase: Phase
@@ -422,6 +428,12 @@ export type OptimizerEvent =
   | { type: 'instruct'; workflowId: string; text: string }
   /** The user explicitly replaced one active decision; state only, no model call. */
   | { type: 'decision-corrected'; workflowId: string; targetId: string; text: string }
+  /**
+   * The user undid to the preceding successful revision; state only, no model
+   * call. Independently gated: the reducer re-checks the session, the epoch
+   * and the revision pointer the caller saw.
+   */
+  | { type: 'undo'; sessionId: string; workflowId: string; generation: number; currentRevisionId: string }
   /** The user edited the restored draft in the composer; the bypass follows the edited text. */
   | { type: 'bypass-edited'; sessionId: string; text: string }
   /** The bypass permit was revoked (another fill, cleared draft, session end, expiry). */

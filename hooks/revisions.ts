@@ -51,3 +51,29 @@ export function recordRevision(
     nextRevisionId: nextId + 1,
   }
 }
+
+/** What one undo restores: the preceding snapshot and the branch it leaves. */
+export interface UndoPlan {
+  /** The preceding successful snapshot to restore. */
+  target: DraftRevision
+  /** The selected branch after the undo: the undone revision and its descendants are gone (no redo). */
+  revisions: readonly DraftRevision[]
+}
+
+/**
+ * Plans the undo from the revision the workflow currently shows to the
+ * success preceding it. `null` when there is no history, the pointer is
+ * unknown, or the current revision is already the oldest retained one —
+ * undo never reaches past the first success to the original.
+ */
+export function undoTarget(
+  workflow: Readonly<Workflow>,
+  currentRevisionId: string | undefined,
+): UndoPlan | null {
+  if (currentRevisionId === undefined) return null
+  const revisions = workflow.revisions ?? []
+  const index = revisions.findIndex(revision => revision.id === currentRevisionId)
+  const target = index > 0 ? revisions[index - 1] : undefined
+  if (index <= 0 || target === undefined) return null
+  return { target, revisions: revisions.slice(0, index) }
+}

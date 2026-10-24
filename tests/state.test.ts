@@ -1231,6 +1231,147 @@ describe('reduce — explicit decision correction', () => {
   })
 })
 
+describe('reduce — undo', () => {
+  function generating(current: RuntimeState): RuntimeState {
+    return reduce(current, { type: 'phase', workflowId: 'wf-1', generation: 1, phase: 'generating' }, 1)
+  }
+
+  function succeed(current: RuntimeState, over: Partial<OptimizerReply> = {}): RuntimeState {
+    return reduce(current, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply(over), usage: ZERO,
+    }, 1)
+  }
+
+  /** Drives `count` successful rounds on one workflow, ending at reviewing. */
+  function withSuccesses(count: number, over: Partial<Workflow> = {}): RuntimeState {
+    let current = state({ workflow: workflow({ ...over, phase: 'generating' }) })
+    for (let round = 1; round <= count; round += 1) {
+      current = succeed(current, { draft: `초안 ${round}` })
+      if (round < count) current = generating(current)
+    }
+    return current
+  }
+
+  function undoEvent(
+    over: Partial<{ sessionId: string; workflowId: string; generation: number; currentRevisionId: string }> = {},
+  ): OptimizerEvent {
+    return {
+      type: 'undo', sessionId: SESSION, workflowId: 'wf-1',
+      generation: 1, currentRevisionId: 'r2', ...over,
+    }
+  }
+
+  test('restores the preceding snapshot atomically on a new epoch', () => {
+    const first = succeed(state({ workflow: workflow({ phase: 'generating' }) }), { draft: '첫 초안', message: '첫 메모' })
+    const second = succeed(generating(first), {
+      draft: '둘째 초안', message: '둘째 메모', question: '둘째 질문?', options: ['A', 'B'],
+    })
+    const answered = reduce(second, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    const undone = reduce(answered, undoEvent(), 2)
+
+    expect(undone.workflow?.phase).toBe('reviewing')
+    expect(undone.workflow?.generation).toBe(2)
+    expect(undone.workflow?.draft).toBe('첫 초안')
+    expect(undone.workflow?.message).toBe('첫 메모')
+    expect(undone.workflow?.question).toBeNull()
+    expect(undone.workflow?.questionId).toBeNull()
+    expect(undone.workflow?.options).toEqual([])
+    expect(undone.workflow?.dialogue).toEqual(first.workflow?.dialogue)
+    expect(undone.workflow?.revisions).toEqual([first.workflow?.revisions?.[0]])
+    expect(undone.workflow?.currentRevisionId).toBe('r1')
+    // Entries revert to the snapshot; id numbering keeps its high-water mark.
+    expect(undone.workflow?.nextRevisionId).toBe(3)
+    expect(undone.workflow?.decisions).toEqual({ entries: [], nextId: 2 })
+    // Counters, allowance and identity are untouched by an undo.
+    expect(undone.workflow?.rounds).toBe(answered.workflow?.rounds)
+    expect(undone.workflow?.usage).toEqual(answered.workflow?.usage)
+    expect(undone.usage).toBe(answered.usage)
+    expect(undone.workflow?.original).toBe('원본')
+    expect(undone.workflow?.originalContext).toEqual(['ctx-a'])
+    expect(undone.workflow?.id).toBe('wf-1')
+    expect(undone.workflow?.sessionId).toBe(SESSION)
+  })
+
+  test('undo from a failure clears the failure records and restores reviewing', () => {
+    const second = withSuccesses(2, { roundLimit: 7 })
+    const failed = reduce(generating(second), { type: 'failed', workflowId: 'wf-1', generation: 1, sessionId: SESSION, error: 'boom' }, 1)
+    const refused = reduce(generating(failed), {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 1)
+    expect(refused.workflow?.lastError).toBeDefined()
+    expect(refused.workflow?.budgetError).toBeDefined()
+    const undone = reduce(refused, undoEvent({ currentRevisionId: 'r2' }), 2)
+    expect(undone.workflow?.phase).toBe('reviewing')
+    expect('lastError' in (undone.workflow ?? {})).toBe(false)
+    expect('budgetError' in (undone.workflow ?? {})).toBe(false)
+    expect(undone.workflow?.roundLimit).toBe(7)
+    // Two successes and one failed attempt: a budget refusal spends no round.
+    expect(undone.workflow?.rounds).toBe(3)
+  })
+
+  test('consecutive undos walk back successes and a replayed event is ignored', () => {
+    const three = withSuccesses(3)
+    const firstUndo = reduce(three, undoEvent({ currentRevisionId: 'r3' }), 1)
+    expect(firstUndo.workflow?.currentRevisionId).toBe('r2')
+    expect(firstUndo.workflow?.generation).toBe(2)
+    const secondUndo = reduce(firstUndo, undoEvent({ generation: 2, currentRevisionId: 'r2' }), 1)
+    expect(secondUndo.workflow?.currentRevisionId).toBe('r1')
+    expect(secondUndo.workflow?.revisions?.map(revision => revision.id)).toEqual(['r1'])
+    expect(secondUndo.workflow?.generation).toBe(3)
+    // The first undo's own event, replayed at the new epoch, changes nothing.
+    expect(reduce(firstUndo, undoEvent({ currentRevisionId: 'r3' }), 1)).toBe(firstUndo)
+    // The oldest retained success has no predecessor.
+    expect(reduce(secondUndo, undoEvent({ generation: 3, currentRevisionId: 'r1' }), 1)).toBe(secondUndo)
+  })
+
+  test('a post-undo answer never recycles a decision id', () => {
+    const first = succeed(state({ workflow: workflow({ phase: 'generating' }) }), {
+      draft: '첫 초안', message: '메모', question: '어느 쪽?', options: ['A', 'B'],
+    })
+    const second = succeed(generating(first), { draft: '둘째 초안' })
+    const corrected = reduce(second, { type: 'instruct', workflowId: 'wf-1', text: 'A' }, 1)
+    const undone = reduce(corrected, undoEvent(), 1)
+    const answered = reduce(undone, { type: 'instruct', workflowId: 'wf-1', text: 'B' }, 1)
+    expect(undone.workflow?.decisions?.entries).toEqual([])
+    expect(answered.workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d2'])
+  })
+
+  test('stale, foreign, mispointed and busy undos are ignored', () => {
+    const base = withSuccesses(2)
+    for (const event of [
+      undoEvent({ sessionId: 'other' }),
+      undoEvent({ generation: 9 }),
+      undoEvent({ workflowId: 'other' }),
+      undoEvent({ currentRevisionId: 'r1' }),
+      undoEvent({ currentRevisionId: 'r9' }),
+    ]) {
+      expect(reduce(base, event, 1)).toBe(base)
+    }
+    const event = undoEvent()
+    for (const phase of ['idle', 'collecting', 'generating', 'transferring', 'sending'] as const) {
+      const busy = state({
+        workflow: workflow({ phase, revisions: base.workflow?.revisions, currentRevisionId: 'r2', nextRevisionId: 3 }),
+      })
+      expect(reduce(busy, event, 1)).toBe(busy)
+    }
+    const fresh = withSuccesses(1)
+    expect(reduce(fresh, undoEvent({ currentRevisionId: 'r1' }), 1)).toBe(fresh)
+    const empty = state()
+    expect(reduce(empty, event, 1)).toBe(empty)
+  })
+
+  test('a pre-undo reply is stale on the new epoch and only records usage', () => {
+    const undone = reduce(withSuccesses(2), undoEvent(), 2)
+    const stale = reduce(undone, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION, reply: reply({ draft: '옛 결과' }), usage: usage({ input_tokens: 5 }),
+    }, 2)
+    expect(stale.workflow?.draft).toBe(undone.workflow?.draft)
+    expect(stale.workflow?.generation).toBe(2)
+    expect(stale.usage.calls).toBe(undone.usage.calls + 1)
+  })
+})
+
 describe('reduce — immutability', () => {
   test('a mutating event leaves a frozen input untouched', () => {
     const current = deepFreeze(

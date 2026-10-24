@@ -16,6 +16,7 @@ import type { EnginePorts, ModelUsage, OptimizerConfig, RuntimeState } from '../
 import { DEFAULT_CONFIG, MAX_REQUEST_CHARS } from '../hooks/contracts'
 import {
   createController,
+  IN_FLIGHT_REASON,
   PANE_ID,
   type ControllerDeps,
   type OptimizerController,
@@ -2664,6 +2665,173 @@ describe('explicit decision correction', () => {
     expect(failed?.decisions?.entries[1]?.text).toBe('정정 결정')
     expect(h.controller.correctDecision('d2', '실패 뒤 재정정').ok).toBe(true)
     expect(h.controller.getState().workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1', 'd2', 'd3'])
+  })
+})
+
+describe('undo — state-only restore', () => {
+  /** Two successes (the first with a question), then a failed attempt. */
+  function undoHarness(): Harness {
+    return harness({
+      complete: async (_request, _signal, call) => {
+        if (call === 1) return answered('개선안 1', '첫 메모', '질문 1?', ['로컬', '외부'])
+        if (call === 2) return answered('개선안 2', '둘째 메모')
+        if (call === 3) return apiError()
+        return answered('개선안 4', '넷째 메모')
+      },
+    })
+  }
+
+  async function started(h: Harness): Promise<void> {
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+  }
+
+  test('undoes to the preceding success after a later failure without any call or composer IO', async () => {
+    const h = undoHarness()
+    await started(h)
+    await h.controller.refine(h.ports, '외부 서비스 사용')
+    expect(h.controller.getState().workflow?.currentRevisionId).toBe('r2')
+    await h.controller.retry(h.ports)
+    const before = h.controller.getState()
+    expect(before.workflow?.phase).toBe('failed')
+    const io = { complete: h.calls.complete, fill: h.calls.fill, promptRead: h.calls.promptRead, submit: h.calls.submit }
+
+    const result = h.controller.undo()
+    expect(result).toEqual({ ok: true })
+    const after = h.controller.getState().workflow
+    expect(after?.phase).toBe('reviewing')
+    expect(after?.generation).toBe((before.workflow?.generation ?? 0) + 1)
+    expect(after?.draft).toBe('개선안 1')
+    expect(after?.message).toBe('첫 메모')
+    expect(after?.question).toBe('질문 1?')
+    expect(after?.options).toEqual(['로컬', '외부'])
+    // Rounds, usage and allowance stay exactly as they were.
+    expect(after?.rounds).toBe(before.workflow?.rounds)
+    expect(after?.usage).toEqual(before.workflow?.usage)
+    expect(h.controller.getState().usage).toEqual(before.usage)
+    expect(h.calls.complete).toBe(io.complete)
+    expect(h.calls.fill).toBe(io.fill)
+    expect(h.calls.promptRead).toBe(io.promptRead)
+    expect(h.calls.submit).toBe(io.submit)
+    expect(h.notices).toContain('이전 성공 라운드로 되돌렸습니다. 사용량과 라운드 한도는 유지됩니다.')
+  })
+
+  test('refuses when there is no earlier success and leaves the state object alone', async () => {
+    const h = undoHarness()
+    await started(h)
+    const before = h.controller.getState()
+    const result = h.controller.undo()
+    expect(result).toEqual({ ok: false, reason: '되돌릴 이전 성공 라운드가 없습니다.' })
+    expect(h.notices).toContain('되돌릴 이전 성공 라운드가 없습니다.')
+    expect(h.controller.getState()).toBe(before)
+  })
+
+  test('consecutive undos walk back successes; a later refine branches forward with fresh ids', async () => {
+    const h = harness({ complete: async (_request, _signal, call) => answered(`개선안 ${call}`, `${call}번째 메모`) })
+    await started(h)
+    await h.controller.refine(h.ports, '첫 보완')
+    await h.controller.refine(h.ports, '둘째 보완')
+    expect(h.controller.getState().workflow?.revisions?.map(revision => revision.id)).toEqual(['r1', 'r2', 'r3'])
+
+    expect(h.controller.undo().ok).toBe(true)
+    expect(h.controller.getState().workflow?.currentRevisionId).toBe('r2')
+    expect(h.controller.getState().workflow?.draft).toBe('개선안 2')
+    expect(h.controller.undo().ok).toBe(true)
+    expect(h.controller.getState().workflow?.currentRevisionId).toBe('r1')
+    expect(h.controller.undo().ok).toBe(false)
+
+    await h.controller.refine(h.ports, '다시 보완')
+    const wf = h.controller.getState().workflow
+    expect(wf?.revisions?.map(revision => revision.id)).toEqual(['r1', 'r4'])
+    expect(wf?.currentRevisionId).toBe('r4')
+  })
+
+  test('the next request uses the restored ledger, and decision ids are never recycled', async () => {
+    const h = undoHarness()
+    await started(h)
+    // The answer to round 1's question is captured as d1 before round 2 succeeds.
+    await h.controller.refine(h.ports, '로컬')
+    expect(h.controller.getState().workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d1'])
+
+    expect(h.controller.undo().ok).toBe(true)
+    // The snapshot's entries are restored, but the id counter keeps its mark.
+    expect(h.controller.getState().workflow?.decisions).toEqual({ entries: [], nextId: 2 })
+    await h.controller.refine(h.ports, '외부 서비스 사용')
+    expect(h.controller.getState().workflow?.decisions?.entries.map(entry => entry.id)).toEqual(['d2'])
+    const prompt = requestText(h.completes.at(-1)?.prompt)
+    expect(prompt).toContain('외부 서비스 사용')
+    expect(prompt).toContain('"id":"d2"')
+  })
+
+  test('a scheduled supplement captured before the undo cannot run a round', async () => {
+    const h = undoHarness()
+    await started(h)
+    await h.controller.refine(h.ports, '첫 보완')
+    const before = h.calls.complete
+    // The refinement is queued, not yet run; undo wins the race.
+    await h.controller.onSubmit(h.ports, submit('더 줄여줘'), 'pane')
+    expect(h.controller.undo().ok).toBe(true)
+    await h.flush()
+    expect(h.calls.complete).toBe(before)
+    expect(h.controller.getState().workflow?.draft).toBe('개선안 1')
+  })
+
+  test('undo is refused while generating and unavailable before any success', async () => {
+    const completion = deferred<ModelCompleteResult>()
+    const h = harness({ complete: () => completion.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => h.calls.complete === 1)
+    expect(h.controller.getState().workflow?.phase).toBe('generating')
+    expect(h.controller.undo()).toEqual({ ok: false, reason: IN_FLIGHT_REASON })
+    completion.resolve(answered('개선안'))
+    await running
+    expect(h.controller.undo().reason).toBe('되돌릴 이전 성공 라운드가 없습니다.')
+  })
+
+  test('an open choice dialog refuses undo without clearing its pending marker', async () => {
+    const dialog = questionDialog()
+    const h = harness({ ui: { ask: dialog.ask }, complete: async () => questionReply() })
+    await startQuestion(h)
+    expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
+    const result = h.controller.undo()
+    expect(result).toEqual({ ok: false, reason: '열린 선택 창을 먼저 닫아 주세요.' })
+    expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
+    dialog.resolve(ASK_OPTIONS[0] as string)
+    expect(h.controller.getState().workflow?.questionAsk).toBe('pending')
+  })
+
+  test('undo keeps the approved round limit and clears the spent dialog markers', async () => {
+    const h = harness({
+      config: { maxRounds: 2 },
+      complete: async (_request, _signal, call) => {
+        if (call === 1) return answered('개선안 1', '', '질문 1?', ['로컬', '외부'])
+        return answered(`개선안 ${call}`, '', `질문 ${call}?`, ['A', 'B'])
+      },
+    })
+    await started(h)
+    await h.controller.refine(h.ports, '보완')
+    expect(await h.controller.extendRounds(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow?.roundLimit).toBe(7)
+    expect(h.controller.undo().ok).toBe(true)
+    const wf = h.controller.getState().workflow
+    expect(wf?.roundLimit).toBe(7)
+    expect(wf?.rounds).toBe(2)
+    expect(wf?.limitAsk).toBeUndefined()
+  })
+
+  test('accept after undo fills the restored draft and dismisses the run', async () => {
+    const h = undoHarness()
+    await started(h)
+    await h.controller.refine(h.ports, '첫 보완')
+    expect(h.controller.undo().ok).toBe(true)
+    const result = await h.controller.accept(h.ports)
+    expect(result).toEqual({ ok: true })
+    expect(h.fills.at(-1)?.text).toBe('개선안 1')
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.controller.undo().reason).toBe('진행 중인 개선 작업이 없습니다.')
   })
 })
 
