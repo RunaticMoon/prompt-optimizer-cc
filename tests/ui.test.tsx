@@ -5,6 +5,9 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { OptimizerController } from '../hooks/controller'
 import { PANE_ID } from '../hooks/controller'
 import { DEFAULT_CONFIG, type RuntimeState, type Workflow } from '../hooks/contracts'
+import { formatDraftDiff, formatShow, formatSources, NO_PREVIOUS_NOTICE } from '../hooks/review-view'
+import { undoTarget } from '../hooks/revisions'
+import { reduce } from '../hooks/state'
 import { COMPOSER_GUIDE, RAW_MODE_BADGE_HINT, ROUND_APPROVAL_PENDING, ROUND_EXTENSION_GUIDE, createPresenter, questionGuide } from '../hooks/ui/present'
 import { estimatedCompactRows, handlePaneClose, hardWrapPreview, hardWrapPreviewWithStatus, isCompactViewport, registerUi } from '../hooks/ui/register'
 import { PANE_ROWS, paneOpenArgs, type UiPorts } from '../hooks/ui/ui-ports'
@@ -51,7 +54,7 @@ function state(item: Workflow | null): RuntimeState {
   }
 }
 
-function fakeController(current: RuntimeState, onRefine?: () => void) {
+function fakeController(current: RuntimeState, onRefine?: () => void, onUndo?: () => { ok: boolean; reason?: string }) {
   const calls: string[] = []
   const controller = {
     getState: () => current,
@@ -62,6 +65,7 @@ function fakeController(current: RuntimeState, onRefine?: () => void) {
     retry: async () => { calls.push('retry') },
     extendRounds: async () => { calls.push('extendRounds'); return { ok: true } },
     accept: async () => { calls.push('accept') },
+    undo: () => { calls.push('undo'); return onUndo?.() ?? { ok: true } },
     sendDraft: async () => { calls.push('sendDraft') },
     sendOriginal: async () => { calls.push('sendOriginal') },
     cancel: async () => { calls.push('cancel') },
@@ -538,7 +542,7 @@ describe('optimizer UI', () => {
     const ui = await captureUi($, on, controller)
     const tree = await ui.render(PANE)
     const buttons = nodesOf(tree).filter(node => node.type === 'Button')
-    expect(buttons.map(node => node.props.hotkey)).toEqual(['a', '1', '0'])
+    expect(buttons.map(node => node.props.hotkey)).toEqual(['a', '1', 'f', 'o', 's', '0'])
     expect(contentOf(tree)).toContain('답변 선택')
     expect(contentOf(tree)).not.toContain('Enter 입력창')
     current.workflow = workflow()
@@ -553,9 +557,9 @@ describe('optimizer UI', () => {
         for (const isFullscreen of [false, true]) {
           const tree = await ui.render({ ...PANE, viewport: { columns: 80, rows, isFullscreen }, props: { ...PANE.props, placement } })
           const controls = nodesOf(tree).filter(node => ['Button', 'Input'].includes(node.type))
-          expect(controls.map(node => node.props.key)).toEqual(['optimizer:accept', 'optimizer:instruction', 'optimizer:original'])
+          expect(controls.map(node => node.props.key)).toEqual(['optimizer:accept', 'optimizer:instruction', 'optimizer:full', 'optimizer:diff-original', 'optimizer:sources', 'optimizer:original'])
           expect(controls.filter(node => node.props.autoFocus === true).map(node => node.props.key)).toEqual(['optimizer:accept'])
-          expect(controls.filter(node => node.type === 'Button').map(node => node.props.hotkey)).toEqual(['1', '0'])
+          expect(controls.filter(node => node.type === 'Button').map(node => node.props.hotkey)).toEqual(['1', 'f', 'o', 's', '0'])
           expect(contentOf(tree)).toContain('Esc 취소 (원문 복원)')
         }
       }
@@ -1099,6 +1103,209 @@ describe('optimizer UI', () => {
     presenter.present(ui, current)
     expect(closed).toEqual([PANE_ID])
     expect(invalidations).toBe(4)
+  })
+})
+
+function reviewWorkflow(): Workflow {
+  const drafts = ['첫 성공 👨‍👩‍👧\n  들여쓰기\t유지\n', '둘째 성공\n', '현재 개선안 🇰🇷\n\n  마지막 줄\n']
+  const revisions = drafts.map((draft, index) => ({
+    id: `r${index + 1}`, successfulRound: index + 1, draft, message: `변경 메모 ${index + 1}`,
+    question: null, questionId: null, options: [], dialogue: [], decisions: { entries: [], nextId: 1 },
+  }))
+  return { ...workflow(), draft: drafts[2]!, revisions, currentRevisionId: 'r3', nextRevisionId: 4, generation: 3 }
+}
+
+describe('pane review and undo controls', () => {
+  const press = (ui: Awaited<ReturnType<typeof captureUi>>, element: string) =>
+    ui.press({ component: 'Pane', requestId: PANE_ID, plugin: 'test', element })
+
+  test('keyboard button contracts expose both comparisons, full texts and sources without changing the composer', async ($, on) => {
+    const current = state(reviewWorkflow())
+    const { controller, calls } = fakeController(current)
+    const focus: string[] = []
+    const ui = await captureUi($, on, controller, undefined, focus)
+    const before = JSON.stringify(current)
+    // Exercise the ui.press event each host Button hotkey / Enter dispatches.
+    const byKey = async (hotkey: string) => {
+      const button = nodesOf(await ui.render(PANE)).find(node => node.type === 'Button' && node.props.hotkey === hotkey)
+      expect(button).toBeDefined()
+      await press(ui, String(button!.props.key))
+      return contentOf(await ui.render(PANE))
+    }
+    const item = current.workflow!
+    expect(await byKey('o')).toContain(formatDraftDiff(item.original, item.draft, 'original'))
+    expect(await byKey('p')).toContain(formatDraftDiff(undoTarget(item, item.currentRevisionId)!.target.draft, item.draft, 'previous'))
+    expect(await byKey('v')).toContain(formatShow('직전 성공 라운드 전문', item.revisions![1]!.draft))
+    expect(await byKey('s')).toContain(formatSources(item))
+    expect(await byKey('f')).toContain(item.draft)
+    expect(await byKey('0')).toContain(item.original)
+    expect(JSON.stringify(current)).toBe(before)
+    expect(calls).toEqual([])
+    expect(focus.every(call => call === 'invalidate:ui.render')).toBe(true)
+  })
+
+  test('80x24 inline, 120x40 dock and tiny panes retain controls, full text and original toggle', async ($, on) => {
+    const item = { ...reviewWorkflow(), question: '형식?', options: ['목록', '표', '요약', '문단'], lastError: '실패 내용' }
+    item.draft += '긴 문장 👨‍👩‍👧 '.repeat(300)
+    const { controller } = fakeController(state(item))
+    const ui = await captureUi($, on, controller)
+    for (const [columns, rows, placement, isFullscreen] of [[80, 24, 'inline', false], [80, 24, 'inline', true], [40, 12, 'inline', true], [120, 40, 'dock', true]] as const) {
+      const viewport = { columns, rows, isFullscreen }
+      const event = { ...PANE, viewport, props: { ...PANE.props, placement, bodyColumns: columns - 4 } }
+      const tree = await ui.render(event) as UiNode
+      if (placement === 'inline') expect(tree.children!.slice(0, -1).length).toBeLessThanOrEqual(estimatedCompactRows(viewport))
+      const controls = nodesOf(tree).filter(node => ['Button', 'Input'].includes(node.type))
+      const keys = controls.filter(node => node.type === 'Button').map(node => node.props.hotkey)
+      expect(new Set(keys).size).toBe(keys.length)
+      for (const key of ['a', 'b', 'c', 'd', '1', '0', 'f', 'o', 'p', 'v', 's', 'u']) expect(keys).toContain(key)
+      expect(keys).not.toContain('2')
+      expect(keys).not.toContain('3')
+      const acceptIndex = controls.findIndex(node => node.props.key === 'optimizer:accept')
+      expect(controls[acceptIndex + 1]!.props.key).toBe('optimizer:instruction')
+      expect(contentOf(tree)).toContain(item.draft)
+      await press(ui, 'optimizer:diff-original')
+      const diff = contentOf(await ui.render(event))
+      expect(diff).toContain('-원래 요청')
+      expect(diff).toContain('+현재 개선안 🇰🇷')
+      await press(ui, 'optimizer:full')
+      expect(contentOf(await ui.render(event))).toContain(item.draft)
+      await press(ui, 'optimizer:original')
+      expect(contentOf(await ui.render(event))).toContain(item.original)
+      await press(ui, 'optimizer:original')
+    }
+  })
+
+  test('undo restores a snapshot and refreshes comparisons at the new generation without prompt ports', async ($, on) => {
+    const current = state(reviewWorkflow())
+    const usage = { ...current.workflow!.usage }
+    const { controller, calls } = fakeController(current, undefined, () => {
+      const item = current.workflow!
+      Object.assign(current, reduce(current, { type: 'undo', sessionId: current.sessionId, workflowId: item.id,
+        generation: item.generation, currentRevisionId: item.currentRevisionId! }, 0))
+      return { ok: true }
+    })
+    // The provided engine exposes only ui.invalidate/focus; no prompt or model API.
+    const ui = await captureUi($, on, controller, undefined, [])
+    await press(ui, 'optimizer:diff-previous')
+    expect(contentOf(await ui.render(PANE))).toContain('-둘째 성공')
+    await press(ui, 'optimizer:undo')
+    const restored = contentOf(await ui.render(PANE))
+    expect(restored).toContain('-첫 성공 👨‍👩‍👧')
+    expect(restored).toContain('+둘째 성공')
+    expect(restored).not.toContain('+현재 개선안')
+    expect(restored).toContain('입력창은 변경하지 않았습니다')
+    expect(current.workflow!.currentRevisionId).toBe('r2')
+    expect(current.workflow!.usage).toEqual(usage)
+    await press(ui, 'optimizer:undo')
+    expect(contentOf(await ui.render(PANE))).toContain(NO_PREVIOUS_NOTICE)
+    await press(ui, 'optimizer:undo')
+    expect(calls).toEqual(['undo', 'undo'])
+    await press(ui, 'optimizer:full')
+    expect(contentOf(await ui.render(PANE))).toContain('첫 성공 👨‍👩‍👧\n  들여쓰기\t유지\n')
+  })
+
+  test('undo is disabled and stale presses are ignored for busy phases, pending dialogs and missing history', async ($, on) => {
+    const current = state(reviewWorkflow())
+    const { controller, calls } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    for (const patch of [
+      ...(['idle', 'collecting', 'generating', 'transferring', 'sending'] as const).map(phase => ({ phase })),
+      { questionAsk: 'pending' as const }, { limitAsk: 'pending' as const }, { currentRevisionId: 'r1' },
+      { currentRevisionId: 'missing' }, { revisions: [] },
+    ]) {
+      current.workflow = { ...reviewWorkflow(), ...patch }
+      const tree = await ui.render(PANE)
+      expect(nodesOf(tree).some(node => node.type === 'Button' && node.props.key === 'optimizer:undo')).toBe(false)
+      expect(contentOf(tree)).toContain('u: 되돌리기 · 사용 불가')
+      if ('phase' in patch) expect(contentOf(tree)).toContain('작업 중에는 되돌릴 수 없습니다')
+      if ('questionAsk' in patch || 'limitAsk' in patch) expect(contentOf(tree)).toContain('열린 선택 창을 먼저 닫아 주세요')
+      await press(ui, 'optimizer:undo')
+    }
+    expect(calls).toEqual([])
+    current.workflow = { ...reviewWorkflow(), phase: 'failed', lastError: '이전 개선안 유지' }
+    expect(nodesOf(await ui.render(PANE)).some(node => node.type === 'Button' && node.props.key === 'optimizer:undo')).toBe(true)
+    await press(ui, 'optimizer:undo')
+    expect(calls).toEqual(['undo'])
+  })
+
+  test('empty and first-success states explain unavailable reviews while sources remain readable', async ($, on) => {
+    const current = state({ ...workflow('failed'), draft: '' })
+    const { controller, calls } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    const empty = contentOf(await ui.render(PANE))
+    expect(empty).toContain('아직 개선안이 없습니다')
+    expect(empty).toContain(NO_PREVIOUS_NOTICE)
+    for (const key of ['full', 'diff-original', 'diff-previous', 'previous', 'undo']) await press(ui, `optimizer:${key}`)
+    await press(ui, 'optimizer:sources')
+    expect(contentOf(await ui.render(PANE))).toContain('아직 기록된 사용자 답변이 없습니다')
+    current.workflow = workflow()
+    await press(ui, 'optimizer:diff-previous')
+    expect(contentOf(await ui.render(PANE))).toContain('확정된 사용자 결정:')
+    expect(calls).toEqual([])
+  })
+
+  test('source labels distinguish user evidence, repository evidence and unconfirmed suggestions', async ($, on) => {
+    const item: Workflow = { ...reviewWorkflow(), correctionPending: true,
+      budgetError: { requiredChars: 20, limitChars: 10, decisionIds: ['d1'] },
+      decisions: { nextId: 2, entries: [{ id: 'd1', text: '로컬 처리', source: {
+        kind: 'user-answer', questionId: null, question: null, options: [], answeredAfterRound: 1,
+      } }] },
+      context: { conversation: '', rules: '', location: '', tools: '', text: '', chars: 0,
+        repositorySources: [{ kind: 'domain', path: 'README.md', excerpt: 'README.md\n저장소 문장' }] },
+    }
+    const { controller } = fakeController(state(item))
+    const ui = await captureUi($, on, controller)
+    await press(ui, 'optimizer:sources')
+    const drawn = contentOf(await ui.render(PANE))
+    for (const label of ['사용자 원문', '사용자 답변', '로컬 처리', '수집한 저장소 근거', 'README.md', '미확정 제안', '사용자 합의가 아닙니다', '정정이 아직 개선안에 반영되지 않았습니다', '요청 예산을 초과']) expect(drawn).toContain(label)
+  })
+
+  test('workflow switches reset local reviews and original toggles; foreign and composer presses pass through', async ($, on) => {
+    const current = state(reviewWorkflow())
+    const { controller, calls } = fakeController(current)
+    const ui = await captureUi($, on, controller)
+    await press(ui, 'optimizer:diff-original')
+    await press(ui, 'optimizer:original')
+    current.workflow = { ...reviewWorkflow(), id: 'workflow-2', draft: '새 작업 전문' }
+    const drawn = contentOf(await ui.render(PANE))
+    expect(drawn).toContain('새 작업 전문')
+    expect(drawn).not.toContain('변경: +')
+    expect(drawn).not.toContain('원래 요청')
+    const foreign = { component: 'Pane', requestId: 'other', element: 'optimizer:undo' }
+    expect(await ui.press(foreign)).toEqual({ inner: foreign })
+    current.workflow.ui = 'composer'
+    const event = { ...foreign, requestId: PANE_ID }
+    expect(await ui.press(event)).toEqual({ inner: event })
+    expect(calls).toEqual([])
+  })
+
+  test('controller refusal is explained without claiming undo succeeded', async ($, on) => {
+    const { controller } = fakeController(state(reviewWorkflow()), undefined, () => ({ ok: false, reason: '열린 선택 창을 먼저 닫아 주세요.' }))
+    const ui = await captureUi($, on, controller)
+    await press(ui, 'optimizer:undo')
+    const drawn = contentOf(await ui.render(PANE))
+    expect(drawn).toContain('열린 선택 창을 먼저 닫아 주세요')
+    expect(drawn).not.toContain('직전 성공 라운드로 되돌렸습니다')
+  })
+
+  test('buttonless and composer fallbacks keep review commands discoverable within compact budgets', async ($, on) => {
+    const current = state(reviewWorkflow())
+    const { controller } = fakeController(current)
+    const ui = await captureUi($, on, controller, 'Button')
+    for (const rows of [12, 24, 40]) {
+      const viewport = { columns: 80, rows, isFullscreen: true }
+      const tree = await ui.render({ ...PANE, viewport, props: { ...PANE.props, placement: 'inline' } }) as UiNode
+      if (rows < 40) expect(tree.children!.slice(0, -1).length).toBeLessThanOrEqual(estimatedCompactRows(viewport))
+      expect(contentOf(tree)).toContain('/optimize show · diff original|previous · sources · undo')
+      expect(contentOf(tree)).toContain(current.workflow!.draft)
+      expect(contentOf(tree)).toContain(current.workflow!.original)
+      expect(nodesOf(tree).some(node => node.type === 'Button')).toBe(false)
+    }
+    current.workflow = { ...reviewWorkflow(), ui: 'composer', draft: '긴 전문 '.repeat(200) }
+    const tree = await ui.render({ ...BAND, viewport: { columns: 80, rows: 24 }, props: { ...BAND.props, maxRows: 12 } }) as UiNode
+    expect(tree.children!.length).toBeLessThanOrEqual(12)
+    expect(contentOf(tree)).toContain('/optimize help')
+    expect(contentOf(await ui.render(PANE))).toContain('/optimize show · diff original|previous · sources · undo')
   })
 })
 
