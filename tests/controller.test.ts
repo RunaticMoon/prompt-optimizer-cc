@@ -93,6 +93,8 @@ interface HarnessOptions {
   model?: () => string | Promise<string>
   /** Overrides `session.version()`. Omit to model a host with no version port. */
   version?: () => Promise<SessionVersion>
+  /** A timer the test advances by hand; otherwise sleeps never fire. */
+  clock?: TestClock
   /** Overrides `fs.read`; lets a test hold one file read open. */
   read?: (path: string) => Promise<string>
   complete?: (
@@ -131,6 +133,61 @@ interface Harness {
   flush(): Promise<void>
   /** Spins microtasks until `predicate` holds, so a detached round can be observed. */
   waitFor(predicate: () => boolean, rounds?: number): Promise<void>
+}
+
+interface SleepCall {
+  readonly ms: number
+  readonly signal: AbortSignal | undefined
+  readonly due: number
+  readonly resolve: () => void
+  readonly reject: (reason?: unknown) => void
+  settled: boolean
+}
+
+/** A fake clock the test advances by hand: `advance` moves now and fires waits. */
+interface TestClock {
+  readonly port: NonNullable<EnginePorts['clock']>
+  readonly calls: SleepCall[]
+  advance(ms: number): void
+}
+
+function testClock(start = 0): TestClock {
+  let now = start
+  const calls: SleepCall[] = []
+  const port = {
+    sleep: (ms: number, options?: { signal?: AbortSignal }): Promise<void> => {
+      const wait = deferred<void>()
+      const call: SleepCall = {
+        ms,
+        signal: options?.signal,
+        due: now + ms,
+        resolve: () => {
+          if (call.settled) return
+          call.settled = true
+          wait.resolve(undefined)
+        },
+        reject: reason => {
+          if (call.settled) return
+          call.settled = true
+          wait.reject(reason)
+        },
+        settled: false,
+      }
+      calls.push(call)
+      const onAbort = (): void => call.reject(new Error('sleep aborted'))
+      if (options?.signal?.aborted === true) onAbort()
+      else options?.signal?.addEventListener('abort', onAbort, { once: true })
+      return wait.promise
+    },
+  } as unknown as NonNullable<EnginePorts['clock']>
+  return {
+    port,
+    calls,
+    advance: ms => {
+      now += ms
+      for (const call of [...calls]) if (call.due <= now) call.resolve()
+    },
+  }
 }
 
 /**
@@ -246,7 +303,7 @@ function harness(options: HarnessOptions = {}): Harness {
             },
           }),
     },
-    clock: fakeClock(),
+    clock: options.clock?.port ?? fakeClock(),
     fs: {
       stat: async (path: string) => {
         calls.stat += 1
@@ -2718,13 +2775,13 @@ describe('prompt caching by engine version', () => {
     expect(warnings).toHaveLength(1)
   })
 
-  test('a cancel during the version read holds the notice for the next live round', async () => {
-    let releaseVersion: ((info: SessionVersion) => void) | undefined
+  test('a cancel during the version read leaves no memoized cache or notice', async () => {
+    const releases: Array<(info: SessionVersion) => void> = []
     const h = harness({
       model: () => 'claude-opus-5-5',
       version: () =>
         new Promise<SessionVersion>(resolve => {
-          releaseVersion = resolve
+          releases.push(resolve)
         }),
     })
     h.controller.onSessionStart('sess-1')
@@ -2735,22 +2792,28 @@ describe('prompt caching by engine version', () => {
     const running = (queued as () => Promise<void>)()
     await h.waitFor(() => h.calls.version === 1)
 
-    // The person cancels while the read is still in flight.
+    // The person cancels while the read is still in flight: the scheduled round
+    // must settle without the getter ever resolving.
     await h.controller.cancel(h.ports)
-    releaseVersion?.({ version: '2.1.291' })
     await running
-
-    // The run they already left shows nothing.
     expect(h.notices.filter(notice => notice?.includes('프롬프트 캐시 없이 동작'))).toHaveLength(0)
 
-    // The next live round shows the held notice exactly once, and the answer is
-    // memoized so the version is not read again.
+    // New work re-reads the version instead of reusing the cancelled attempt.
     await h.controller.onSubmit(h.ports, submit('둘째 요청'), 'pane')
-    await h.flush()
-    const warnings = h.notices.filter(notice => notice?.includes('프롬프트 캐시 없이 동작'))
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('2.1.291')
-    expect(h.calls.version).toBe(1)
+    const second = h.flush()
+    await h.waitFor(() => h.calls.version === 2)
+    releases[1]?.({ version: '2.1.292' })
+    await second
+
+    expect(h.calls.version).toBe(2)
+    expect(h.notices.filter(notice => notice?.includes('프롬프트 캐시 없이 동작'))).toHaveLength(0)
+    expect(Array.isArray(h.completes[0]?.prompt)).toBe(true)
+
+    // The abandoned first read may finish even later; it cannot change the cache.
+    releases[0]?.({ version: '2.1.291' })
+    await h.controller.refine(h.ports, '더 짧게')
+    expect(h.calls.version).toBe(2)
+    expect(Array.isArray(h.completes[1]?.prompt)).toBe(true)
   })
 })
 
@@ -4038,6 +4101,227 @@ describe('refinement levels — controller selection', () => {
     expect((await h.controller.accept(h.ports)).ok).toBe(true)
     expect(h.fills).toHaveLength(1)
     expect(h.submits).toHaveLength(0)
+    expect(h.calls.complete).toBe(1)
+  })
+})
+
+describe('bounded preparation', () => {
+  test('a round arms the 5000/2000/500 ms limits without touching request timeoutMs', async () => {
+    const clock = testClock()
+    const h = harness({ clock, model: () => 'claude-opus-5-5' })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    const waits = clock.calls.map(call => call.ms)
+    expect(waits).toContain(5000)
+    expect(waits).toContain(2000)
+    expect(waits).toContain(500)
+    expect(h.completes[0]?.timeoutMs).toBe(DEFAULT_CONFIG.timeoutMs)
+    expect(h.calls.complete).toBe(1)
+  })
+
+  test('a hung version read times out live, memoizes cache=false and completes once', async () => {
+    const clock = testClock()
+    let started = false
+    const h = harness({
+      clock,
+      model: () => 'claude-opus-5-5',
+      version: () => {
+        started = true
+        return new Promise<SessionVersion>(() => {})
+      },
+    })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => started)
+    clock.advance(500)
+    await running
+
+    expect(h.calls.complete).toBe(1)
+    expect(typeof h.completes[0]?.prompt).toBe('string')
+    const warnings = h.notices.filter(notice => notice?.includes('버전 확인이 지연'))
+    expect(warnings).toHaveLength(1)
+
+    // The live timeout memoizes false once per controller: no re-read, no repeat.
+    await h.controller.refine(h.ports, '더 짧게')
+    expect(h.calls.version).toBe(1)
+    expect(h.notices.filter(notice => notice?.includes('버전 확인이 지연'))).toHaveLength(1)
+    expect(typeof h.completes[1]?.prompt).toBe('string')
+  })
+
+  test('a hung transcript times out to a partial context and one compact notice', async () => {
+    const clock = testClock()
+    const h = harness({ clock, model: () => 'claude-opus-5-5' })
+    let started = false
+    h.ports.session.messages = (() => {
+      started = true
+      return new Promise<SessionMessage[]>(() => {})
+    }) as EnginePorts['session']['messages']
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => started)
+    clock.advance(500)
+    await running
+
+    expect(h.calls.complete).toBe(1)
+    expect(h.notices.filter(notice => notice?.includes('일부 문맥을 생략'))).toHaveLength(1)
+  })
+
+  test('a hung rule read times out to a partial context and one compact notice', async () => {
+    const clock = testClock()
+    const h = harness({
+      clock,
+      model: () => 'claude-opus-5-5',
+      files: { '/repo/CLAUDE.md': 'project rules' },
+    })
+    let started = false
+    h.ports.fs.read = (() => {
+      started = true
+      return new Promise<string>(() => {})
+    }) as EnginePorts['fs']['read']
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => started)
+    clock.advance(500)
+    await running
+
+    expect(h.calls.complete).toBe(1)
+    expect(h.notices.filter(notice => notice?.includes('일부 문맥을 생략'))).toHaveLength(1)
+  })
+
+  test('a hung extra instruction read falls back to the built-in prompt with one notice', async () => {
+    const clock = testClock()
+    const h = harness({
+      clock,
+      model: () => 'claude-opus-5-5',
+      config: { systemPromptFile: '/extra.md' },
+      files: { '/extra.md': 'extra instructions' },
+    })
+    let started = false
+    h.ports.fs.read = (() => {
+      started = true
+      return new Promise<string>(() => {})
+    }) as EnginePorts['fs']['read']
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => started)
+    clock.advance(500)
+    await running
+
+    expect(h.calls.complete).toBe(1)
+    const notices = h.notices.filter(notice => notice?.includes('시스템 지침 준비가 지연'))
+    expect(notices).toHaveLength(1)
+    // The ready built-in prompt is used, not the unread file's text.
+    expect(requestText(h.completes[0]?.system)).not.toContain('extra instructions')
+  })
+
+  for (const stage of ['messages', 'rule', 'extra', 'version'] as const) {
+    test(`cancel during ${stage} settles the scheduled round without a model call`, async () => {
+      const clock = testClock()
+      let started = false
+      const h = harness({
+        clock,
+        model: () => 'claude-opus-5-5',
+        ...(stage === 'version'
+          ? {
+              version: () => {
+                started = true
+                return new Promise<SessionVersion>(() => {})
+              },
+            }
+          : {}),
+        ...(stage === 'extra'
+          ? { config: { systemPromptFile: '/extra.md' }, files: { '/extra.md': 'extra' } }
+          : {}),
+        ...(stage === 'rule' ? { files: { '/repo/CLAUDE.md': 'project rules' } } : {}),
+      })
+      if (stage === 'messages') {
+        h.ports.session.messages = (() => {
+          started = true
+          return new Promise<SessionMessage[]>(() => {})
+        }) as EnginePorts['session']['messages']
+      } else if (stage === 'rule') {
+        const stat = h.ports.fs.stat
+        h.ports.fs.stat = async (path, options) => {
+          if (path === '/repo/CLAUDE.md') {
+            started = true
+            return new Promise(() => {})
+          }
+          return stat(path, options)
+        }
+      } else if (stage === 'extra') {
+        h.ports.fs.read = (() => {
+          started = true
+          return new Promise<string>(() => {})
+        }) as EnginePorts['fs']['read']
+      }
+      h.controller.onSessionStart('sess-1')
+
+      await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+      const running = h.flush()
+      await h.waitFor(() => started)
+      const cancelled = await h.controller.cancel(h.ports)
+      // `running` resolves without the hung host promise ever settling.
+      await running
+
+      expect(cancelled.ok).toBe(true)
+      expect(h.calls.complete).toBe(0)
+      expect(h.controller.getState().workflow).toBeNull()
+      // The preparation summary is never emitted for a cancelled round.
+      expect(h.notices.some(notice => notice?.includes('준비 시간 제한'))).toBe(false)
+    })
+  }
+
+  test('a late transcript read after a session change cannot repaint the new session', async () => {
+    const clock = testClock()
+    const h = harness({ clock })
+    const messages = deferred<SessionMessage[]>()
+    let started = false
+    h.ports.session.messages = (() => {
+      started = true
+      return messages.promise
+    }) as EnginePorts['session']['messages']
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    const running = h.flush()
+    await h.waitFor(() => started)
+    h.controller.onSessionStart('sess-2')
+    await running
+
+    const settled = h.controller.getState()
+    const changes = h.changes.length
+    messages.resolve([{ role: 'user', text: 'old session text', toolUses: [] }])
+    for (let i = 0; i < 20; i += 1) await Promise.resolve()
+
+    expect(h.controller.getState()).toBe(settled)
+    expect(h.changes.length).toBe(changes)
+    expect(h.notices.some(notice => notice?.includes('old session text'))).toBe(false)
+  })
+
+  test('a zero character context disables collection with no reads and no warning', async () => {
+    const h = harness({ config: { contextMaxChars: 0 } })
+    h.controller.onSessionStart('sess-1')
+
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+
+    expect(h.calls.messages).toBe(0)
+    expect(h.calls.cwd).toBe(0)
+    expect(h.calls.root).toBe(0)
+    expect(h.calls.repo).toBe(0)
+    expect(h.calls.stat).toBe(0)
+    expect(h.notices.some(notice => notice?.includes('일부 문맥'))).toBe(false)
     expect(h.calls.complete).toBe(1)
   })
 })

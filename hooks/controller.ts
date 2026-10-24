@@ -38,11 +38,18 @@ import {
 } from './model'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
+import {
+  PreparationCancelled,
+  createPreparationBudget,
+  type PreparationBudget,
+  type PreparationDegradation,
+} from './preparation'
 import { resolveTargetModel } from './resolve-target-model'
 import { undoTarget } from './revisions'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import {
+  TARGET_MODEL_TIMEOUT_MS,
   type BypassTicket,
   type ContextSnapshot,
   type EnginePorts,
@@ -56,6 +63,7 @@ import {
   type SubmissionDecision,
   type SubmissionFacts,
   type SubmissionStatus,
+  type TargetModelSnapshot,
   type TransferRefusal,
   type Workflow,
 } from './contracts'
@@ -242,6 +250,23 @@ function refusalNotice(reason: TransferRefusal): string {
     default:
       return '입력창에 개선안을 넣지 못했습니다'
   }
+}
+
+/** The common-profile snapshot used when preparation cannot read a target model. */
+function commonTarget(reason: TargetModelSnapshot['reason']): TargetModelSnapshot {
+  return { raw: null, normalizedId: null, profile: 'common', reason }
+}
+
+/**
+ * One compact line naming the optional sections that actually fell back. It is
+ * built from fixed clauses only: no file body, prompt text or raw error leaks
+ * into a notice.
+ */
+function preparationNotice(context: boolean, extra: boolean): string | null {
+  const clauses: string[] = []
+  if (context) clauses.push('준비 시간 제한으로 일부 문맥을 생략했습니다.')
+  if (extra) clauses.push('시스템 지침 준비가 지연되어 기본 지침을 사용합니다.')
+  return clauses.length > 0 ? clauses.join(' ') : null
 }
 
 /**
@@ -458,35 +483,50 @@ export function createController(deps: ControllerDeps): OptimizerController {
   /**
    * Whether the engine's `$.model.complete` takes cached text blocks, read from
    * `$.session.version()` at most once per controller. A missing getter, a
-   * throw and an unparseable version all mean "no cache", and the answer is
-   * memoized so later rounds never re-read it or warn again.
+   * throw, an unparseable version and a timed-out read all mean "no cache", and
+   * a live answer is memoized so later rounds never re-read it.
    *
-   * The first unsupported read holds one Korean notice instead of emitting it:
-   * a person on an old CLI never sees the cache that silently went unused, but
-   * `resolveTargetModel`/`version()` can outlive a cancel, so emitting here
-   * would toast a run the person already left. `round` flushes the held notice
-   * after its own stale/abort check, so a live round shows it once per
-   * controller and a cancelled or superseded one shows nothing. A supported
-   * version holds nothing. The notice names the detected version when there is
-   * one, and says so when the version could not be read.
+   * The version read runs under the round's preparation budget. Its result is
+   * committed only after the caller's round still owns the session/workflow and
+   * has not been aborted: a cancelled or superseded round neither memoizes nor
+   * leaves a notice behind. The first unsupported or timed-out live read holds
+   * one Korean notice instead of emitting it, because the read can outlive a
+   * cancel; `round` flushes the held notice after its own live check, so a live
+   * round shows it once per controller and an obsolete one shows nothing.
    */
-  async function promptCacheEnabled(ports: EnginePorts): Promise<boolean> {
+  async function promptCacheEnabled(
+    ports: EnginePorts,
+    budget: PreparationBudget,
+    live: () => boolean,
+  ): Promise<boolean | 'cancelled'> {
     if (versionCache !== null) return versionCache
+    if (!live()) return 'cancelled'
+
+    const getter = ports.session.version
+    if (getter === undefined) {
+      // No port to call; the unsupported path is deterministic and immediate.
+      versionCache = false
+      pendingCacheNotice = 'Claude Code 버전을 확인할 수 없어 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.'
+      return false
+    }
+
+    const result = await budget.run('version', () => getter())
+    if (!live() || result.kind === 'cancelled') return 'cancelled'
+
     let supported = false
     let version: string | undefined
-    try {
-      const info = await ports.session.version?.()
-      version = info?.version
+    if (result.kind === 'ok') {
+      version = result.value?.version
       supported = supportsPromptCache(version)
-    } catch {
-      supported = false
     }
     versionCache = supported
     if (!supported) {
       pendingCacheNotice =
-        version === undefined
-          ? 'Claude Code 버전을 확인할 수 없어 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.'
-          : `Claude Code ${version}은(는) ${PROMPT_CACHE_MIN_VERSION} 미만이라 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.`
+        result.kind !== 'ok'
+          ? 'Claude Code 버전 확인이 지연되어 프롬프트 캐시 없이 동작합니다.'
+          : version === undefined
+            ? 'Claude Code 버전을 확인할 수 없어 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.'
+            : `Claude Code ${version}은(는) ${PROMPT_CACHE_MIN_VERSION} 미만이라 프롬프트 캐시 없이 동작합니다. CLI를 업데이트하세요.`
     }
     return supported
   }
@@ -733,90 +773,128 @@ export function createController(deps: ControllerDeps): OptimizerController {
     const controller = new AbortController()
     rounds.set(workflowId, { controller })
     startProgressTimer(ports, workflow, controller)
+
+    // One preparation window per round. It starts before the context read and
+    // ends just before the model request; a host without a usable timer makes
+    // each optional step fail closed instead of waiting unbounded.
+    const preparation = createPreparationBudget({
+      clock: ports.clock,
+      signal: controller.signal,
+      now: deps.now,
+    })
+    const degraded = { context: false, extra: false }
+    const onDegraded = (label: string, reason: PreparationDegradation): void => {
+      if (reason === 'cancelled') return
+      // Labels from the system-instruction loader start with `extra-`.
+      if (label.startsWith('extra-')) degraded.extra = true
+      else degraded.context = true
+    }
+    // Every effect below is preceded by this live check: the budget can settle a
+    // stale read or a cancel between two awaits, and no late result may write
+    // the run cache, a notice, guidance or the request.
+    const live = (): boolean =>
+      state.sessionId === workflow.sessionId
+      && state.workflow?.id === workflowId
+      && state.workflow.generation === generation
+      && rounds.get(workflowId)?.controller === controller
+      && !controller.signal.aborted
+
     try {
       // The snapshot is read once, on the first round.
       if (workflow.phase === 'idle') {
         apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
         let context: ContextSnapshot | null = null
         try {
-          context = await collectContext(ports, config, workflow.original)
-        } catch {
+          context = await collectContext(ports, config, workflow.original, {
+            budget: preparation,
+            onDegraded,
+          })
+        } catch (cause) {
+          // Cancellation is not a collection failure: exit the round without a
+          // context, notice or second restore.
+          if (cause instanceof PreparationCancelled) return
           context = null
         }
+        if (!live()) return
         if (context !== null) apply({ type: 'context', workflowId, generation, context })
       }
 
-      // A cancel during collection has already stranded this run.
-      if (isStale(state, workflowId, generation)) return
+      if (!live()) return
 
       apply({ type: 'phase', workflowId, generation, phase: 'generating' })
 
       // The extra file is read once per run. Only a live owner may cache it: a
       // cancel or a new run during the read must not be overwritten by this one.
       if (extra === null) {
-        let loadedText = ''
-        let warning: string | undefined
+        let loaded: { text: string; warning?: string } = { text: '' }
         try {
-          const loaded = await loadSystemPromptExtra(ports, config)
-          loadedText = loaded.text
-          warning = loaded.warning
-        } catch {
-          // A missing extra file falls back to the built-in prompt, already the
-          // empty `loadedText`; `loadSystemPromptExtra` reports its own warning
-          // when it can, but an unexpected throw here leaves none to relay.
-          loadedText = ''
+          loaded = await loadSystemPromptExtra(ports, config, { budget: preparation, onDegraded })
+        } catch (cause) {
+          // An expected file failure reports its own warning; cancellation ends
+          // the round so a stale run cannot cache or toast anything.
+          if (cause instanceof PreparationCancelled) return
+          loaded = { text: '' }
         }
-        // After the await, a stale or aborted round must not write the cache or
-        // notify: its result belongs to a run the person already left.
-        if (isStale(state, workflowId, generation) || controller.signal.aborted) {
-          releaseRound(workflowId, controller)
-          return
-        }
-        extra = loadedText
+        if (!live()) return
+        extra = loaded.text
         // The prompt is loaded once per run, so this is the run's one warning
         // notice; the warning text itself names the file and the reason. Only a
         // missing/unreadable file leaves `extra` empty and falls back to the
         // built-in prompt; a truncation warning keeps the loaded text.
-        if (warning !== undefined && warning !== '') {
+        if (loaded.warning !== undefined && loaded.warning !== '') {
           notify(
-            loadedText === ''
-              ? `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${warning}`
-              : `시스템 프롬프트 파일 안내: ${warning}`,
+            loaded.text === ''
+              ? `시스템 프롬프트 파일을 읽지 못해 기본 프롬프트를 사용합니다: ${loaded.warning}`
+              : `시스템 프롬프트 파일 안내: ${loaded.warning}`,
           )
         }
       }
 
-      // The main session's model is read afresh on every round (the first call,
-      // retry and refine alike), just before the request is assembled.
-      apply({ type: 'progress', workflowId, generation, stage: 'target-model' })
-      const target = await resolveTargetModel(ports, config.modelGuidance, controller.signal)
-      // The engine version caps prompt caching; it is read once per controller.
-      const cache = await promptCacheEnabled(ports)
+      if (!live()) return
 
-      // A cancel during detection must not send or record anything: a `cancelled`
-      // snapshot is not permission to complete.
-      if (isStale(state, workflowId, generation) || controller.signal.aborted) {
-        releaseRound(workflowId, controller)
+      // The main session's model is read afresh on every round (the first call,
+      // retry and refine alike), just before the request is assembled. The
+      // resolver keeps its own 500 ms cap, further capped by what the round has
+      // left; a shared-budget expiry falls back to common guidance.
+      apply({ type: 'progress', workflowId, generation, stage: 'target-model' })
+      const targetStep = await preparation.run(
+        'target-model',
+        signal => resolveTargetModel(ports, config.modelGuidance, signal),
+        TARGET_MODEL_TIMEOUT_MS,
+      )
+      if (targetStep.kind === 'cancelled') return
+      if (!live()) return
+      let target: TargetModelSnapshot
+      if (targetStep.kind === 'ok' && targetStep.value.reason !== 'cancelled') {
+        target = targetStep.value
+      } else if (targetStep.kind === 'ok') {
         return
+      } else {
+        target = commonTarget(targetStep.kind === 'budget' ? 'timeout' : targetStep.kind)
       }
+
+      // The engine version caps prompt caching; it is read once per controller
+      // and only a live round may memoize the answer or hold its notice.
+      const cache = await promptCacheEnabled(ports, preparation, live)
+      if (cache === 'cancelled' || !live()) return
 
       const current = state.workflow
-      if (current === null || current.id !== workflowId) {
-        releaseRound(workflowId, controller)
-        return
-      }
+      if (current === null || current.id !== workflowId) return
 
       // `promptCacheEnabled` held the unsupported-version notice instead of
       // showing it while the round was still cancellable. This is the first
-      // point past every stale/abort guard, so the run really is going ahead:
-      // show it now, once per controller, and clear it so later rounds stay
-      // silent. A cancelled round never reaches here, so its held notice waits
-      // for the next live round instead of toasting a run already left.
+      // point past every live guard, so the run really is going ahead: show it
+      // now, once per controller, and clear it so later rounds stay silent.
       if (pendingCacheNotice !== null) {
         const notice = pendingCacheNotice
         pendingCacheNotice = null
         notify(notice)
       }
+
+      // One compact summary for the optional sections that actually fell back.
+      // A disabled context section reports nothing because it never ran.
+      const fallback = preparationNotice(degraded.context, degraded.extra)
+      if (fallback !== null) notify(fallback)
 
       // `config` was captured at round start, so a live level change applies to
       // the next round and never rewrites an in-flight request.
@@ -846,6 +924,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
       // Record the model this request actually targets, just before sending.
       lastGuidance = { workflowId, round: current.rounds + 1, target }
+
+      // Preparation is over: settle any leftover optional read and stop its
+      // timers before the model wait begins.
+      preparation.dispose()
 
       apply({ type: 'progress', workflowId, generation, stage: 'generating' })
       let result: RewriteResult
@@ -921,6 +1003,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       controller.abort()
       throw cause
     } finally {
+      preparation.dispose()
       releaseRound(workflowId, controller)
     }
   }
