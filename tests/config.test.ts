@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import type { OptimizerConfig } from '../hooks/contracts'
+import type { EnginePorts, OptimizerConfig } from '../hooks/contracts'
 import { DEFAULT_CONFIG, SYSTEM_PROMPT_MAX_CHARS } from '../hooks/contracts'
 import {
   expandHome,
@@ -9,6 +9,78 @@ import {
   resolveConfig,
   validateConfigChange,
 } from '../hooks/config'
+import { PreparationCancelled } from '../hooks/preparation'
+
+interface Deferred<T> {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+  readonly reject: (reason?: unknown) => void
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+interface SleepCall {
+  readonly ms: number
+  readonly signal: AbortSignal | undefined
+  readonly due: number
+  readonly resolve: () => void
+  readonly reject: (reason?: unknown) => void
+  settled: boolean
+}
+
+/** A deterministic timer: `advance` moves `now` and resolves due waits. */
+interface TestClock {
+  readonly port: NonNullable<EnginePorts['clock']>
+  readonly calls: SleepCall[]
+  advance(ms: number): void
+}
+
+function testClock(start = 0): TestClock {
+  let now = start
+  const calls: SleepCall[] = []
+  const port = {
+    sleep: (ms: number, options?: { signal?: AbortSignal }): Promise<void> => {
+      const wait = deferred<void>()
+      const call: SleepCall = {
+        ms,
+        signal: options?.signal,
+        due: now + ms,
+        resolve: () => {
+          if (call.settled) return
+          call.settled = true
+          wait.resolve(undefined)
+        },
+        reject: reason => {
+          if (call.settled) return
+          call.settled = true
+          wait.reject(reason)
+        },
+        settled: false,
+      }
+      calls.push(call)
+      const onAbort = (): void => call.reject(new Error('sleep aborted'))
+      if (options?.signal?.aborted === true) onAbort()
+      else options?.signal?.addEventListener('abort', onAbort, { once: true })
+      return wait.promise
+    },
+  } as unknown as NonNullable<EnginePorts['clock']>
+  return {
+    port,
+    calls,
+    advance: ms => {
+      now += ms
+      for (const call of [...calls]) if (call.due <= now) call.resolve()
+    },
+  }
+}
 
 /** A stand-in engine exposing only the `$.fs` / `$.env` members the loader uses. */
 interface FakeEngineOptions {
@@ -16,15 +88,28 @@ interface FakeEngineOptions {
   files?: Record<string, string>
   statError?: Error
   readError?: Error
+  clock?: TestClock
   onStat?: (path: string) => void
   onRead?: (path: string) => void
+  onEnv?: (name: string) => void
+  onSleep?: (ms: number) => void
 }
 
 function fakeEngine(options: FakeEngineOptions = {}): EngineInterface {
   const files = options.files ?? {}
+  const clock = options.clock ?? testClock()
   const engine = {
+    clock: {
+      sleep: (ms: number, waitOptions?: { signal?: AbortSignal }) => {
+        options.onSleep?.(ms)
+        return clock.port.sleep(ms, waitOptions)
+      },
+    },
     env: {
-      get: async (name: string) => (name === 'HOME' ? options.home : undefined),
+      get: async (name: string) => {
+        options.onEnv?.(name)
+        return name === 'HOME' ? options.home ?? null : undefined
+      },
     },
     fs: {
       stat: async (path: string) => {
@@ -48,6 +133,15 @@ function fakeEngine(options: FakeEngineOptions = {}): EngineInterface {
 
 function configWith(over: Partial<OptimizerConfig>): OptimizerConfig {
   return { ...DEFAULT_CONFIG, ...over }
+}
+
+/** Spins microtasks until `predicate` holds; no real time passes. */
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return
+    await Promise.resolve()
+  }
+  throw new Error('waitFor: condition never held')
 }
 
 describe('resolveConfig — whole-options shapes', () => {
@@ -484,9 +578,14 @@ describe('expandHome', () => {
 })
 
 describe('loadSystemPromptExtra', () => {
-  test('reads nothing when no file is configured', async () => {
+  test('reads nothing, not even a timer, when no file is configured', async () => {
     let touched = false
-    const $ = fakeEngine({ onStat: () => (touched = true), onRead: () => (touched = true) })
+    const $ = fakeEngine({
+      onStat: () => (touched = true),
+      onRead: () => (touched = true),
+      onEnv: () => (touched = true),
+      onSleep: () => (touched = true),
+    })
     const result = await loadSystemPromptExtra($, configWith({ systemPromptFile: '' }))
     expect(result).toEqual({ text: '' })
     expect(touched).toBe(false)
@@ -547,5 +646,155 @@ describe('loadSystemPromptExtra', () => {
     const result = await loadSystemPromptExtra($, configWith({ systemPromptFile: '/broken.md' }))
     expect(result.text).toBe('')
     expect(result.warning).toContain('built-in prompt')
+  })
+})
+
+describe('loadSystemPromptExtra — bounded preparation', () => {
+  test('an absolute path skips HOME even when HOME is unavailable', async () => {
+    let envReads = 0
+    const $ = fakeEngine({
+      files: { '/etc/prompt.md': 'extra instructions' },
+      onEnv: () => (envReads += 1),
+    })
+    const result = await loadSystemPromptExtra($, configWith({ systemPromptFile: '/etc/prompt.md' }))
+    expect(result).toEqual({ text: 'extra instructions' })
+    expect(envReads).toBe(0)
+  })
+
+  test('a tilde path with no usable HOME warns and reads no literal path', async () => {
+    const paths: string[] = []
+    const $ = fakeEngine({
+      home: undefined,
+      onStat: path => paths.push(path),
+    })
+    const result = await loadSystemPromptExtra($, configWith({ systemPromptFile: '~/notes.md' }))
+    expect(result.text).toBe('')
+    expect(result.warning).toContain('home directory')
+    expect(paths).toEqual([])
+  })
+
+  test('a hung HOME for a tilde path times out before any file read', async () => {
+    const clock = testClock()
+    const $ = fakeEngine({ clock })
+    let started = false
+    $.env.get = (() => {
+      started = true
+      return new Promise(() => {})
+    }) as EnginePorts['env']['get']
+    const degraded: string[] = []
+
+    const pending = loadSystemPromptExtra(
+      $,
+      configWith({ systemPromptFile: '~/notes.md' }),
+      { onDegraded: (label, reason) => degraded.push(`${label}:${reason}`) },
+    )
+    await waitFor(() => started)
+    clock.advance(500)
+    const result = await pending
+
+    expect(result.text).toBe('')
+    // The timeout is announced through `onDegraded` only: no second warning that
+    // names the missing home directory instead of the expired budget.
+    expect(result.warning).toBeUndefined()
+    expect(degraded).toEqual(['extra-home:timeout'])
+  })
+
+  test('a hung stat times out, warns nothing and never reads the file', async () => {
+    const clock = testClock()
+    let reads = 0
+    const $ = fakeEngine({ clock, onRead: () => (reads += 1) })
+    let started = false
+    $.fs.stat = (() => {
+      started = true
+      return new Promise(() => {})
+    }) as EnginePorts['fs']['stat']
+    const degraded: string[] = []
+
+    const pending = loadSystemPromptExtra(
+      $,
+      configWith({ systemPromptFile: '/etc/prompt.md' }),
+      { onDegraded: (label, reason) => degraded.push(`${label}:${reason}`) },
+    )
+    await waitFor(() => started)
+    clock.advance(500)
+    const result = await pending
+
+    expect(result).toEqual({ text: '' })
+    expect(degraded).toEqual(['extra-stat:timeout'])
+    expect(reads).toBe(0)
+  })
+
+  test('a hung read times out and its late success is ignored', async () => {
+    const clock = testClock()
+    const $ = fakeEngine({ clock, files: { '/etc/prompt.md': 'text' } })
+    let started = false
+    let release: (() => void) | undefined
+    $.fs.read = (() => {
+      started = true
+      return new Promise<string>(resolve => { release = () => resolve('late text') })
+    }) as EnginePorts['fs']['read']
+    const degraded: string[] = []
+
+    const pending = loadSystemPromptExtra(
+      $,
+      configWith({ systemPromptFile: '/etc/prompt.md' }),
+      { onDegraded: (label, reason) => degraded.push(`${label}:${reason}`) },
+    )
+    await waitFor(() => started)
+    clock.advance(500)
+    const result = await pending
+
+    expect(result).toEqual({ text: '' })
+    expect(degraded).toEqual(['extra-read:timeout'])
+    release?.()
+    for (let i = 0; i < 20; i += 1) await Promise.resolve()
+    expect(result).toEqual({ text: '' })
+  })
+
+  test('cancellation during HOME, stat or read propagates instead of warning', async () => {
+    for (const stage of ['home', 'stat', 'read'] as const) {
+      const $ = fakeEngine({ home: '/home/tester', files: { '/home/tester/notes.md': 'extra' } })
+      const controller = new AbortController()
+      let started = false
+      if (stage === 'home') {
+        $.env.get = (() => {
+          started = true
+          return new Promise(() => {})
+        }) as EnginePorts['env']['get']
+      } else if (stage === 'stat') {
+        $.fs.stat = (() => {
+          started = true
+          return new Promise(() => {})
+        }) as EnginePorts['fs']['stat']
+      } else {
+        $.fs.read = (() => {
+          started = true
+          return new Promise(() => {})
+        }) as EnginePorts['fs']['read']
+      }
+
+      const pending = loadSystemPromptExtra(
+        $,
+        configWith({ systemPromptFile: '~/notes.md' }),
+        { signal: controller.signal },
+      )
+      await waitFor(() => started)
+      controller.abort()
+      let error: unknown
+      try {
+        await pending
+      } catch (cause) {
+        error = cause
+      }
+      expect(error).toBeInstanceOf(PreparationCancelled)
+    }
+  })
+
+  test('the existing truncation warning is unchanged under the budget', async () => {
+    const over = SYSTEM_PROMPT_MAX_CHARS + 10
+    const $ = fakeEngine({ files: { '/big.md': 'x'.repeat(over) } })
+    const result = await loadSystemPromptExtra($, configWith({ systemPromptFile: '/big.md' }))
+    expect(result.text).toHaveLength(SYSTEM_PROMPT_MAX_CHARS)
+    expect(result.warning).toContain('longer than')
   })
 })

@@ -1,7 +1,9 @@
 import type { EngineInterface, SessionMessage, SessionRepo, ToolUseSummary } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import { CONTEXT_RULES_CHARS, DEFAULT_CONFIG } from '../hooks/contracts'
+import { CONTEXT_RULES_CHARS, DEFAULT_CONFIG, type EnginePorts } from '../hooks/contracts'
+import { PROJECT_SCAN_MS } from '../hooks/project-context'
+import { PreparationCancelled } from '../hooks/preparation'
 import {
   CONTEXT_MAX_RULE_BYTES,
   CONTEXT_MESSAGE_CHARS,
@@ -59,9 +61,82 @@ interface Calls {
   repo: number
   stat: number
   read: number
+  /** Timer waits requested from the fake clock. */
+  sleep: number
   forbidden: string[]
   /** Every argument `$.session.messages()` was called with (`undefined` for none). */
   messageCalls: unknown[]
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+  readonly reject: (reason?: unknown) => void
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+interface SleepCall {
+  readonly ms: number
+  readonly signal: AbortSignal | undefined
+  readonly due: number
+  readonly resolve: () => void
+  readonly reject: (reason?: unknown) => void
+  settled: boolean
+}
+
+/** A deterministic timer: `advance` moves `now` and resolves due waits. */
+interface TestClock {
+  readonly port: NonNullable<EnginePorts['clock']>
+  readonly calls: SleepCall[]
+  advance(ms: number): void
+}
+
+function testClock(start = 0): TestClock {
+  let now = start
+  const calls: SleepCall[] = []
+  const port = {
+    sleep: (ms: number, options?: { signal?: AbortSignal }): Promise<void> => {
+      const wait = deferred<void>()
+      const call: SleepCall = {
+        ms,
+        signal: options?.signal,
+        due: now + ms,
+        resolve: () => {
+          if (call.settled) return
+          call.settled = true
+          wait.resolve(undefined)
+        },
+        reject: reason => {
+          if (call.settled) return
+          call.settled = true
+          wait.reject(reason)
+        },
+        settled: false,
+      }
+      calls.push(call)
+      const onAbort = (): void => call.reject(new Error('sleep aborted'))
+      if (options?.signal?.aborted === true) onAbort()
+      else options?.signal?.addEventListener('abort', onAbort, { once: true })
+      return wait.promise
+    },
+  } as unknown as NonNullable<EnginePorts['clock']>
+  return {
+    port,
+    calls,
+    advance: ms => {
+      now += ms
+      for (const call of [...calls]) if (call.due <= now) call.resolve()
+    },
+  }
 }
 
 interface FakeOptions {
@@ -73,6 +148,7 @@ interface FakeOptions {
   sizes?: Readonly<Record<string, number>>
   failMessages?: boolean
   failRead?: (path: string) => boolean
+  clock?: TestClock
 }
 
 /**
@@ -84,6 +160,7 @@ function fakeEngine(options: FakeOptions = {}): {
   engine: EngineInterface
   calls: Calls
   reads: string[]
+  clock: TestClock
 } {
   const calls: Calls = {
     messages: 0,
@@ -92,9 +169,11 @@ function fakeEngine(options: FakeOptions = {}): {
     repo: 0,
     stat: 0,
     read: 0,
+    sleep: 0,
     forbidden: [],
     messageCalls: [],
   }
+  const clock = options.clock ?? testClock()
   const reads: string[] = []
   const files = options.files ?? {}
   const sizes = options.sizes ?? {}
@@ -142,6 +221,12 @@ function fakeEngine(options: FakeOptions = {}): {
         return text
       },
     },
+    clock: {
+      sleep: (ms: number, waitOptions?: { signal?: AbortSignal }) => {
+        calls.sleep += 1
+        return clock.port.sleep(ms, waitOptions)
+      },
+    },
     model: {
       complete: forbid('model', 'complete'),
       fork: forbid('model', 'fork'),
@@ -156,7 +241,7 @@ function fakeEngine(options: FakeOptions = {}): {
     },
   }
 
-  return { engine: engine as unknown as EngineInterface, calls, reads }
+  return { engine: engine as unknown as EngineInterface, calls, reads, clock }
 }
 
 describe('buildSnapshot', () => {
@@ -382,12 +467,33 @@ describe('collectContext', () => {
     expect(snapshot.text).toContain('Repository evidence (partial, read-only)')
   })
 
-  test('does not collect repository evidence with a zero context budget', async () => {
-    const { engine, calls } = fakeEngine()
+  test('a zero context budget skips every transcript, filesystem and timer call', async () => {
+    const { engine, calls } = fakeEngine({
+      messages: [message('user', 'hello')],
+      files: { '/repo/CLAUDE.md': 'rules' },
+    })
     const snapshot = await collectContext(engine, { ...DEFAULT_CONFIG, contextMaxChars: 0 }, 'node image API')
-    expect(snapshot.project).toBe('')
-    expect(snapshot.text).toBe('')
-    expect(calls.stat).toBe(3)
+
+    expect(snapshot).toEqual({
+      conversation: '',
+      rules: '',
+      location: '',
+      project: '',
+      // #31 carries the source records on every snapshot; a skipped
+      // collection records that nothing was read.
+      repositorySources: [],
+      tools: '',
+      text: '',
+      chars: 0,
+    })
+    expect(calls.messages).toBe(0)
+    expect(calls.cwd).toBe(0)
+    expect(calls.root).toBe(0)
+    expect(calls.repo).toBe(0)
+    expect(calls.stat).toBe(0)
+    expect(calls.read).toBe(0)
+    expect(calls.sleep).toBe(0)
+    expect(calls.forbidden).toEqual([])
   })
 
   test('skips an oversized rule file without reading it', async () => {
@@ -537,5 +643,292 @@ describe('repository source records', () => {
     const skipped = await collectContext(zero, { ...DEFAULT_CONFIG, contextMaxChars: 0 }, 'node image API')
     expect(skipped.project).toBe('')
     expect(skipped.repositorySources).toEqual([])
+  })
+})
+
+describe('collectContext — bounded preparation', () => {
+  /** Spins microtasks until `predicate` holds; no real time passes. */
+  async function waitFor(predicate: () => boolean): Promise<void> {
+    for (let i = 0; i < 500; i += 1) {
+      if (predicate()) return
+      await Promise.resolve()
+    }
+    throw new Error('waitFor: condition never held')
+  }
+
+  test('a hung transcript times out while location and rules still collect', async () => {
+    const { engine, calls, clock } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      files: { '/repo/CLAUDE.md': 'project rules' },
+    })
+    let started = false
+    engine.session.messages = (() => {
+      started = true
+      return new Promise<SessionMessage[]>(() => {})
+    }) as EnginePorts['session']['messages']
+
+    const pending = collectContext(engine, DEFAULT_CONFIG)
+    expect(started).toBe(true)
+    clock.advance(500)
+    const snapshot = await pending
+
+    expect(snapshot.conversation).toBe('')
+    expect(snapshot.location).toBe('cwd: .')
+    expect(snapshot.rules).toContain('project rules')
+    expect(calls.forbidden).toEqual([])
+  })
+
+  test('a hung cwd times out without losing the other sections', async () => {
+    const { engine, clock } = fakeEngine({
+      root: '/repo',
+      files: { '/repo/CLAUDE.md': 'project rules' },
+    })
+    let started = false
+    engine.session.cwd = (() => {
+      started = true
+      return new Promise<string>(() => {})
+    }) as EnginePorts['session']['cwd']
+
+    const pending = collectContext(engine, DEFAULT_CONFIG)
+    await waitFor(() => started)
+    clock.advance(500)
+    const snapshot = await pending
+
+    expect(snapshot.location).toBe('')
+    expect(snapshot.rules).toContain('project rules')
+  })
+
+  test('a hung root times out and skips rule and repository scans', async () => {
+    const { engine, calls, clock } = fakeEngine({
+      files: { '/repo/CLAUDE.md': 'project rules' },
+    })
+    let started = false
+    engine.session.root = (() => {
+      started = true
+      return new Promise<string>(() => {})
+    }) as EnginePorts['session']['root']
+
+    const pending = collectContext(engine, DEFAULT_CONFIG, 'image')
+    await waitFor(() => started)
+    clock.advance(500)
+    const snapshot = await pending
+
+    expect(snapshot.rules).toBe('')
+    expect(snapshot.project).toBe('')
+    expect(calls.stat).toBe(0)
+    expect(calls.read).toBe(0)
+  })
+
+  test('a hung repo times out while the location still names cwd', async () => {
+    const { engine, clock } = fakeEngine({ cwd: '/repo', root: '/repo' })
+    let started = false
+    engine.session.repo = (() => {
+      started = true
+      return new Promise<SessionRepo | null>(() => {})
+    }) as EnginePorts['session']['repo']
+
+    const pending = collectContext(engine, DEFAULT_CONFIG)
+    await waitFor(() => started)
+    clock.advance(500)
+    const snapshot = await pending
+
+    expect(snapshot.location).toBe('cwd: .')
+  })
+
+  test('a hung rule stat times out and later candidates still run', async () => {
+    const { engine, clock } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      files: { '/repo/AGENTS.md': 'later rules' },
+    })
+    const stat = engine.fs.stat
+    let started = false
+    engine.fs.stat = async path => {
+      if (path === '/repo/CLAUDE.md') {
+        started = true
+        return new Promise(() => {})
+      }
+      return stat(path)
+    }
+
+    const pending = collectContext(engine, DEFAULT_CONFIG)
+    await waitFor(() => started)
+    clock.advance(500)
+    const snapshot = await pending
+
+    expect(snapshot.rules).toContain('later rules')
+  })
+
+  test('a hung rule read times out and the read is not retried', async () => {
+    const { engine, calls, clock } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      files: { '/repo/CLAUDE.md': 'unreachable', '/repo/AGENTS.md': 'later rules' },
+    })
+    let reads = 0
+    let started = false
+    engine.fs.read = async path => {
+      reads += 1
+      if (path === '/repo/CLAUDE.md') {
+        started = true
+        return new Promise(() => {})
+      }
+      return 'later rules'
+    }
+
+    const pending = collectContext(engine, DEFAULT_CONFIG)
+    await waitFor(() => started)
+    clock.advance(500)
+    const snapshot = await pending
+
+    expect(snapshot.rules).toContain('later rules')
+    expect(reads).toBe(2)
+    expect(calls.read).toBe(0)
+  })
+
+  test('the first rule survives a later hung candidate', async () => {
+    const { engine, clock } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      files: { '/repo/CLAUDE.md': 'first rules', '/repo/AGENTS.md': 'later rules' },
+    })
+    const stat = engine.fs.stat
+    let started = false
+    engine.fs.stat = async path => {
+      if (path === '/repo/AGENTS.md') {
+        started = true
+        return new Promise(() => {})
+      }
+      return stat(path)
+    }
+
+    const pending = collectContext(engine, DEFAULT_CONFIG)
+    await waitFor(() => started)
+    clock.advance(500)
+    const snapshot = await pending
+
+    expect(snapshot.rules).toContain('first rules')
+    expect(snapshot.rules).not.toContain('later rules')
+  })
+
+  test('a missing root skips all rule and repository file IO', async () => {
+    const { engine, calls } = fakeEngine({ root: '' })
+    const snapshot = await collectContext(engine, DEFAULT_CONFIG, 'image')
+
+    expect(snapshot.rules).toBe('')
+    expect(snapshot.project).toBe('')
+    expect(calls.stat).toBe(0)
+    expect(calls.read).toBe(0)
+  })
+
+  test('contextTurns 0 skips the transcript while other sections collect', async () => {
+    const { engine, calls } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      messages: [message('user', 'hello')],
+      files: { '/repo/CLAUDE.md': 'project rules' },
+    })
+    const snapshot = await collectContext(engine, { ...DEFAULT_CONFIG, contextTurns: 0 })
+
+    expect(calls.messages).toBe(0)
+    expect(snapshot.conversation).toBe('')
+    expect(snapshot.rules).toContain('project rules')
+  })
+
+  test('cancellation rejects with PreparationCancelled and starts no next read', async () => {
+    const { engine, calls } = fakeEngine({ cwd: '/repo', root: '/repo' })
+    engine.session.messages = (() => new Promise<SessionMessage[]>(() => {})) as EnginePorts['session']['messages']
+    const controller = new AbortController()
+
+    const pending = collectContext(engine, DEFAULT_CONFIG, '', { signal: controller.signal })
+    controller.abort()
+    let error: unknown
+    try {
+      await pending
+    } catch (cause) {
+      error = cause
+    }
+
+    expect(error).toBeInstanceOf(PreparationCancelled)
+    expect(calls.cwd).toBe(0)
+    expect(calls.root).toBe(0)
+    expect(calls.stat).toBe(0)
+  })
+
+  test('a hung project scan times out, keeps the rest, and ignores its late result', async () => {
+    const { engine, calls, clock } = fakeEngine({
+      cwd: '/repo',
+      root: '/repo',
+      files: { '/repo/CLAUDE.md': 'project rules' },
+    })
+    const stat = engine.fs.stat
+    let release: ((value: { kind: 'dir'; size: number; mtimeMs: number; isLink: boolean; realPath: string }) => void) | undefined
+    engine.fs.stat = async (path, options) => {
+      if (path === '/repo') {
+        return new Promise(resolve => { release = resolve as typeof release })
+      }
+      return stat(path, options)
+    }
+    const pending = collectContext(engine, DEFAULT_CONFIG, 'image')
+    await waitFor(() => release !== undefined)
+    // Rule reads finished before the repository step; any later read is late.
+    const before = calls.read
+    clock.advance(PROJECT_SCAN_MS)
+    const snapshot = await pending
+
+    expect(snapshot.project).toBe('')
+    expect(snapshot.rules).toContain('project rules')
+
+    release?.({ kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/repo' })
+    for (let i = 0; i < 20; i += 1) await Promise.resolve()
+    expect(calls.read).toBe(before)
+  })
+
+  test('cancellation during a project scan exits without waiting for the read', async () => {
+    const { engine, clock } = fakeEngine({ cwd: '/repo', root: '/repo' })
+    const stat = engine.fs.stat
+    let release: (() => void) | undefined
+    engine.fs.stat = async (path, options) => {
+      if (path === '/repo') return new Promise(() => {})
+      return stat(path, options)
+    }
+    const controller = new AbortController()
+    const pending = collectContext(engine, DEFAULT_CONFIG, 'image', { signal: controller.signal })
+    await waitFor(() => clock.calls.some(call => call.ms === PROJECT_SCAN_MS))
+
+    controller.abort()
+    let error: unknown
+    try {
+      await pending
+    } catch (cause) {
+      error = cause
+    }
+    expect(error).toBeInstanceOf(PreparationCancelled)
+    release?.()
+  })
+
+  test('the repository step is capped at PROJECT_SCAN_MS', async () => {
+    const { engine, clock } = fakeEngine({ files: { '/repo/README.md': 'image docs' } })
+    await collectContext(engine, DEFAULT_CONFIG, 'image')
+    expect(clock.calls.some(call => call.ms === PROJECT_SCAN_MS)).toBe(true)
+  })
+
+  test('a host without a usable timer fails closed without any read', async () => {
+    const { engine, calls } = fakeEngine({
+      messages: [message('user', 'hello')],
+      files: { '/repo/CLAUDE.md': 'rules' },
+    })
+    delete (engine as unknown as { clock?: unknown }).clock
+
+    const snapshot = await collectContext(engine, DEFAULT_CONFIG, 'image')
+
+    expect(snapshot.text).toBe('')
+    expect(calls.messages).toBe(0)
+    expect(calls.cwd).toBe(0)
+    expect(calls.root).toBe(0)
+    expect(calls.repo).toBe(0)
+    expect(calls.stat).toBe(0)
+    expect(calls.read).toBe(0)
   })
 })
