@@ -81,6 +81,9 @@ export const REFRESH_PRIOR_HINTS = 4
 /** Largest supplementary block reserved for follow-up evidence. */
 export const REFRESH_RESERVE_MAX_CHARS = 1000
 
+/** Characters the model adds around the supplement's inner text. */
+export const REFRESH_BLOCK_OVERHEAD = '<repository_followup>\n\n</repository_followup>'.length
+
 /** Longest one target label in a rendered entry header. */
 const REFRESH_LABEL_MAX_CHARS = 80
 
@@ -199,11 +202,13 @@ export function appendRefresh(
 
 /**
  * Renders the retained entries for the variable request block. The result is
- * bounded to the reserve; the model wraps it in `<repository_followup>`.
+ * bounded to the reserve (or a smaller caller cap); the model wraps it in
+ * `<repository_followup>`, whose own characters come out of that reserve.
  */
-export function renderRefresh(state: RefreshState): string {
-  if (state.reserveChars <= 0 || state.entries.length === 0) return ''
-  return clip(state.entries.map(entryText).join('\n\n'), state.reserveChars)
+export function renderRefresh(state: RefreshState, cap: number = state.reserveChars): string {
+  const limit = Math.max(0, Math.min(state.reserveChars, Number.isFinite(cap) ? Math.floor(cap) : 0))
+  if (limit <= 0 || state.entries.length === 0) return ''
+  return clip(state.entries.map(entryText).join('\n\n'), limit)
 }
 
 /** One entry header plus body, with every label bounded. */

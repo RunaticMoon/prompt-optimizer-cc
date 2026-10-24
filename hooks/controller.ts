@@ -36,6 +36,18 @@ import {
   RequestBudgetError,
   REQUEST_BUDGET_NOTICE,
 } from './model'
+import {
+  REFRESH_BLOCK_OVERHEAD,
+  appendRefresh,
+  initialRefreshState,
+  planRefresh,
+  refreshAllocation,
+  renderRefresh,
+  type RefreshAllocation,
+  type RefreshState,
+} from './evidence-refresh'
+import { collectProjectEvidence } from './project-context'
+import { parseProjectAliases } from './search-terms'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
 import {
@@ -50,6 +62,7 @@ import { undoTarget } from './revisions'
 import { canStartRound, initialState, isStale, reduce, workflowRoundLimit } from './state'
 import { composeSystemPrompt } from './system-prompt'
 import {
+  CONTEXT_PROJECT_CHARS,
   TARGET_MODEL_TIMEOUT_MS,
   type BypassTicket,
   type ContextSnapshot,
@@ -109,6 +122,20 @@ export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
 
 /** How many composer submissions' paste verdicts the controller keeps. */
 const RECALLED_MAX = 100
+
+/**
+ * Limits for one follow-up scan. They are deliberately smaller than the
+ * initial collector bounds: refreshed evidence is a supplement, never a second
+ * full inventory. The output cap comes from the frozen reserve.
+ */
+const FOLLOWUP_LIMITS = {
+  maxDirectories: 6,
+  maxFiles: 4,
+  maxReadBytes: 65536,
+  maxEntries: 300,
+  maxStats: 32,
+  scanMs: 1000,
+} as const
 
 /** A token count with every field at zero, for arms that spent nothing. */
 const ZERO_USAGE: ModelUsage = {
@@ -349,6 +376,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
   const rounds = new Map<string, Round>()
   /** The run's extra system-prompt text; read once per run, `null` before that. */
   let extra: string | null = null
+  /** Frozen initial/follow-up evidence allocation for the active run. */
+  let refreshBudget: RefreshAllocation | null = null
+  /** Owner-scoped follow-up evidence cache; never part of reducer state. */
+  let refreshState: RefreshState | null = null
   /** The target model applied to the last request actually sent, or `null`. */
   let lastGuidance: Readonly<GuidanceStatus> | null = null
   /** Whether the engine takes cached text blocks; read once per controller, `null` before that. */
@@ -696,9 +727,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
   }
 
-  /** Drops the run's cached extra prompt; the next run reads the file afresh. */
+  /** Drops the run's cached extra prompt and refresh evidence. */
   function resetExtra(): void {
     extra = null
+    refreshBudget = null
+    refreshState = null
   }
 
   /**
@@ -707,7 +740,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * input history does too.
    */
   function resetGuidance(): void {
-    extra = null
+    resetExtra()
     lastGuidance = null
     consumedPrompt = null
     composerSnapshot = undefined
@@ -873,8 +906,43 @@ export function createController(deps: ControllerDeps): OptimizerController {
     notify(`원문을 입력창에 복원하지 못했습니다: ${refusalNotice(result.reason)}`)
   }
 
+  /**
+   * Reads the current session root/cwd only after a refresh trigger is
+   * accepted. A lookup failure returns no evidence; the round continues with
+   * the fixed snapshot and never guesses a path.
+   */
+  async function collectFollowup(
+    ports: EnginePorts,
+    query: string,
+    maxChars: number,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    let root: string
+    let cwd: string
+    try {
+      root = await ports.session.root()
+    } catch {
+      return null
+    }
+    if (signal.aborted || root === '') return null
+    try {
+      cwd = await ports.session.cwd()
+    } catch {
+      return null
+    }
+    if (signal.aborted) return null
+    try {
+      return await collectProjectEvidence(ports, root, cwd, query, {
+        limits: { ...FOLLOWUP_LIMITS, maxChars },
+        signal,
+      })
+    } catch {
+      return null
+    }
+  }
+
   /** The inner round: collect once, then make exactly one completion. */
-  async function round(ports: EnginePorts, instruction?: string): Promise<void> {
+  async function round(ports: EnginePorts, instruction?: string, fresh?: string): Promise<void> {
     const config = deps.getConfig()
     if (!canStartRound(state, config.maxRounds)) {
       notify(LIMIT_NOTICE)
@@ -923,11 +991,16 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // The snapshot is read once, on the first round.
       if (workflow.phase === 'idle') {
         apply({ type: 'phase', workflowId, generation, phase: 'collecting' })
+        const budget = refreshAllocation(config.contextMaxChars)
+        refreshBudget = budget
         let context: ContextSnapshot | null = null
         try {
-          context = await collectContext(ports, config, workflow.original, {
+          context = await collectContext(ports, { ...config, contextMaxChars: budget.initial }, workflow.original, {
             budget: preparation,
             onDegraded,
+            // The initial excerpt leaves room for the follow-up reserve so a
+            // later block never pushes the aggregate past its cap.
+            ...(budget.reserve > 0 ? { projectMaxChars: budget.projectInitial } : {}),
           })
         } catch (cause) {
           // Cancellation is not a collection failure: exit the round without a
@@ -937,8 +1010,70 @@ export function createController(deps: ControllerDeps): OptimizerController {
         }
         if (!live()) return
         if (context !== null) apply({ type: 'context', workflowId, generation, context })
+        if (context !== null && live() && budget.reserve > 0) {
+          refreshState = initialRefreshState(
+            { sessionId: workflow.sessionId, workflowId, generation },
+            workflow.original,
+            context.conversation,
+            parseProjectAliases(context.project ?? ''),
+            budget.reserve,
+          )
+        }
       }
 
+      // A cancel during collection has already stranded this run.
+      if (!live()) return
+
+      // Only a fresh refine/retry answer may add evidence. A bare retry or a
+      // repeated choice never reaches the filesystem.
+      if (fresh !== undefined && fresh.trim() !== '' && config.contextMaxChars > 0) {
+        const budget = refreshBudget
+        const cached = refreshState
+        if (budget !== null && budget.reserve > 0 && cached !== null
+          && cached.owner.sessionId === workflow.sessionId
+          && cached.owner.workflowId === workflowId
+          && cached.owner.generation === generation) {
+          const plan = planRefresh(cached, fresh)
+          if (plan !== null) {
+            // Move out of reviewing/failed before the await so a second
+            // submission cannot start a competing scan.
+            apply({ type: 'phase', workflowId, generation, phase: 'generating' })
+            apply({ type: 'progress', workflowId, generation, stage: 'context' })
+            refreshState = plan.nextState
+            // The supplementary scan runs inside this round's preparation
+            // window: the budget's own deadline and the step cap bound it, a
+            // cancel settles it at once, and every non-ok outcome stays
+            // nonfatal (a failed scan is unverified, never absence).
+            let evidence: string | null = null
+            const step = await preparation.run(
+              'followup',
+              stepSignal => collectFollowup(
+                ports,
+                plan.query,
+                budget.reserve - REFRESH_BLOCK_OVERHEAD,
+                stepSignal,
+              ),
+              FOLLOWUP_LIMITS.scanMs,
+            )
+            if (step.kind === 'ok') evidence = step.value
+            if (!live()) {
+              releaseRound(workflowId, controller)
+              return
+            }
+            if (evidence !== null && evidence.trim() !== '') {
+              refreshState = appendRefresh(refreshState, {
+                collectedAt: new Date(deps.now()).toISOString(),
+                round: workflow.rounds + 1,
+                targets: plan.newTargets,
+                text: evidence,
+              })
+            }
+            // A missing or failed scan is nonfatal and stays unverified.
+          }
+        }
+      }
+
+      if (!live()) return
       if (!live()) return
 
       apply({ type: 'phase', workflowId, generation, phase: 'generating' })
@@ -1019,11 +1154,19 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // `config` was captured at round start, so a live level change applies to
       // the next round and never rewrites an in-flight request.
       const system = composeSystemPrompt(extra, target.profile, config.refinementLevel)
+      // The follow-up block renders only for the live owner and stays inside
+      // the reserve; on overflow the request drops it before anything else.
+      const supplement = config.contextMaxChars > 0 && refreshState !== null
+        && refreshState.owner.sessionId === workflow.sessionId
+        && refreshState.owner.workflowId === workflowId
+        && refreshState.owner.generation === generation
+        ? renderRefresh(refreshState, refreshBudget === null ? 0 : refreshBudget.reserve - REFRESH_BLOCK_OVERHEAD)
+        : ''
       let request: ReturnType<typeof buildModelRequest>
       try {
         request = buildModelRequest(current, {
           ...config, maxRounds: workflowRoundLimit(current, config.maxRounds),
-        }, system, instruction, { cache })
+        }, system, instruction, { cache, repositorySupplement: supplement })
       } catch (cause) {
         // A local preflight refusal is not a model failure: keep the run and
         // its evidence, spend no round or call, and skip the first-failure
@@ -1132,10 +1275,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
    * Runs one round, never letting a scheduled (unawaited) round reject. An
    * unexpected fault releases the run so later submissions are not trapped.
    */
-  async function runRound(ports: EnginePorts, instruction?: string): Promise<void> {
+  async function runRound(ports: EnginePorts, instruction?: string, fresh?: string): Promise<void> {
     const owner = state.workflow
     try {
-      await round(ports, instruction)
+      await round(ports, instruction, fresh)
     } catch (cause) {
       if (!owner || isStale(state, owner.id, owner.generation)) return
       const workflow = state.workflow
@@ -1346,8 +1489,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
     apply({ type: 'instruct', workflowId: workflow.id, text: instruction })
     // The supplement now lives in the dialogue, which `buildModelRequest`
     // renders; `''` stops it from also filling the `<instruction>` section
-    // (whose fallback is the same dialogue turn, doubling the text).
-    await runRound(ports, '')
+    // (whose fallback is the same dialogue turn, doubling the text). The fresh
+    // answer is passed separately so a stale dialogue cannot trigger a scan.
+    await runRound(ports, '', instruction)
   }
 
   async function retry(ports: EnginePorts, instruction?: string): Promise<void> {
@@ -1363,7 +1507,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
     if (instruction !== undefined && instruction !== '') {
       apply({ type: 'instruct', workflowId: workflow.id, text: instruction })
-      await runRound(ports, '')
+      await runRound(ports, '', instruction)
       return
     }
     // A bare retry must not re-render the last supplement as `<instruction>`

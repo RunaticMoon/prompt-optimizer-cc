@@ -2,6 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { CONTEXT_PROJECT_CHARS, CONTEXT_TOTAL_CHARS } from '../hooks/contracts'
 import {
+  REFRESH_BLOCK_OVERHEAD,
   REFRESH_MAX_ATTEMPTS,
   REFRESH_MAX_TARGETS,
   appendRefresh,
@@ -244,6 +245,20 @@ describe('appendRefresh and renderRefresh', () => {
     }
     expect(renderRefresh(refresh).length).toBeLessThanOrEqual(400)
     expect(refresh.entries.every(entry => entryText(entry).length <= 400)).toBe(true)
+  })
+
+  test('the wrapper overhead comes out of the same reserve', () => {
+    let refresh = state({ reserveChars: 1000 })
+    for (let index = 0; index < 3; index += 1) {
+      refresh = appendRefresh(refresh, {
+        collectedAt: '2026-10-02T00:00:00.000Z',
+        round: index + 2,
+        targets: ['cart'],
+        text: `evidence-${index}-${'z'.repeat(400)}`,
+      })
+    }
+    const rendered = renderRefresh(refresh, refresh.reserveChars - REFRESH_BLOCK_OVERHEAD)
+    expect(rendered.length + REFRESH_BLOCK_OVERHEAD).toBeLessThanOrEqual(1000)
   })
 
   test('returns an empty block with no entries or no reserve', () => {
