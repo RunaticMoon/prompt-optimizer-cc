@@ -22,8 +22,9 @@ import {
   type ContextSnapshot,
   type EnginePorts,
   type OptimizerConfig,
+  type RepositorySource,
 } from './contracts'
-import { collectProjectEvidence } from './project-context'
+import { collectProjectEvidenceSnapshot } from './project-context'
 
 /** Per-message character cap before a long message is cut head/tail. */
 export const CONTEXT_MESSAGE_CHARS = 1200
@@ -55,6 +56,8 @@ export interface SnapshotInput {
   contextMaxChars: number
   /** Bounded repository excerpts collected for the current request. */
   project?: string
+  /** The files behind {@link project}, as recorded by the collector. */
+  projectSources?: readonly RepositorySource[]
 }
 
 /**
@@ -125,6 +128,9 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
     rules,
     location,
     project,
+    // Carried as metadata, never parsed back out of the text; absent when the
+    // caller collected no source records.
+    ...(input.projectSources === undefined ? {} : { repositorySources: input.projectSources }),
     tools,
     text,
     chars: text.length,
@@ -147,9 +153,11 @@ export async function collectContext(
   const root = await readText(() => $.session.root())
   const repoName = await readRepoName($)
   const rules = await readRules($, root, cwd)
-  const project = config.contextMaxChars > 0
-    ? await collectProjectEvidence($, root, cwd, request)
-    : ''
+  // One scan produces both the text and the source records; nothing is parsed
+  // back out of the text and no second scan runs.
+  const evidence = config.contextMaxChars > 0
+    ? await collectProjectEvidenceSnapshot($, root, cwd, request)
+    : { text: '', sources: [] as readonly RepositorySource[] }
 
   return buildSnapshot({
     messages,
@@ -159,7 +167,8 @@ export async function collectContext(
     repoName,
     contextTurns: config.contextTurns,
     contextMaxChars: config.contextMaxChars,
-    project,
+    project: evidence.text,
+    projectSources: evidence.sources,
   })
 }
 

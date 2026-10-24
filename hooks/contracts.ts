@@ -286,6 +286,21 @@ export interface ModelUsage {
   cache_creation_input_tokens: number
 }
 
+/**
+ * One repository file the collector actually read and selected for the
+ * snapshot (#31). The path is the collector's own record — never a path
+ * parsed out of model or file text — and the excerpt is exactly what the
+ * snapshot text carries for it.
+ */
+export interface RepositorySource {
+  /** The relative path the collector read, as labelled in the excerpt. */
+  path: string
+  /** The final selected excerpt (clipped to the snapshot budget), verbatim. */
+  excerpt: string
+  /** What kind of file it is. */
+  kind: 'domain' | 'scripts' | 'source'
+}
+
 /** The deterministic, size-bounded context read once at the start of a run. */
 export interface ContextSnapshot {
   /** Selected recent conversation, newest first then reordered. */
@@ -298,6 +313,12 @@ export interface ContextSnapshot {
   tools: string
   /** Bounded, path-labelled repository evidence relevant to the original request. */
   project?: string
+  /**
+   * The repository files behind {@link project}: only paths the collector
+   * actually read and selected. Inclusion of any excerpt in the current
+   * request is a separate matter (later trimming may exclude it).
+   */
+  repositorySources?: readonly RepositorySource[]
   /** The assembled snapshot text under the configured character budget. */
   text: string
   /** Length of {@link text} in characters. */
