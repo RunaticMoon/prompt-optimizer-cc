@@ -246,7 +246,7 @@ function harness(options: HarnessOptions = {}): Harness {
             },
           }),
     },
-    ...(modelGetter === undefined ? {} : { clock: fakeClock() }),
+    clock: fakeClock(),
     fs: {
       stat: async (path: string) => {
         calls.stat += 1

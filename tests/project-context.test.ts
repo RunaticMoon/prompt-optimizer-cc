@@ -264,6 +264,26 @@ describe('collectProjectEvidence', () => {
     expect(text).toContain('GLOSSARY.md')
     expect(timerSignal?.aborted).toBe(true)
   })
+
+  test('an optional caller signal stops traversal without new IO after a late read', async () => {
+    const { ports, reads, lists } = filesystem({ '/repo/README.md': 'image docs' })
+    let finishStat: ((value: FsStat) => void) | undefined
+    ports.fs.stat = () => new Promise(resolve => { finishStat = resolve })
+    ports.clock = { sleep: () => new Promise<void>(() => {}) }
+    const controller = new AbortController()
+
+    const pending = collectProjectEvidence(ports, '/repo', '/repo', 'image', controller.signal)
+    await Promise.resolve()
+    controller.abort()
+    // The hung read still decides how soon this promise settles, but an
+    // already-aborted signal skips the work entirely on the next call.
+    finishStat?.({ kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/repo' })
+    const text = await pending
+
+    expect(text).toContain('inspection unavailable')
+    expect(reads).toEqual([])
+    expect(lists).toEqual([])
+  })
 })
 
 describe('collectProjectEvidenceSnapshot — source records', () => {

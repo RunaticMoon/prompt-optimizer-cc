@@ -24,7 +24,14 @@ import {
   type OptimizerConfig,
   type RepositorySource,
 } from './contracts'
-import { collectProjectEvidenceSnapshot } from './project-context'
+import {
+  PreparationCancelled,
+  createLocalPreparation,
+  type PreparationBudget,
+  type PreparationCollectionOptions,
+  type PreparationDegradation,
+} from './preparation'
+import { PROJECT_SCAN_MS, collectProjectEvidenceSnapshot, type ProjectEvidenceSnapshot } from './project-context'
 
 /** Per-message character cap before a long message is cut head/tail. */
 export const CONTEXT_MESSAGE_CHARS = 1200
@@ -138,8 +145,11 @@ export function buildSnapshot(input: SnapshotInput): ContextSnapshot {
 }
 
 /**
- * Reads the session's own read-only facts and builds a snapshot. Every I/O
- * failure empties only the section it feeds and the read goes on.
+ * Reads the session's own read-only facts and builds a snapshot. Every bounded
+ * section that fails, times out or has no host timer is simply left out and the
+ * rest of the collection goes on; cancellation is the one distinct outcome and
+ * is never turned into an empty section. A zero character budget disables
+ * collection entirely, before any transcript, filesystem or timer call.
  *
  * `request` is the original prompt, used only to pick repository evidence.
  */
@@ -147,29 +157,69 @@ export async function collectContext(
   $: EnginePorts,
   config: OptimizerConfig,
   request = '',
+  options: PreparationCollectionOptions = {},
 ): Promise<ContextSnapshot> {
-  const messages = await readMessages($)
-  const cwd = await readText(() => $.session.cwd())
-  const root = await readText(() => $.session.root())
-  const repoName = await readRepoName($)
-  const rules = await readRules($, root, cwd)
-  // One scan produces both the text and the source records; nothing is parsed
-  // back out of the text and no second scan runs.
-  const evidence = config.contextMaxChars > 0
-    ? await collectProjectEvidenceSnapshot($, root, cwd, request)
-    : { text: '', sources: [] as readonly RepositorySource[] }
+  if (config.contextMaxChars <= 0) {
+    return buildSnapshot({
+      messages: [],
+      rules: [],
+      cwd: '',
+      root: '',
+      repoName: null,
+      contextTurns: 0,
+      contextMaxChars: 0,
+      projectSources: [],
+    })
+  }
 
-  return buildSnapshot({
-    messages,
-    rules,
-    cwd,
-    root,
-    repoName,
-    contextTurns: config.contextTurns,
-    contextMaxChars: config.contextMaxChars,
-    project: evidence.text,
-    projectSources: evidence.sources,
+  const ownsBudget = options.budget === undefined
+  const budget = options.budget ?? createLocalPreparation({
+    clock: $.clock,
+    signal: options.signal,
+    now: () => Date.now(),
   })
+  const degraded = (label: string, reason: PreparationDegradation): void => {
+    options.onDegraded?.(label, reason)
+  }
+
+  try {
+    const messages = config.contextTurns > 0
+      ? await runOr(budget, 'messages', () => $.session.messages(), [], degraded)
+      : []
+    const cwd = await runOr(budget, 'cwd', () => $.session.cwd(), '', degraded)
+    const root = await runOr(budget, 'root', () => $.session.root(), '', degraded)
+    const repoName = await runOr(
+      budget,
+      'repo',
+      async () => {
+        const repo = await $.session.repo()
+        return repo === null ? null : (repo.name ?? repo.root)
+      },
+      null,
+      degraded,
+    )
+    const rules = root.length > 0 ? await readRules(budget, $, root, cwd, degraded) : []
+    // `contextMaxChars > 0` above means repository evidence is wanted. One scan
+    // produces both the text and the source records; nothing is parsed back out
+    // of the text and no second scan runs.
+    const evidence = root.length > 0
+      ? await readProject(budget, $, root, cwd, request, degraded)
+      : { text: '', sources: [] as readonly RepositorySource[] }
+
+    return buildSnapshot({
+      messages,
+      rules,
+      cwd,
+      root,
+      repoName,
+      contextTurns: config.contextTurns,
+      contextMaxChars: config.contextMaxChars,
+      project: evidence.text,
+      projectSources: evidence.sources,
+    })
+  } finally {
+    if (ownsBudget) budget.dispose()
+  }
 }
 
 /** Index of the `contextTurns`-th text-bearing user message from the end. */
@@ -263,36 +313,32 @@ function joinPath(dir: string, relative: string): string {
   return `${base}/${relative}`
 }
 
-async function readMessages($: EnginePorts): Promise<readonly SessionMessage[]> {
-  try {
-    return await $.session.messages()
-  } catch {
-    return []
-  }
-}
-
-async function readText(read: () => Promise<string>): Promise<string> {
-  try {
-    return await read()
-  } catch {
-    return ''
-  }
-}
-
-async function readRepoName($: EnginePorts): Promise<string | null> {
-  try {
-    const repo = await $.session.repo()
-    return repo === null ? null : (repo.name ?? repo.root)
-  } catch {
-    return null
-  }
+/**
+ * Runs one optional read under the round's budget. A timeout, budget expiry,
+ * missing timer or task error yields `fallback`; cancellation propagates as
+ * {@link PreparationCancelled} so a broad catch cannot turn it into a default.
+ */
+async function runOr<T>(
+  budget: PreparationBudget,
+  label: string,
+  task: () => Promise<T>,
+  fallback: T,
+  degraded: (label: string, reason: PreparationDegradation) => void,
+): Promise<T> {
+  const result = await budget.run(label, task)
+  if (result.kind === 'ok') return result.value
+  if (result.kind === 'cancelled') throw new PreparationCancelled()
+  degraded(label, result.kind)
+  return fallback
 }
 
 /** Local project instructions, read only when small enough to be worth it. */
 async function readRules(
+  budget: PreparationBudget,
   $: EnginePorts,
   root: string,
   cwd: string,
+  degraded: (label: string, reason: PreparationDegradation) => void,
 ): Promise<{ path: string; text: string }[]> {
   if (root.length === 0) return []
 
@@ -310,16 +356,60 @@ async function readRules(
   for (const path of candidates) {
     if (seen.has(path)) continue
     seen.add(path)
-    try {
-      const stat = await $.fs.stat(path)
-      if (stat.kind !== 'file' || stat.size > CONTEXT_MAX_RULE_BYTES) continue
-      const text = await $.fs.read(path)
-      if (typeof text === 'string' && text.trim().length > 0) found.push({ path, text })
-    } catch {
-      // Missing, unreadable or denied: that rule candidate is simply absent.
+    // A missing/denied rule file is normal and not a degradation; only an
+    // inability to finish the read within the budget is reported.
+    const stat = await budget.run('rule-stat', async () => {
+      try {
+        return { found: true as const, stat: await $.fs.stat(path) }
+      } catch {
+        return { found: false as const }
+      }
+    })
+    if (stat.kind === 'cancelled') throw new PreparationCancelled()
+    if (stat.kind !== 'ok') {
+      degraded('rule-stat', stat.kind)
+      continue
+    }
+    if (!stat.value.found) continue
+    if (stat.value.stat.kind !== 'file' || stat.value.stat.size > CONTEXT_MAX_RULE_BYTES) continue
+
+    const read = await budget.run('rule-read', async () => {
+      try {
+        return { found: true as const, text: await $.fs.read(path) }
+      } catch {
+        return { found: false as const }
+      }
+    })
+    if (read.kind === 'cancelled') throw new PreparationCancelled()
+    if (read.kind !== 'ok') {
+      degraded('rule-read', read.kind)
+      continue
+    }
+    if (read.value.found && typeof read.value.text === 'string' && read.value.text.trim().length > 0) {
+      found.push({ path, text: read.value.text })
     }
   }
   return found
+}
+
+/** Repository evidence is optional; its own 2000 ms cap runs inside the budget. */
+async function readProject(
+  budget: PreparationBudget,
+  $: EnginePorts,
+  root: string,
+  cwd: string,
+  request: string,
+  degraded: (label: string, reason: PreparationDegradation) => void,
+): Promise<ProjectEvidenceSnapshot> {
+  const result = await budget.run(
+    'project',
+    signal => collectProjectEvidenceSnapshot($, root, cwd, request, signal),
+    PROJECT_SCAN_MS,
+  )
+  if (result.kind === 'ok') return result.value
+  if (result.kind === 'cancelled') throw new PreparationCancelled()
+  degraded('project', result.kind)
+  return { text: '', sources: [] }
 }
 
 function isHighSurrogate(code: number): boolean {

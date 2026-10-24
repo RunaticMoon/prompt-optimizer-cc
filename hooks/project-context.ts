@@ -52,13 +52,29 @@ export async function collectProjectEvidenceSnapshot(
   root: string,
   cwd: string,
   request: string,
+  signal?: AbortSignal,
 ): Promise<ProjectEvidenceSnapshot> {
-  if (!request.trim() || !root) return { text: '', sources: [] }
+  if (!request.trim() || !root || signal?.aborted === true) return { text: '', sources: [] }
   let stopped = false
   const timerAbort = new AbortController()
   const timeout = 'Bounded repository inspection timed out or its timer failed; implementation details and verification commands remain unverified.'
   const sleep = $.clock?.sleep
-  if (!sleep) return scanProject($, root, cwd, request, () => stopped)
+  // A caller's cancellation stops traversal between reads; the caller's own
+  // bounded wrapper settles even if one host read never returns.
+  const onAbort = (): void => { stopped = true }
+  signal?.addEventListener('abort', onAbort)
+  const cleanup = (): void => {
+    stopped = true
+    timerAbort.abort()
+    signal?.removeEventListener('abort', onAbort)
+  }
+  if (!sleep) {
+    try {
+      return await scanProject($, root, cwd, request, () => stopped)
+    } finally {
+      cleanup()
+    }
+  }
   try {
     const timer = Promise.resolve(sleep(PROJECT_SCAN_MS, { signal: timerAbort.signal })).then(
       () => { stopped = true; return { text: timeout, sources: [] } },
@@ -68,8 +84,7 @@ export async function collectProjectEvidenceSnapshot(
   } catch {
     return { text: timeout, sources: [] }
   } finally {
-    stopped = true
-    timerAbort.abort()
+    cleanup()
   }
 }
 
@@ -82,8 +97,9 @@ export async function collectProjectEvidence(
   root: string,
   cwd: string,
   request: string,
+  signal?: AbortSignal,
 ): Promise<string> {
-  return (await collectProjectEvidenceSnapshot($, root, cwd, request)).text
+  return (await collectProjectEvidenceSnapshot($, root, cwd, request, signal)).text
 }
 
 async function scanProject(
