@@ -351,6 +351,13 @@ function stemsFor(raw: string, index: GroupIndex): string[] {
     if (stem.length >= 2 && index.byMember.has(stem) && !out.includes(stem)) out.push(stem)
     break
   }
+  // A short Korean suffix on a known alias stem (노드별, 검색어) is one
+  // conservative variant, never a repeated character peel.
+  for (const member of index.members) {
+    if (!/^[가-힣]{2,}$/.test(member) || !raw.startsWith(member)) continue
+    const suffix = raw.length - member.length
+    if (suffix >= 1 && suffix <= 2 && !out.includes(member)) out.push(member)
+  }
   return out
 }
 
@@ -429,20 +436,26 @@ interface GroupIndex {
   byMember: Map<string, number>
   /** Member surface to its group's canonical key. */
   keyFor: Map<string, string>
+  /** Every member surface, first occurrence order. */
+  members: string[]
 }
 
 /** Builds member and key indexes; the first group wins on a collision. */
 function groupIndex(groups: readonly AliasGroup[]): GroupIndex {
   const byMember = new Map<string, number>()
   const keyFor = new Map<string, string>()
-  groups.forEach((members, group) => {
-    const key = groupKeyOf(groups, group)
-    for (const member of members) {
-      if (!byMember.has(member)) byMember.set(member, group)
-      if (!keyFor.has(member)) keyFor.set(member, key)
+  const members: string[] = []
+  groups.forEach((group, index) => {
+    const key = groupKeyOf(groups, index)
+    for (const member of group) {
+      if (!byMember.has(member)) byMember.set(member, index)
+      if (!keyFor.has(member)) {
+        keyFor.set(member, key)
+        members.push(member)
+      }
     }
   })
-  return { byMember, keyFor }
+  return { byMember, keyFor, members }
 }
 
 /** Canonical key for a merged group: built-ins keep their concept key. */
