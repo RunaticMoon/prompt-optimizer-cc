@@ -153,10 +153,14 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
 
     case 'reply': {
       // The tokens were spent even if the run is gone, so the session total
-      // always grows; only the workflow update is generation-gated.
-      const usage = addTotals(base.usage, event.usage, now)
+      // still grows for this session's own completions; only the workflow
+      // update is generation-gated. A result from another session belongs
+      // there and changes nothing here.
+      const usage = event.sessionId === base.sessionId
+        ? addTotals(base.usage, event.usage, now)
+        : base.usage
       const current = matchWorkflow(base, event.workflowId, event.generation)
-      if (current === null) return { ...base, usage }
+      if (current === null) return usage === base.usage ? base : { ...base, usage }
 
       const updated: Workflow = {
         ...current,
@@ -207,7 +211,9 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
 
     case 'failed': {
       const usage =
-        event.usage === undefined ? base.usage : addTotals(base.usage, event.usage, now)
+        event.usage === undefined || event.sessionId !== base.sessionId
+          ? base.usage
+          : addTotals(base.usage, event.usage, now)
       const current = matchWorkflow(base, event.workflowId, event.generation)
       if (current === null) {
         return usage === base.usage ? base : { ...base, usage }
@@ -227,10 +233,14 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
     }
 
     case 'usage': {
-      const totals = addTotals(base.usage, event.usage, now)
+      // Same ownership rule as `reply`/`failed`: another session's completion
+      // never moves this session's totals.
+      const totals = event.sessionId === base.sessionId
+        ? addTotals(base.usage, event.usage, now)
+        : base.usage
       const current = matchWorkflow(base, event.workflowId, event.generation)
       if (current === null) {
-        return { ...base, usage: totals }
+        return totals === base.usage ? base : { ...base, usage: totals }
       }
       return {
         ...base,

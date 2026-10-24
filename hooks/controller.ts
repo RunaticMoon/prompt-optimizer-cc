@@ -754,9 +754,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // Only drop the entry this round put there (a cancel already removed it).
       releaseRound(workflowId, controller)
 
-      // The reducer folds a stale result's usage without touching the run; the
-      // UI must not react either. `reply`/`failed` carry the usage, so no second
-      // `usage` event is emitted (`DESIGN.md`, 3. 상태 규칙).
+      // The reducer folds a same-session stale result's usage without touching
+      // the run; the UI must not react either. `reply`/`failed` carry the usage
+      // and its owning session, so no second `usage` event is emitted
+      // (`DESIGN.md`, 3. 상태 규칙).
       const stale = isStale(state, workflowId, generation)
 
       if (result.kind === 'ok') {
@@ -776,7 +777,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
             },
           }
         }
-        apply({ type: 'reply', workflowId, generation, reply: result.reply, usage: result.usage })
+        apply({ type: 'reply', workflowId, generation, sessionId: current.sessionId, reply: result.reply, usage: result.usage })
         if (stale) return
         const question = result.reply.question
         const options = result.reply.options ?? []
@@ -788,7 +789,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
         return
       }
 
-      apply({ type: 'failed', workflowId, generation, error: result.message, usage: result.usage })
+      apply({ type: 'failed', workflowId, generation, sessionId: current.sessionId, error: result.message, usage: result.usage })
       if (stale) return
 
       const failed = state.workflow
