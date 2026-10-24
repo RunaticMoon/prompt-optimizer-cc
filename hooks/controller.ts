@@ -29,7 +29,12 @@ import { collectContext } from './context'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
 import { classifySubmission } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
-import { buildModelRequest, completeRewrite } from './model'
+import {
+  buildModelRequest,
+  completeRewrite,
+  RequestBudgetError,
+  REQUEST_BUDGET_NOTICE,
+} from './model'
 import { decideRawEdit } from './raw-mode'
 import type { RawEditFacts } from './raw-mode'
 import { resolveTargetModel } from './resolve-target-model'
@@ -737,9 +742,28 @@ export function createController(deps: ControllerDeps): OptimizerController {
       }
 
       const system = composeSystemPrompt(extra, target.profile)
-      const request = buildModelRequest(current, {
-        ...config, maxRounds: workflowRoundLimit(current, config.maxRounds),
-      }, system, instruction, { cache })
+      let request: ReturnType<typeof buildModelRequest>
+      try {
+        request = buildModelRequest(current, {
+          ...config, maxRounds: workflowRoundLimit(current, config.maxRounds),
+        }, system, instruction, { cache })
+      } catch (cause) {
+        // A local preflight refusal is not a model failure: keep the run and
+        // its evidence, spend no round or call, and skip the first-failure
+        // restore path. Any other build fault keeps the old handling.
+        if (!(cause instanceof RequestBudgetError)) throw cause
+        apply({
+          type: 'budget-blocked',
+          workflowId,
+          generation,
+          sessionId: current.sessionId,
+          requiredChars: cause.requiredChars,
+          limitChars: cause.limitChars,
+          decisionIds: cause.decisionIds,
+        })
+        notify(REQUEST_BUDGET_NOTICE)
+        return
+      }
 
       // Record the model this request actually targets, just before sending.
       lastGuidance = { workflowId, round: current.rounds + 1, target }

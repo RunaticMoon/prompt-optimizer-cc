@@ -194,6 +194,7 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       if (entry !== null) updated.dialogue = [...current.dialogue, entry]
       // A recovery reply clears the failure that preceded it.
       delete updated.lastError
+      delete updated.budgetError
       delete updated.questionAsk
       delete updated.limitAsk
       return { ...base, usage, workflow: updated }
@@ -247,6 +248,32 @@ export function reduce(state: Readonly<RuntimeState>, event: OptimizerEvent, now
       delete updated.questionAsk
       delete updated.limitAsk
       return { ...base, usage, workflow: updated }
+    }
+
+    case 'budget-blocked': {
+      // A local refusal never belongs to another session, a cancelled run or a
+      // settled one (a duplicate event must not repaint a chosen failure).
+      if (event.sessionId !== base.sessionId) return base
+      const current = matchWorkflow(base, event.workflowId, event.generation)
+      if (current === null || current.phase !== 'generating') return base
+      return {
+        ...base,
+        workflow: {
+          ...current,
+          phase: 'failed',
+          progress: undefined,
+          // The actual counts stay in status details; the visible line names
+          // the configured limit without blaming decision text alone.
+          lastError:
+            `확정 결정과 필수 입력이 요청 한도(${event.limitChars}자)를 초과했습니다. `
+            + '결정을 정정하거나 새 작업으로 나눠 주세요. 모델은 호출하지 않았습니다.',
+          budgetError: {
+            requiredChars: event.requiredChars,
+            limitChars: event.limitChars,
+            decisionIds: [...event.decisionIds],
+          },
+        },
+      }
     }
 
     case 'usage': {

@@ -151,6 +151,18 @@ export interface Workflow {
   decisions?: DecisionLedger
   /** Id of the question awaiting an answer; minted by a successful reply, null when none. */
   questionId?: string | null
+  /** Last preflight refusal whose protected evidence exceeded the request budget. */
+  budgetError?: BudgetFailure
+}
+
+/** Counts and decision ids for one local preflight budget refusal. */
+export interface BudgetFailure {
+  /** Prompt plus system length the protected content needed. */
+  requiredChars: number
+  /** The request limit it exceeded. */
+  limitChars: number
+  /** Active decision ids that were protected. */
+  decisionIds: readonly string[]
 }
 
 /** A one-shot permit that lets one restored draft bypass interception. */
@@ -344,6 +356,19 @@ export type OptimizerEvent =
       usage: ModelUsage
     }
   | { type: 'failed'; workflowId: string; generation: number; sessionId: string; error: string; usage?: ModelUsage }
+  /**
+   * A local preflight refusal: the protected decisions and inputs cannot fit.
+   * No completion was made, so no usage is charged and no round is spent.
+   */
+  | {
+      type: 'budget-blocked'
+      workflowId: string
+      generation: number
+      sessionId: string
+      requiredChars: number
+      limitChars: number
+      decisionIds: readonly string[]
+    }
   | { type: 'limit-ask'; workflowId: string; round: number; status: 'pending' | 'closed' | 'declined' }
   | { type: 'limit-extended'; workflowId: string; round: number; maxRounds: number }
   | { type: 'usage'; workflowId: string; generation: number; sessionId: string; usage: ModelUsage }

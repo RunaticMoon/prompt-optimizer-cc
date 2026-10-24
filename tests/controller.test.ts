@@ -13,13 +13,14 @@ import type {
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { EnginePorts, ModelUsage, OptimizerConfig, RuntimeState } from '../hooks/contracts'
-import { DEFAULT_CONFIG } from '../hooks/contracts'
+import { DEFAULT_CONFIG, MAX_REQUEST_CHARS } from '../hooks/contracts'
 import {
   createController,
   PANE_ID,
   type ControllerDeps,
   type OptimizerController,
 } from '../hooks/controller'
+import { REQUEST_BUDGET_NOTICE } from '../hooks/model'
 import type { RawEditFacts } from '../hooks/raw-mode'
 
 const USAGE: ModelUsage = {
@@ -1363,6 +1364,77 @@ describe('refine — the improvement dialogue', () => {
     const retried = requestText(h.completes.at(-1)?.prompt)
     expect(retried.split('더 짧게')).toHaveLength(3)
     expect(retried).not.toContain('<instruction>')
+  })
+})
+
+
+describe('preflight request budget', () => {
+  test('a first refusal keeps the run, spends nothing and never restores the original', async () => {
+    const h = harness()
+    const timers = progressClock(h)
+    h.controller.onSessionStart('sess-1')
+    const original = 'O'.repeat(17500)
+    await h.controller.startExplicit(h.ports, original, 'pane')
+    await h.flush()
+
+    expect(h.calls.complete).toBe(0)
+    expect(h.calls.fork).toBe(0)
+    const state = h.controller.getState()
+    expect(state.usage.calls).toBe(0)
+    expect(state.workflow?.rounds).toBe(0)
+    expect(state.workflow?.phase).toBe('failed')
+    expect(state.workflow?.lastError).toBe(REQUEST_BUDGET_NOTICE)
+    expect(state.workflow?.budgetError?.limitChars).toBe(MAX_REQUEST_CHARS)
+    expect(state.workflow?.budgetError?.requiredChars).toBeGreaterThan(MAX_REQUEST_CHARS)
+    expect(state.workflow?.decisions?.entries).toHaveLength(0)
+    expect(h.notices).toContain(REQUEST_BUDGET_NOTICE)
+    // The first-failure restore path did not run.
+    expect(h.fills).toHaveLength(0)
+    expect(timers.every(timer => timer.cancelled)).toBe(true)
+
+    // Retrying the unchanged protected content refuses again, still at no cost.
+    await h.controller.retry(h.ports)
+    expect(h.calls.complete).toBe(0)
+    expect(h.controller.getState().workflow?.rounds).toBe(0)
+
+    // Cancel stays available and restores the original through the normal path.
+    const cancelled = await h.controller.cancel(h.ports)
+    expect(cancelled.ok).toBe(true)
+    expect(h.fills.at(-1)?.text).toBe(original)
+  })
+
+  test('a later refusal keeps the draft, counters and guidance and leaves accept available', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문'), 'pane')
+    await h.flush()
+    const before = h.controller.getState()
+    const guidance = h.controller.getGuidanceStatus()
+    const timers = progressClock(h)
+
+    const huge = 'X'.repeat(17000)
+    await h.controller.refine(h.ports, huge)
+    const after = h.controller.getState()
+
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.fork).toBe(0)
+    expect(after.usage).toEqual(before.usage)
+    expect(after.workflow?.usage).toEqual(before.workflow?.usage)
+    expect(after.workflow?.rounds).toBe(before.workflow?.rounds)
+    expect(after.workflow?.roundLimit).toBe(before.workflow?.roundLimit)
+    expect(after.workflow?.draft).toBe(before.workflow?.draft)
+    expect(after.workflow?.phase).toBe('failed')
+    expect(after.workflow?.decisions?.entries).toHaveLength(1)
+    expect(after.workflow?.decisions?.entries[0]?.text).toBe(huge)
+    expect(after.workflow?.budgetError?.decisionIds).toEqual(['d1'])
+    expect(h.controller.getGuidanceStatus()).toBe(guidance)
+    expect(h.notices).toContain(REQUEST_BUDGET_NOTICE)
+    expect(h.fills).toHaveLength(0)
+    expect(timers.every(timer => timer.cancelled)).toBe(true)
+
+    const accepted = await h.controller.accept(h.ports)
+    expect(accepted.ok).toBe(true)
+    expect(h.fills.at(-1)?.text).toBe(before.workflow?.draft)
   })
 })
 

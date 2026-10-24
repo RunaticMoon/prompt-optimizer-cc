@@ -1006,6 +1006,108 @@ describe('reduce — decision evidence', () => {
   })
 })
 
+
+describe('reduce — budget refusal', () => {
+  const NOTICE =
+    '확정 결정과 필수 입력이 요청 한도(18000자)를 초과했습니다. 결정을 정정하거나 새 작업으로 나눠 주세요. 모델은 호출하지 않았습니다.'
+
+  function refusedState(): RuntimeState {
+    return state({
+      workflow: workflow({
+        phase: 'generating',
+        rounds: 2,
+        roundLimit: 7,
+        draft: '보존할 초안',
+        progress: { stage: 'generating', startedAt: 1, updatedAt: 1 },
+        dialogue: [{ role: 'user', text: '보존할 대화', decisionId: 'd1' }],
+        decisions: { entries: [{ id: 'd1', text: '로컬에서만', source: answerSourceFor() }], nextId: 2 },
+        usage: usage({ input_tokens: 9 }),
+        question: '보존할 질문?',
+        options: ['A', 'B'],
+        questionAsk: 'pending',
+      }),
+      usage: totals({ calls: 2, input: 9, updatedAt: 4 }),
+    })
+  }
+
+  function answerSourceFor(): {
+    kind: 'user-answer'
+    questionId: string | null
+    question: string | null
+    options: readonly string[]
+    answeredAfterRound: number
+  } {
+    return { kind: 'user-answer', questionId: 'q:wf-1:1:1', question: '어느 쪽?', options: ['A', 'B'], answeredAfterRound: 1 }
+  }
+
+  test('turns a generating run into a recoverable failure without spending a round or tokens', () => {
+    const current = refusedState()
+    const event: OptimizerEvent = {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }
+    const next = reduce(current, event, 9)
+
+    expect(next.workflow?.phase).toBe('failed')
+    expect(next.workflow?.progress).toBeUndefined()
+    expect(next.workflow?.lastError).toBe(NOTICE)
+    expect(next.workflow?.budgetError).toEqual({
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    })
+    expect(next.workflow?.budgetError?.decisionIds).not.toBe(event.decisionIds)
+    // Records survive by reference and no counter moves.
+    expect(next.workflow?.draft).toBe(current.workflow?.draft)
+    expect(next.workflow?.dialogue).toBe(current.workflow?.dialogue)
+    expect(next.workflow?.decisions).toBe(current.workflow?.decisions)
+    expect(next.workflow?.question).toBe('보존할 질문?')
+    expect(next.workflow?.options).toEqual(['A', 'B'])
+    expect(next.workflow?.questionAsk).toBe('pending')
+    expect(next.workflow?.rounds).toBe(2)
+    expect(next.workflow?.roundLimit).toBe(7)
+    expect(next.workflow?.usage).toBe(current.workflow?.usage)
+    expect(next.usage).toBe(current.usage)
+  })
+
+  test('duplicate, stale, cross-session and non-generating events are ignored', () => {
+    const applied = reduce(refusedState(), {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 9)
+    expect(reduce(applied, {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 9)).toBe(applied)
+
+    for (const event of [
+      { type: 'budget-blocked', workflowId: 'wf-1', generation: 2, sessionId: SESSION, requiredChars: 1, limitChars: 1, decisionIds: [] },
+      { type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: 'other', requiredChars: 1, limitChars: 1, decisionIds: [] },
+      { type: 'budget-blocked', workflowId: 'other', generation: 1, sessionId: SESSION, requiredChars: 1, limitChars: 1, decisionIds: [] },
+    ] as const) {
+      const current = refusedState()
+      expect(reduce(current, event, 9)).toBe(current)
+    }
+    const reviewing = state({ workflow: workflow({ phase: 'reviewing', decisions: { entries: [], nextId: 1 } }) })
+    expect(reduce(reviewing, {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 1, limitChars: 1, decisionIds: [],
+    }, 9)).toBe(reviewing)
+  })
+
+  test('a successful reply clears the budget failure record', () => {
+    const failed = reduce(refusedState(), {
+      type: 'budget-blocked', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      requiredChars: 18_500, limitChars: 18_000, decisionIds: ['d1'],
+    }, 9)
+    const recovered = reduce(failed, {
+      type: 'reply', workflowId: 'wf-1', generation: 1, sessionId: SESSION,
+      reply: reply({ draft: '회복된 초안' }), usage: usage(),
+    }, 10)
+    expect(recovered.workflow?.phase).toBe('reviewing')
+    expect(recovered.workflow?.budgetError).toBeUndefined()
+    expect('lastError' in (recovered.workflow ?? {})).toBe(false)
+  })
+})
+
 describe('reduce — immutability', () => {
   test('a mutating event leaves a frozen input untouched', () => {
     const current = deepFreeze(
