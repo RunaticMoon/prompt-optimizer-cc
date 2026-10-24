@@ -128,6 +128,13 @@ function validateKey(key: ConfigKey, raw: unknown): KeyResult {
     }
     case 'triggerPrefix':
       return coercePrefix('triggerPrefix', raw, DEFAULT_CONFIG.triggerPrefix)
+    case 'refinementLevel': {
+      if (raw === 'quick' || raw === 'standard' || raw === 'deep') return { value: raw }
+      return {
+        value: DEFAULT_CONFIG.refinementLevel,
+        warning: `"refinementLevel" must be "quick", "standard" or "deep"; using default "${DEFAULT_CONFIG.refinementLevel}"`,
+      }
+    }
     case 'rawPrefix':
       return coercePrefix('rawPrefix', raw, DEFAULT_CONFIG.rawPrefix)
     case 'uiMode': {

@@ -67,6 +67,18 @@
         "composer"
       ]
     },
+    "refinementLevel": {
+      "type": "string",
+      "title": "Refinement level",
+      "description": "quick edits wording and asks only critical questions; standard resolves consequential decisions; deep keeps the existing detailed interview.",
+      "required": false,
+      "default": "deep",
+      "options": [
+        "quick",
+        "standard",
+        "deep"
+      ]
+    },
     "model": {
       "type": "string",
       "title": "Model",
