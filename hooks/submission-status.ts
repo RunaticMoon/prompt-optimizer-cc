@@ -27,6 +27,7 @@ const PASS_LABELS: Record<PassReason, string> = {
   'no-trigger': '원문 통과 (접두어 없음)',
   pasted: '원문 통과 (붙여넣기 추정)',
   'smart-continuation': '원문 통과 (명확한 승인·이어가기)',
+  'already-optimized': '원문 통과 (이미 다듬은 개선안)',
 }
 
 /** How the draft was built, for every reason the composition classifier reports. */

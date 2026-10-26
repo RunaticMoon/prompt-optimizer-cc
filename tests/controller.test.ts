@@ -5305,3 +5305,183 @@ describe('repository follow-up refresh', () => {
     expect(h.controller.getState().sessionId).toBe('sess-2')
   })
 })
+
+// Bug report (t_2033f3856a7ef8ade021): after a refinement was put in the box,
+// the person's Enter was dropped as `프롬프트를 다듬는 중입니다.`, a second run
+// started on the already-refined text, its restore then aborted with
+// `복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.`, and the refined
+// text was not kept anywhere copyable.
+describe('refine → restore → submit (re-entry regression)', () => {
+  const DRAFT = '개선된 요청'
+  const OPTIMIZING = { action: 'drop', reason: '프롬프트를 다듬는 중입니다.' }
+  const SHORT = '복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.'
+  const TARGET = '입력창에 넣지 못한 내용입니다. 필요하면 아래 텍스트를 복사해 사용하세요:\n'
+
+  /** Captures `ports.ui.log` output for the rest of the test. */
+  function captureLogs(h: Harness): string[] {
+    const logs: string[] = []
+    h.ports.ui.log = text => {
+      logs.push(text)
+    }
+    return logs
+  }
+
+  /** One refined round in `reviewing`, accepted into the box. */
+  async function accepted(h: Harness): Promise<void> {
+    h.controller.onSessionStart('sess-1')
+    // The person types the original (a raw controller sees no synthetic edit).
+    const typed = h.controller.observeEditInput(edit({ key: { key: 'a' }, text: '원문 요청' }))
+    h.controller.finishPromptEdit(typed, '원문 요청', h.ports)
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+    expect(await h.controller.accept(h.ports)).toEqual({ ok: true })
+    expect(h.controller.getState().workflow).toBeNull()
+  }
+
+  test('the Enter that reaches the box as an edit still submits the refined draft untouched', async () => {
+    const h = harness({ simulateTyping: false })
+    const logs = captureLogs(h)
+    await accepted(h)
+
+    // The host delivers the Enter as one more edit before the submit (the box
+    // briefly ends with the newline) and the CLI then submits trimmed text.
+    const token = h.controller.observeEditInput(edit({ key: { key: 'return' }, text: DRAFT, inputText: '\n' }))
+    h.controller.finishPromptEdit(token, `${DRAFT}\n`, h.ports)
+
+    const out = await h.controller.onSubmit(h.ports, submit(DRAFT), 'pane')
+    expect(out).toEqual({ action: 'next', text: DRAFT })
+    expect(out).not.toEqual(OPTIMIZING)
+    await h.flush()
+    expect(h.calls.complete).toBe(1)
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(logs).not.toContain(SHORT)
+  })
+
+  test('a refined draft is not optimized again once its permit is spent or expired', async () => {
+    let now = 1_000
+    const h = harness({ deps: { now: () => now } })
+    await accepted(h)
+
+    // The person reads the long refinement for longer than the permit lives.
+    now += 60 * 60 * 1000
+    const late = await h.controller.onSubmit(h.ports, submit(DRAFT), 'pane')
+    expect(late).toEqual({ action: 'next', text: DRAFT })
+    expect(h.controller.getSubmissionStatus()?.passReason).toBe('already-optimized')
+
+    // ↑ recall of the same refinement passes as well, with no new run.
+    expect(await h.controller.onSubmit(h.ports, submit(DRAFT), 'pane')).toEqual({ action: 'next', text: DRAFT })
+    await h.flush()
+    expect(h.calls.complete).toBe(1)
+
+    // A different prompt is still optimized, and a new session forgets.
+    expect(await h.controller.onSubmit(h.ports, submit('다른 요청'), 'pane')).toEqual(OPTIMIZING)
+    h.controller.onSessionStart('sess-2')
+    expect(await h.controller.onSubmit(h.ports, submit(DRAFT), 'pane')).toEqual(OPTIMIZING)
+  })
+
+  test("the box echoing the restore's own fill is not an input change", async () => {
+    let h!: Harness
+    h = harness({
+      fill: input => {
+        // The host shows (autocomplete) and reports (edit) the text it is
+        // placing before the fill call returns.
+        h.controller.observeComposer(input.text)
+        const token = h.controller.observeEditInput(edit({ text: input.text }))
+        h.controller.finishPromptEdit(token, input.text, h.ports)
+        return { isFilled: true, text: input.text, cursor: input.text.length }
+      },
+    })
+    const logs = captureLogs(h)
+    await accepted(h)
+    expect(logs).not.toContain(SHORT)
+    expect(h.controller.getState().bypass?.text).toBe(DRAFT)
+    expect(await h.controller.onSubmit(h.ports, submit(DRAFT), 'pane')).toEqual({ action: 'next', text: DRAFT })
+    expect(h.calls.complete).toBe(1)
+  })
+
+  test("the person's own submit during the restore finishes it instead of aborting it", async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    const logs = captureLogs(h)
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    // The draft is on screen; Enter sends it and the host clears the box.
+    const out = await h.controller.onSubmit(h.ports, submit(DRAFT), 'pane')
+    expect(out).toEqual({ action: 'next', text: DRAFT })
+    h.controller.observeComposer('')
+    pending.resolve({ isFilled: true, text: DRAFT, cursor: DRAFT.length })
+
+    expect(await accepting).toEqual({ ok: true })
+    expect(logs).not.toContain(SHORT)
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.controller.getState().bypass).toBeNull()
+    await h.flush()
+    expect(h.calls.complete).toBe(1)
+    expect(h.calls.fill).toBe(1)
+  })
+
+  test('a real conflict still aborts, but keeps the refined draft copyable', async () => {
+    const h = harness()
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+    const read = deferred<{ text: string; cursor: number }>()
+    let reading = false
+    h.ports.prompt.read = () => {
+      reading = true
+      return read.promise
+    }
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => reading)
+    h.controller.observeComposer('사람이 새로 쓴 글')
+    read.resolve({ text: '', cursor: 0 })
+
+    expect((await accepting).ok).toBe(false)
+    expect(logs).toContain(SHORT)
+    expect(logs).toContain(`${TARGET}${DRAFT}`)
+  })
+
+  test("an aborted auto-restore of a run's original keeps that original copyable", async () => {
+    // The second run of the report: its original is the refined text, the
+    // first round fails and the automatic restore meets a changed box.
+    const h = harness({ complete: async () => apiError() })
+    h.controller.onSessionStart('sess-1')
+    const logs = captureLogs(h)
+    await h.controller.onSubmit(h.ports, submit(DRAFT), 'pane')
+    let reads = 0
+    const read = deferred<{ text: string; cursor: number }>()
+    h.ports.prompt.read = () => {
+      reads += 1
+      // The composer clear reads first; the original-restore read is second.
+      return reads === 1 ? Promise.resolve({ text: '', cursor: 0 }) : read.promise
+    }
+    const running = h.flush()
+    await h.waitFor(() => reads === 2)
+    h.controller.observeComposer('사람이 새로 쓴 글')
+    read.resolve({ text: '', cursor: 0 })
+    await running
+
+    expect(logs).toContain(SHORT)
+    expect(logs).toContain(`${TARGET}${DRAFT}`)
+  })
+
+  test('a throwing restore keeps the refined draft copyable', async () => {
+    const h = harness({ fill: () => { throw new Error('composer gone') } })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+    // The composer clear already ran; only the accept's fill throws now.
+    const result = await h.controller.accept(h.ports)
+    expect(result.ok).toBe(false)
+    expect(logs).toContain(`${TARGET}${DRAFT}`)
+    expect(h.controller.getState().workflow?.draft).toBe(DRAFT)
+  })
+})

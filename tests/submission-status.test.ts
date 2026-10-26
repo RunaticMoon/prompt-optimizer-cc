@@ -46,6 +46,7 @@ describe('formatSubmissionStatus', () => {
       'no-trigger': '원문 통과 (접두어 없음)',
       pasted: '원문 통과 (붙여넣기 추정)',
       'smart-continuation': '원문 통과 (명확한 승인·이어가기)',
+      'already-optimized': '원문 통과 (이미 다듬은 개선안)',
     }
     for (const [reason, label] of Object.entries(labels) as Array<[PassReason, string]>) {
       const text = formatSubmissionStatus(status({ passReason: reason }))
