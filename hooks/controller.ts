@@ -28,7 +28,7 @@ import { loadSystemPromptExtra } from './config'
 import { collectContext } from './context'
 import { emptyLedger, findDecision, hasPendingCorrection, isActiveDecision } from './decisions'
 import { BYPASS_TTL_MS, sendApproved, transferDraft } from './delivery'
-import { classifySubmission } from './eligibility'
+import { classifySubmission, submittedForm } from './eligibility'
 import { PROMPT_CACHE_MIN_VERSION, supportsPromptCache } from './engine-version'
 import {
   buildModelRequest,
@@ -114,6 +114,12 @@ function extensionGuide(workflow: Readonly<Workflow> | null | undefined): string
 const RESTORE_CONFLICT_NOTICE = '복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.'
 /** Prefix for the exact external text kept for manual copy. */
 const RESTORE_RECOVERY_PREFIX = '복원 중 감지한 입력입니다. 필요한 내용을 복사하세요:\n'
+/**
+ * Prefix for the text a restore meant to place but could not (a conflict, a
+ * refusal or an error). It is a `ui.log` line so the refined draft or original
+ * stays copyable from the transcript instead of only living in a toast.
+ */
+const RESTORE_TARGET_PREFIX = '입력창에 넣지 못한 내용입니다. 필요하면 아래 텍스트를 복사해 사용하세요:\n'
 /** Prefix for a cancelled run's saved original when it could not be restored. */
 const CANCEL_ORIGINAL_PREFIX = '복원할 원문입니다. 필요한 내용을 복사하세요:\n'
 /** Result reason for an action refused while its run is mid-flight. */
@@ -121,6 +127,9 @@ export const IN_FLIGHT_REASON = '개선 작업을 처리하는 중입니다.'
 
 /** How many composer submissions' paste verdicts the controller keeps. */
 const RECALLED_MAX = 100
+
+/** How many delivered refined drafts one session remembers. */
+const DELIVERED_MAX = 20
 
 /**
  * Limits for one follow-up scan. They are deliberately smaller than the
@@ -309,6 +318,9 @@ function refusalNotice(reason: TransferRefusal): string {
     case 'stale-owner':
       // A superseded caller stays silent: the current run owns the UI now.
       return ''
+    case 'submitted':
+      // The person already sent the restored text; there is nothing to report.
+      return ''
     case 'no_composer':
       return '입력창을 사용할 수 없어 개선안을 넣지 못했습니다'
     case 'dialog':
@@ -395,6 +407,13 @@ export function createController(deps: ControllerDeps): OptimizerController {
   let consumedPrompt: { workflowId: string; texts: readonly string[] } | null = null
   /** Raw display text before submission expands pasted-content placeholders. */
   let composerSnapshot: string | undefined
+  /**
+   * Refined drafts this session already delivered (placed in the box or sent),
+   * in submitted form, oldest first. Submitting one again passes through: an
+   * already-optimized prompt is never re-optimized, whatever happened to its
+   * one-shot permit. In memory only; cleared on a session start/end.
+   */
+  let delivered: string[] = []
   /**
    * What the plugin saw build the current draft since the box was last empty
    * (`hooks/composition.ts`). Read by `submissionFacts` at submit time; reset
@@ -789,7 +808,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     workflow: Workflow,
     text: string,
   ): Promise<Awaited<ReturnType<typeof transferDraft>>> {
-    const operation = restoreTracker.begin()
+    const operation = restoreTracker.begin([text])
     const provisional: BypassTicket = {
       sessionId: workflow.sessionId,
       workflowId: workflow.id,
@@ -823,16 +842,29 @@ export function createController(deps: ControllerDeps): OptimizerController {
       if (state.bypass === provisional) {
         apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
       }
+      const sent = operation.check() === 'submitted'
       restoreTracker.end(operation)
+      if (sent) return { kind: 'refused', reason: 'submitted' }
+      logQuietly(ports, `${RESTORE_TARGET_PREFIX}${text}`)
       throw cause
     }
 
     const ownership = operation.check()
+    if (ownership === 'submitted' || (result.kind === 'refused' && result.reason === 'submitted')) {
+      // The person already sent this restore's own text (their Enter consumed
+      // its permit). That submit is not an input change: stop quietly, with no
+      // conflict notice and no second fill. The permit is already spent.
+      restoreTracker.end(operation)
+      return { kind: 'refused', reason: 'submitted' }
+    }
     if (ownership === 'stale') {
       // A newer session/workflow/restore owns the box, and may own its permit.
       // Drop only this operation's own lineage and stay silent to this caller.
       revokeOperationTicket(operation)
       restoreTracker.end(operation)
+      // Within the same session the text this restore meant to place is still
+      // the person's; keep a copy. Never publish it into a different session.
+      if (state.sessionId === workflow.sessionId) logQuietly(ports, `${RESTORE_TARGET_PREFIX}${text}`)
       return { kind: 'refused', reason: 'stale-owner' }
     }
 
@@ -854,6 +886,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // again. An empty captured string is a real deletion, not "unknown".
       revokeOperationTicket(operation)
       logQuietly(ports, RESTORE_CONFLICT_NOTICE)
+      // The text this restore was placing is never lost with the abort: keep a
+      // copyable record of it beside whatever the person had typed.
+      logQuietly(ports, `${RESTORE_TARGET_PREFIX}${text}`)
       // The guard may have refused before a pending edit or foreign-fill read
       // settled, so ask the operation again: a complete snapshot that landed
       // just after the refusal is still the person's only copy.
@@ -872,7 +907,23 @@ export function createController(deps: ControllerDeps): OptimizerController {
       apply({ type: 'bypass-revoked', sessionId: workflow.sessionId })
     }
     restoreTracker.end(operation)
+    logQuietly(ports, `${RESTORE_TARGET_PREFIX}${text}`)
     return result
+  }
+
+  /** Remembers one delivered refined draft, in submitted form. */
+  function rememberDelivered(text: string): void {
+    const form = submittedForm(text)
+    if (form === '') return
+    delivered = delivered.filter(entry => entry !== form)
+    delivered.push(form)
+    if (delivered.length > DELIVERED_MAX) delivered.shift()
+  }
+
+  /** Whether `text` is a refined draft this session already delivered. */
+  function isDelivered(text: string): boolean {
+    const form = submittedForm(text)
+    return form !== '' && delivered.includes(form)
   }
 
   /** Revokes only a permit whose lineage this restore owns. */
@@ -898,6 +949,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // `restore` already confirmed the permit with the fill's own text.
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify(notice)
+      return
+    }
+    // The person already sent the original: the run is over.
+    if (result.reason === 'submitted') {
+      apply({ type: 'dismiss', workflowId: workflow.id })
       return
     }
     // A superseded restore belongs to a run the person already left.
@@ -1314,8 +1370,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
     // no-event submission of the same text (↑ recall) can reuse it.
     const classification = e.origin.kind === 'composer' ? classifyDraft(e.text) : undefined
     if (classification !== undefined) remember(e.text, classification)
+    const facts = classification !== undefined && isDelivered(e.text)
+      ? { ...classification, delivered: true }
+      : classification
     try {
-      decision = classifySubmission(e, deps.getConfig(), state, deps.now(), classification)
+      decision = classifySubmission(e, deps.getConfig(), state, deps.now(), facts)
     } catch {
       // Classification itself failing must not trap the person: pass through.
       // Only a composer submission would have been recorded, so only that one
@@ -1363,6 +1422,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
         return { action: 'next', text: decision.text }
 
       case 'bypass':
+        // The person's own Enter on a restore's text: an in-flight restore of
+        // that text is finished by it, not interrupted.
+        restoreTracker.noteSubmitted(decision.ticket, e.text)
         apply({
           type: 'bypass-consumed',
           sessionId: state.sessionId,
@@ -1616,8 +1678,16 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
     if (result.kind === 'filled') {
       // `restore` already confirmed the permit with the fill's own text.
+      rememberDelivered(workflow.draft)
+      rememberDelivered(result.text)
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify(ACCEPT_NOTICE)
+      return { ok: true }
+    }
+    if (result.kind === 'refused' && result.reason === 'submitted') {
+      // The person submitted the draft while it was being placed: delivered.
+      rememberDelivered(workflow.draft)
+      apply({ type: 'dismiss', workflowId: workflow.id })
       return { ok: true }
     }
     apply({ type: 'phase', workflowId: workflow.id, generation: workflow.generation, phase: 'reviewing' })
@@ -1678,6 +1748,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
 
     if (result.kind === 'sent') {
+      if (source === 'draft') {
+        rememberDelivered(text)
+        rememberDelivered(result.text)
+      }
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify('전송했습니다.')
       return { ok: true }
@@ -1743,6 +1817,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
       notify('개선을 취소하고 원문을 입력창에 복원했습니다.')
       return { ok: true }
     }
+    // The person already sent the original while it was being placed.
+    if (result.kind === 'refused' && result.reason === 'submitted') return { ok: true }
     // The cancelled workflow is gone, so this notice is the only copyable
     // record of what the restore could not place back in the box.
     const reason =
@@ -1831,7 +1907,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
   }
 
   function submissionFacts(text: string): SubmissionFacts {
-    return classifyDraft(text)
+    const facts = classifyDraft(text)
+    return isDelivered(text) ? { ...facts, delivered: true } : facts
   }
 
   /**
@@ -1916,6 +1993,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     pendingAsk = null
     resetGuidance()
     composition = EMPTY_COMPOSITION
+    delivered = []
     apply({ type: 'reset', sessionId })
   }
 
@@ -1925,6 +2003,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     pendingAsk = null
     resetGuidance()
     composition = EMPTY_COMPOSITION
+    delivered = []
     apply({ type: 'reset', sessionId: state.sessionId })
   }
 

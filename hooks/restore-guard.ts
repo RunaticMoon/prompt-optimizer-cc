@@ -22,9 +22,20 @@
  * that began before a newer restore is still a real external observation, so
  * settling it invalidates that restore conservatively. Only a session or
  * workflow change clears pending tokens.
+ *
+ * Two observations are not external input and never invalidate a restore:
+ *
+ * - The box echoing the restore's own text (an autocomplete display or a
+ *   settled edit whose whole box equals the target): the host reports the
+ *   fill it is placing, and placing the same text over it loses nothing.
+ * - The person submitting this restore's own permit. Their Enter clears the
+ *   box and may echo as edits/displays; the operation then reports
+ *   `submitted`, which outranks `edited`, so the restore stops quietly
+ *   instead of aborting with a conflict.
  */
 
 import type { BypassTicket, RestoreCheck, RestoreGuard } from './contracts'
+import { submittedForm } from './eligibility'
 
 /** One restore's guard, plus the tickets whose lineage it owns. */
 export interface RestoreOperation extends RestoreGuard {
@@ -46,8 +57,12 @@ export interface SettleResult {
 
 /** The tracker the controller owns; one instance per controller. */
 export interface RestoreTracker {
-  /** Starts a newer restore, superseding (and staling) any earlier one. */
-  begin(): RestoreOperation
+  /**
+   * Starts a newer restore, superseding (and staling) any earlier one.
+   * `ownTexts` are the texts this restore itself places in the box; their
+   * echo is not an external change.
+   */
+  begin(ownTexts?: readonly string[]): RestoreOperation
   /** Ends an operation if it is still the current one. */
   end(operation: RestoreOperation): void
   /** Drops ownership and observed text: session start/end or a new workflow. */
@@ -71,6 +86,14 @@ export interface RestoreTracker {
   hasPending(): boolean
   /** Keeps the operation alive until its last pending token settles. */
   retain(operation: RestoreOperation): void
+  /**
+   * Notes that the person submitted `text` under `ticket`. Only a ticket from
+   * the current operation's lineage whose submitted text is this restore's
+   * own target marks the operation `submitted` (and returns true). A permit
+   * that followed the person's edit to new text is their new draft, not this
+   * restore's: that edit still conflicts, so the target is kept for recovery.
+   */
+  noteSubmitted(ticket: BypassTicket, text: string): boolean
 }
 
 interface Token {
@@ -90,8 +113,19 @@ export function createRestoreTracker(): RestoreTracker {
   let observed: { revision: number; text: string } | null = null
   /** The last autocomplete display, so an identical repeat does not invalidate. */
   let lastDisplay: string | undefined
+  /** The current operation's own target texts, in submitted form. */
+  let ownForms = new Set<string>()
+  /** The operation whose own permit the person already submitted. */
+  let submitted: RestoreOperation | null = null
 
-  function begin(): RestoreOperation {
+  /** Whether `text` is only the current restore echoing its own target. */
+  function isOwnEcho(text: string): boolean {
+    if (current === null || ownForms.size === 0) return false
+    const form = submittedForm(text)
+    return form !== '' && ownForms.has(form)
+  }
+
+  function begin(ownTexts: readonly string[] = []): RestoreOperation {
     epoch += 1
     const capturedEpoch = epoch
     const capturedRevision = revision
@@ -102,6 +136,9 @@ export function createRestoreTracker(): RestoreTracker {
         // A superseded operation or a newer owner outranks any edit: the caller
         // must not even report a conflict into the new session's UI.
         if (current !== operation || epoch !== capturedEpoch) return 'stale'
+        // The person already sent this restore's text: their own Enter (and
+        // the box clear it causes) is not an input change to protect against.
+        if (submitted === operation) return 'submitted'
         if (pending.size > 0) return 'edited'
         if (revision !== capturedRevision) return 'edited'
         return 'current'
@@ -115,6 +152,8 @@ export function createRestoreTracker(): RestoreTracker {
     }
     current = operation
     retained = false
+    submitted = null
+    ownForms = new Set(ownTexts.map(submittedForm).filter(form => form !== ''))
     return operation
   }
 
@@ -122,6 +161,7 @@ export function createRestoreTracker(): RestoreTracker {
     if (current !== operation) return
     current = null
     retained = false
+    ownForms = new Set()
   }
 
   function invalidate(): void {
@@ -129,6 +169,8 @@ export function createRestoreTracker(): RestoreTracker {
     pending.clear()
     current = null
     retained = false
+    submitted = null
+    ownForms = new Set()
     observed = null
     lastDisplay = undefined
   }
@@ -154,11 +196,14 @@ export function createRestoreTracker(): RestoreTracker {
     // so an old edit's completion can never leak into the new session.
     if (token !== undefined && entry === undefined) return { accepted: false }
     if (token !== undefined) pending.delete(token)
+    // A box that only holds the restore's own target is the fill's echo, not
+    // the person's input: it neither invalidates nor becomes recovery text.
+    const echo = entry?.kind === 'edit' && text !== undefined && isOwnEcho(text)
     // An edit's completion is the observation; a foreign fill already bumped
     // its revision on entry, so its completion only attaches the captured box.
-    if (entry === undefined || entry.kind === 'edit') revision += 1
+    if (!echo && (entry === undefined || entry.kind === 'edit')) revision += 1
     if (text !== undefined) {
-      observed = { revision, text }
+      if (!echo) observed = { revision, text }
       lastDisplay = text
     }
 
@@ -166,7 +211,7 @@ export function createRestoreTracker(): RestoreTracker {
     // Defined text is always a complete box snapshot: an edit's full result, a
     // whole-box read after a foreign fill, or an untracked caller observation.
     // Fill fragments are passed as `undefined`, so they are never published.
-    const late = text
+    const late = echo ? undefined : text
     if (pending.size === 0) end(current)
     return late === undefined ? { accepted: true } : { accepted: true, lateText: late }
   }
@@ -176,6 +221,8 @@ export function createRestoreTracker(): RestoreTracker {
     // complete box view, so it can invalidate and later serve as recovery.
     if (text === lastDisplay) return
     lastDisplay = text
+    // The host showing the text this restore is placing is its own echo.
+    if (isOwnEcho(text)) return
     revision += 1
     observed = { revision, text }
   }
@@ -200,6 +247,12 @@ export function createRestoreTracker(): RestoreTracker {
     retain(operation) {
       if (current !== operation) return
       retained = true
+    },
+    noteSubmitted(ticket, text) {
+      if (current === null || !current.tickets.has(ticket)) return false
+      if (!ownForms.has(submittedForm(text))) return false
+      submitted = current
+      return true
     },
   }
 }

@@ -545,9 +545,11 @@ describe('integration — session isolation and delivery accuracy', () => {
         expect(w.completes).toHaveLength(cycle)
       }
 
-      // The restored text's permit was consumed; repeating it starts a run.
-      expect(await w.submit('개선안 2')).toEqual({ drop: DROP_OPTIMIZING })
-      expect(w.submits).toHaveLength(2)
+      // The restored text's permit was consumed, but it is still a refined
+      // draft this session delivered: repeating it passes through untouched.
+      expect(await w.submit('개선안 2')).toEqual({ text: '개선안 2' })
+      expect(w.submits).toHaveLength(3)
+      expect(w.completes).toHaveLength(2)
     })
   }
 
@@ -838,8 +840,10 @@ describe('integration — session isolation and delivery accuracy', () => {
       expect(await w.submit(DRAFT)).toEqual({ text: DRAFT })
       expect(w.submits).toHaveLength(1)
       expect(w.completes).toHaveLength(1)
-      expect(await w.submit(DRAFT)).toEqual({ drop: DROP_OPTIMIZING })
-      expect(w.submits).toHaveLength(1)
+      // An already-delivered refined draft is never optimized again.
+      expect(await w.submit(DRAFT)).toEqual({ text: DRAFT })
+      expect(w.submits).toHaveLength(2)
+      expect(w.completes).toHaveLength(1)
     })
   }
 

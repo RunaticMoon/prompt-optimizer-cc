@@ -25,6 +25,13 @@ describe('formatSubmissionStatus', () => {
     expect(text).toContain('직접 최적화: /optimize -- <원문>')
   })
 
+  test('an already-optimized pass shows its own label and the same recovery route', () => {
+    const text = formatSubmissionStatus(
+      status({ passReason: 'already-optimized', composition: { pasted: false, reason: 'typed' } }),
+    )
+    expect(text).toBe('최근 제출 분류: 원문 통과 (이미 다듬은 개선안) · 입력: 직접 입력\n직접 최적화: /optimize -- <원문>')
+  })
+
   test('a smart-continuation pass shows its own label and the same recovery route', () => {
     const text = formatSubmissionStatus(
       status({ passReason: 'smart-continuation', composition: { pasted: false, reason: 'typed' } }),
@@ -46,6 +53,7 @@ describe('formatSubmissionStatus', () => {
       'no-trigger': '원문 통과 (접두어 없음)',
       pasted: '원문 통과 (붙여넣기 추정)',
       'smart-continuation': '원문 통과 (명확한 승인·이어가기)',
+      'already-optimized': '원문 통과 (이미 다듬은 개선안)',
     }
     for (const [reason, label] of Object.entries(labels) as Array<[PassReason, string]>) {
       const text = formatSubmissionStatus(status({ passReason: reason }))

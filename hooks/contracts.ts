@@ -347,6 +347,8 @@ export type PassReason =
   | 'no-trigger'
   | 'pasted'
   | 'smart-continuation'
+  /** The text is a refined draft this plugin already delivered in this session. */
+  | 'already-optimized'
 
 /**
  * How the classifier read the submitted draft's construction
@@ -385,6 +387,12 @@ export interface SubmissionFacts {
   reason?: CompositionReason
   /** For `history`, the verdict the text got when it was first submitted. */
   previousReason?: Exclude<CompositionReason, 'history'>
+  /**
+   * The text matches a refined draft this plugin already put in the box (or
+   * sent) in this session. An already-optimized prompt is never optimized
+   * again, even after its one-shot bypass permit was spent, edited or expired.
+   */
+  delivered?: boolean
 }
 
 /** What the classifier decides for one submission. */
@@ -544,6 +552,8 @@ export type TransferRefusal =
   | 'hook-refused'
   /** The restore's session/workflow/operation no longer owns the box. */
   | 'stale-owner'
+  /** The person already submitted this restore's own text; nothing is left to place. */
+  | 'submitted'
   | 'unknown'
 
 /**
@@ -556,7 +566,7 @@ export type TransferResult =
   | { kind: 'refused'; reason: TransferRefusal; recoveryText?: string }
 
 /** How one observed restore guard sees the box right now. */
-export type RestoreCheck = 'current' | 'edited' | 'stale'
+export type RestoreCheck = 'current' | 'edited' | 'stale' | 'submitted'
 
 /**
  * Best-effort protection for one restore, over events this plugin actually

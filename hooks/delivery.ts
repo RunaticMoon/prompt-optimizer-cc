@@ -124,7 +124,7 @@ export async function transferDraft(
   } catch {
     // An obsolete call reports the stronger cause; otherwise nothing landed.
     const after = guardRefusal(guard)
-    return after !== null && after.kind === 'refused' && after.reason === 'stale-owner'
+    return after !== null && after.kind === 'refused' && (after.reason === 'stale-owner' || after.reason === 'submitted')
       ? after
       : { kind: 'refused', reason: 'unknown' }
   }
@@ -133,7 +133,9 @@ export async function transferDraft(
     // A refusal keeps the engine's own cause, unless the caller no longer owns
     // the box at all (then the outcome is moot).
     const after = guardRefusal(guard)
-    if (after !== null && after.kind === 'refused' && after.reason === 'stale-owner') return after
+    if (after !== null && after.kind === 'refused' && (after.reason === 'stale-owner' || after.reason === 'submitted')) {
+      return after
+    }
     return { kind: 'refused', reason: refusalToTransfer(filled.refusal) }
   }
 
@@ -202,13 +204,15 @@ export async function sendApproved($: EnginePorts, target: SubmitTarget): Promis
 
 /**
  * The refusal for a guard that is no longer current, or `null` when it still
- * is (or no guard was supplied). Stale ownership outranks an observed edit.
+ * is (or no guard was supplied). Stale ownership outranks the person's own
+ * submit of the restored text, which outranks an observed edit.
  */
 function guardRefusal(guard: RestoreGuard | undefined): TransferResult | null {
   if (guard === undefined) return null
   const verdict = guard.check()
   if (verdict === 'current') return null
   if (verdict === 'stale') return { kind: 'refused', reason: 'stale-owner' }
+  if (verdict === 'submitted') return { kind: 'refused', reason: 'submitted' }
   const recoveryText = guard.recoveryText()
   return recoveryText === undefined
     ? { kind: 'refused', reason: 'draft-conflict' }

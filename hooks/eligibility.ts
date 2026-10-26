@@ -59,13 +59,15 @@ export function classifySubmission(
     return { kind: 'raw', text: e.text }
   }
 
-  // 6. A live bypass permit releases exactly its own draft, once.
+  // 6. A live bypass permit releases exactly its own draft, once. The CLI
+  //    trims a composer submission (and the Enter can reach the box as an edit
+  //    first), so the draft is compared as submitted, not byte for byte.
   const ticket = state.bypass
   if (
     ticket !== null &&
     ticket.sessionId === state.sessionId &&
     now < ticket.expiresAt &&
-    e.text === ticket.text
+    sameSubmittedText(e.text, ticket.text)
   ) {
     return { kind: 'bypass', text: e.text, ticket }
   }
@@ -90,6 +92,11 @@ export function classifySubmission(
     // submission rather than let a second one reach the main session.
     return { kind: 'busy', workflowId: workflow.id }
   }
+
+  // 8b. A refined draft this plugin already delivered is never optimized
+  //     again, even once its one-shot permit is spent, edited or expired.
+  //     An active dialogue (8) still owns the composer first.
+  if (facts?.delivered === true) return pass('already-optimized')
 
   // 9. The optimizer is off. The raw mode (5) and an active reply (8) above
   //    still win.
@@ -123,6 +130,19 @@ export function classifySubmission(
 
   // 14. `always` mode improves everything left, on the text as typed.
   return { kind: 'optimize', text: e.text, trigger: 'auto' }
+}
+
+/**
+ * A submission's text as the composer sends it: line endings unified and the
+ * surrounding whitespace trimmed, the way the CLI trims a composer submission.
+ */
+export function submittedForm(text: string): string {
+  return text.replace(/\r\n?/g, '\n').trim()
+}
+
+/** Whether two texts are the same submission once the composer has sent them. */
+export function sameSubmittedText(a: string, b: string): boolean {
+  return submittedForm(a) === submittedForm(b)
 }
 
 /**

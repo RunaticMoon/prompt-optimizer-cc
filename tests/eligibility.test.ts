@@ -227,6 +227,61 @@ describe('classifySubmission — rule 6: bypass', () => {
   })
 })
 
+describe('classifySubmission — rule 6: the submitted form of a restored draft', () => {
+  test('a ticket releases its draft as the CLI submits it: trimmed, line endings unified', () => {
+    const ticket = bypass({ text: '초안\r\n둘째 줄\n' })
+    expect(classifySubmission(submit({ text: '초안\n둘째 줄' }), config(), state({ bypass: ticket }), 0)).toMatchObject({
+      kind: 'bypass',
+      text: '초안\n둘째 줄',
+    })
+  })
+
+  test('an inner change is still different text', () => {
+    const ticket = bypass({ text: '초안 하나' })
+    expect(classifySubmission(submit({ text: '초안  하나' }), config(), state({ bypass: ticket }), 0)).toMatchObject({
+      kind: 'optimize',
+    })
+  })
+})
+
+describe('classifySubmission — rule 8b: an already-delivered refinement', () => {
+  test('passes as already-optimized with no live ticket', () => {
+    expect(classifySubmission(submit({ text: '초안' }), config(), state(), 0, { pasted: false, delivered: true })).toEqual({
+      kind: 'pass',
+      reason: 'already-optimized',
+    })
+  })
+
+  test('passes even after its ticket expired', () => {
+    const ticket = bypass({ expiresAt: 10 })
+    expect(
+      classifySubmission(submit({ text: '초안' }), config(), state({ bypass: ticket }), 20, { pasted: false, delivered: true }),
+    ).toEqual({ kind: 'pass', reason: 'already-optimized' })
+  })
+
+  test('an active dialogue still owns the composer first', () => {
+    const active = workflow({ ui: 'composer', phase: 'reviewing' })
+    expect(
+      classifySubmission(submit({ text: '초안' }), config(), state({ workflow: active }), 0, { pasted: false, delivered: true }),
+    ).toEqual({ kind: 'reply', workflowId: 'wf-1', text: '초안' })
+    const busy = workflow({ ui: 'pane', phase: 'generating' })
+    expect(
+      classifySubmission(submit({ text: '초안' }), config(), state({ workflow: busy }), 0, { pasted: false, delivered: true }),
+    ).toEqual({ kind: 'busy', workflowId: 'wf-1' })
+  })
+
+  test('the raw mode and a live ticket still win', () => {
+    const MODE = { sessionId: SESSION, draft: '초안' }
+    expect(
+      classifySubmission(submit({ text: '초안' }), config(), state({ rawMode: MODE }), 0, { pasted: false, delivered: true }),
+    ).toEqual({ kind: 'raw', text: '초안' })
+    const ticket = bypass()
+    expect(
+      classifySubmission(submit({ text: '초안' }), config(), state({ bypass: ticket }), 0, { pasted: false, delivered: true }),
+    ).toMatchObject({ kind: 'bypass' })
+  })
+})
+
 describe('classifySubmission — rule 5: raw mode', () => {
   const MODE = { sessionId: SESSION, draft: '초안' }
 

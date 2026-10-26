@@ -1041,3 +1041,76 @@ describe('register — restore guard wiring (#28)', () => {
     },
   )
 })
+
+// Bug report (t_2033f3856a7ef8ade021), through the loaded plugin: refine,
+// accept into the box, then the person's Enter. The Enter reaches the box as
+// one more `prompt.edit` and the CLI submits the trimmed text; the refined
+// draft must go to the main session instead of starting a second run.
+describe('register — refine → restore → submit', () => {
+  test(
+    'the accepted refinement is submitted as-is, with no second run and no restore abort',
+    { options: { uiMode: 'composer' } },
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const logs: string[] = []
+      const submits: PromptSubmitInput[] = []
+      const modelCalls: ModelCompleteRequest[] = []
+      let box = ''
+
+      on('session.start', (_$, e) => ({ cwd: e.cwd }))
+      on('model.complete', (_$, e) => {
+        modelCalls.push(e)
+        return { value: answered(DRAFT) }
+      })
+      on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+      on('prompt.edit', (_$, e) => {
+        const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+        box = text
+        return { text, cursor: e.start + e.inputText.length }
+      })
+      on('prompt.fill', (_$, e) => {
+        box = e.mode === 'append' ? box + e.text : e.text
+        return { isFilled: true, text: box }
+      })
+      on('prompt.submit', (_$, e) => {
+        submits.push(e)
+        return { text: e.text }
+      })
+      on('ui.log', (_$, e) => {
+        logs.push(e.text)
+        return { value: undefined }
+      })
+      on('ui.status', () => ({ value: undefined }))
+      on('ui.invalidate', () => ({ value: undefined }))
+      on('ui.toast', () => ({ value: undefined }))
+
+      await $.session.start(SESSION_START)
+      await typedEdit($, '원문 요청')
+      expect(await $.prompt.submit({ text: '원문 요청', origin: { kind: 'composer' }, wait: false }))
+        .toEqual({ drop: '프롬프트를 다듬는 중입니다.' })
+      await clock.advance(1)
+      expect(modelCalls).toHaveLength(1)
+
+      await $.command.run({ ...COMMAND_RUN, args: 'accept' })
+      expect(box).toBe(DRAFT)
+
+      // The Enter lands in the box as an edit before the submit.
+      await ($.prompt as unknown as { edit: (e: PromptEditInput) => Promise<PromptBox> }).edit({
+        origin: { kind: 'composer' },
+        key: { key: 'return' },
+        text: box,
+        cursor: box.length,
+        start: box.length,
+        end: box.length,
+        inputText: '\n',
+      })
+      const sent = await $.prompt.submit({ text: DRAFT, origin: { kind: 'composer' }, wait: false })
+
+      expect(sent).toEqual({ text: DRAFT })
+      expect(submits.map(s => s.text)).toEqual([DRAFT])
+      await clock.advance(1)
+      expect(modelCalls).toHaveLength(1)
+      expect(logs).not.toContain('복원 중 입력 변경을 감지했습니다. 자동 복원을 중단했습니다.')
+    },
+  )
+})

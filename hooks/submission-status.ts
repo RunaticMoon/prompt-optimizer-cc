@@ -27,6 +27,7 @@ const PASS_LABELS: Record<PassReason, string> = {
   'no-trigger': '원문 통과 (접두어 없음)',
   pasted: '원문 통과 (붙여넣기 추정)',
   'smart-continuation': '원문 통과 (명확한 승인·이어가기)',
+  'already-optimized': '원문 통과 (이미 다듬은 개선안)',
 }
 
 /** How the draft was built, for every reason the composition classifier reports. */
@@ -84,7 +85,12 @@ export function formatSubmissionStatus(submission: Readonly<SubmissionStatus> | 
     ? '미확인'
     : compositionLabel(submission.composition)
   const lines = [`최근 제출 분류: ${decisionLabel(submission)} · 입력: ${input}`]
-  if (submission.kind === 'pass' && (submission.passReason === 'pasted' || submission.passReason === 'smart-continuation')) {
+  if (
+    submission.kind === 'pass'
+    && (submission.passReason === 'pasted'
+      || submission.passReason === 'smart-continuation'
+      || submission.passReason === 'already-optimized')
+  ) {
     lines.push('직접 최적화: /optimize -- <원문>')
   }
   return lines.join('\n')
