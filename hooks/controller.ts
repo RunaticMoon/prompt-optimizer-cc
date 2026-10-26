@@ -862,6 +862,9 @@ export function createController(deps: ControllerDeps): OptimizerController {
       // Drop only this operation's own lineage and stay silent to this caller.
       revokeOperationTicket(operation)
       restoreTracker.end(operation)
+      // Within the same session the text this restore meant to place is still
+      // the person's; keep a copy. Never publish it into a different session.
+      if (state.sessionId === workflow.sessionId) logQuietly(ports, `${RESTORE_TARGET_PREFIX}${text}`)
       return { kind: 'refused', reason: 'stale-owner' }
     }
 
@@ -1421,7 +1424,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
       case 'bypass':
         // The person's own Enter on a restore's text: an in-flight restore of
         // that text is finished by it, not interrupted.
-        restoreTracker.noteSubmitted(decision.ticket)
+        restoreTracker.noteSubmitted(decision.ticket, e.text)
         apply({
           type: 'bypass-consumed',
           sessionId: state.sessionId,
@@ -1745,7 +1748,10 @@ export function createController(deps: ControllerDeps): OptimizerController {
     }
 
     if (result.kind === 'sent') {
-      if (source === 'draft') rememberDelivered(text)
+      if (source === 'draft') {
+        rememberDelivered(text)
+        rememberDelivered(result.text)
+      }
       apply({ type: 'dismiss', workflowId: workflow.id })
       notify('전송했습니다.')
       return { ok: true }

@@ -5425,6 +5425,63 @@ describe('refine → restore → submit (re-entry regression)', () => {
     expect(h.calls.fill).toBe(1)
   })
 
+  test('a new draft typed and sent during the restore is a conflict, not a finished restore', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    // The person types a different draft; the permit follows their edit.
+    const token = h.controller.observeEditInput(edit({ key: { key: 'a' }, text: '새 초안' }))
+    h.controller.finishPromptEdit(token, '새 초안', h.ports)
+    expect(await h.controller.onSubmit(h.ports, submit('새 초안'), 'pane')).toEqual({ action: 'next', text: '새 초안' })
+    pending.resolve({ isFilled: true, text: DRAFT, cursor: DRAFT.length })
+
+    const result = await accepting
+    expect(result.ok).toBe(false)
+    expect(logs).toContain(SHORT)
+    expect(logs).toContain(`${TARGET}${DRAFT}`)
+    // The run keeps its draft, and that draft was never recorded as delivered.
+    expect(h.controller.getState().workflow?.draft).toBe(DRAFT)
+    expect(h.controller.getState().workflow?.phase).toBe('reviewing')
+  })
+
+  test('a restore superseded by a new run in the same session keeps its text copyable', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const cancelling = h.controller.cancel(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    expect(await h.controller.onSubmit(h.ports, submit('다른 요청'), 'pane')).toEqual(OPTIMIZING)
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 5 })
+    expect(await cancelling).toEqual({ ok: false, reason: '' })
+    expect(logs).toContain(`${TARGET}원문 요청`)
+  })
+
+  test('a restore made stale by a session change publishes nothing into the new session', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const accepting = h.controller.accept(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    h.controller.onSessionStart('sess-2')
+    pending.resolve({ isFilled: true, text: DRAFT, cursor: DRAFT.length })
+    expect(await accepting).toEqual({ ok: false, reason: '' })
+    expect(logs.some(line => line.includes(DRAFT))).toBe(false)
+  })
+
   test('a real conflict still aborts, but keeps the refined draft copyable', async () => {
     const h = harness()
     h.controller.onSessionStart('sess-1')

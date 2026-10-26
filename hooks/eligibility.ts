@@ -72,10 +72,6 @@ export function classifySubmission(
     return { kind: 'bypass', text: e.text, ticket }
   }
 
-  // 6b. A refined draft this plugin already delivered is never optimized
-  //     again, even once its one-shot permit is spent, edited or expired.
-  if (facts?.delivered === true) return pass('already-optimized')
-
   // 7. Commands and shell input belong to the engine, even while a dialogue
   //    is active (`/optimize accept`, `/optimize cancel`, ...). Defensive: the
   //    engine likely handled them before this hook ran.
@@ -96,6 +92,11 @@ export function classifySubmission(
     // submission rather than let a second one reach the main session.
     return { kind: 'busy', workflowId: workflow.id }
   }
+
+  // 8b. A refined draft this plugin already delivered is never optimized
+  //     again, even once its one-shot permit is spent, edited or expired.
+  //     An active dialogue (8) still owns the composer first.
+  if (facts?.delivered === true) return pass('already-optimized')
 
   // 9. The optimizer is off. The raw mode (5) and an active reply (8) above
   //    still win.

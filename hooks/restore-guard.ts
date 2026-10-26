@@ -87,11 +87,13 @@ export interface RestoreTracker {
   /** Keeps the operation alive until its last pending token settles. */
   retain(operation: RestoreOperation): void
   /**
-   * Notes that the person submitted `ticket`. When it belongs to the current
-   * operation's lineage, that operation is `submitted` from now on and the
-   * call returns true.
+   * Notes that the person submitted `text` under `ticket`. Only a ticket from
+   * the current operation's lineage whose submitted text is this restore's
+   * own target marks the operation `submitted` (and returns true). A permit
+   * that followed the person's edit to new text is their new draft, not this
+   * restore's: that edit still conflicts, so the target is kept for recovery.
    */
-  noteSubmitted(ticket: BypassTicket): boolean
+  noteSubmitted(ticket: BypassTicket, text: string): boolean
 }
 
 interface Token {
@@ -246,8 +248,9 @@ export function createRestoreTracker(): RestoreTracker {
       if (current !== operation) return
       retained = true
     },
-    noteSubmitted(ticket) {
+    noteSubmitted(ticket, text) {
       if (current === null || !current.tickets.has(ticket)) return false
+      if (!ownForms.has(submittedForm(text))) return false
       submitted = current
       return true
     },

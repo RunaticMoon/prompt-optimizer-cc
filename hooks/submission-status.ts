@@ -85,7 +85,12 @@ export function formatSubmissionStatus(submission: Readonly<SubmissionStatus> | 
     ? '미확인'
     : compositionLabel(submission.composition)
   const lines = [`최근 제출 분류: ${decisionLabel(submission)} · 입력: ${input}`]
-  if (submission.kind === 'pass' && (submission.passReason === 'pasted' || submission.passReason === 'smart-continuation')) {
+  if (
+    submission.kind === 'pass'
+    && (submission.passReason === 'pasted'
+      || submission.passReason === 'smart-continuation'
+      || submission.passReason === 'already-optimized')
+  ) {
     lines.push('직접 최적화: /optimize -- <원문>')
   }
   return lines.join('\n')

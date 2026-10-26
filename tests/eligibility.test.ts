@@ -244,7 +244,7 @@ describe('classifySubmission — rule 6: the submitted form of a restored draft'
   })
 })
 
-describe('classifySubmission — rule 6b: an already-delivered refinement', () => {
+describe('classifySubmission — rule 8b: an already-delivered refinement', () => {
   test('passes as already-optimized with no live ticket', () => {
     expect(classifySubmission(submit({ text: '초안' }), config(), state(), 0, { pasted: false, delivered: true })).toEqual({
       kind: 'pass',
@@ -257,6 +257,17 @@ describe('classifySubmission — rule 6b: an already-delivered refinement', () =
     expect(
       classifySubmission(submit({ text: '초안' }), config(), state({ bypass: ticket }), 20, { pasted: false, delivered: true }),
     ).toEqual({ kind: 'pass', reason: 'already-optimized' })
+  })
+
+  test('an active dialogue still owns the composer first', () => {
+    const active = workflow({ ui: 'composer', phase: 'reviewing' })
+    expect(
+      classifySubmission(submit({ text: '초안' }), config(), state({ workflow: active }), 0, { pasted: false, delivered: true }),
+    ).toEqual({ kind: 'reply', workflowId: 'wf-1', text: '초안' })
+    const busy = workflow({ ui: 'pane', phase: 'generating' })
+    expect(
+      classifySubmission(submit({ text: '초안' }), config(), state({ workflow: busy }), 0, { pasted: false, delivered: true }),
+    ).toEqual({ kind: 'busy', workflowId: 'wf-1' })
   })
 
   test('the raw mode and a live ticket still win', () => {
