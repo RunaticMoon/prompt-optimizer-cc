@@ -5450,6 +5450,26 @@ describe('refine → restore → submit (re-entry regression)', () => {
     expect(h.controller.getState().workflow?.phase).toBe('reviewing')
   })
 
+  test('a new draft typed and sent during a cancel restore keeps the original copyable', async () => {
+    const pending = deferred<PromptFilled>()
+    const h = harness({ fill: () => pending.promise })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit('원문 요청'), 'pane')
+    await h.flush()
+    const logs = captureLogs(h)
+
+    const cancelling = h.controller.cancel(h.ports)
+    await h.waitFor(() => h.calls.fill === 1)
+    const token = h.controller.observeEditInput(edit({ key: { key: 'a' }, text: '새 초안' }))
+    h.controller.finishPromptEdit(token, '새 초안', h.ports)
+    expect(await h.controller.onSubmit(h.ports, submit('새 초안'), 'pane')).toEqual({ action: 'next', text: '새 초안' })
+    pending.resolve({ isFilled: true, text: '원문 요청', cursor: 5 })
+
+    expect((await cancelling).ok).toBe(false)
+    expect(logs).toContain(SHORT)
+    expect(logs).toContain(`${TARGET}원문 요청`)
+  })
+
   test('a restore superseded by a new run in the same session keeps its text copyable', async () => {
     const pending = deferred<PromptFilled>()
     const h = harness({ fill: () => pending.promise })
