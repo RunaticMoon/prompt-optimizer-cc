@@ -28,6 +28,7 @@ const PASS_LABELS: Record<PassReason, string> = {
   pasted: '원문 통과 (붙여넣기 추정)',
   'smart-continuation': '원문 통과 (명확한 승인·이어가기)',
   'already-optimized': '원문 통과 (이미 다듬은 개선안)',
+  'cancelled-original': '원문 통과 (취소한 원문)',
 }
 
 /** How the draft was built, for every reason the composition classifier reports. */
@@ -89,7 +90,8 @@ export function formatSubmissionStatus(submission: Readonly<SubmissionStatus> | 
     submission.kind === 'pass'
     && (submission.passReason === 'pasted'
       || submission.passReason === 'smart-continuation'
-      || submission.passReason === 'already-optimized')
+      || submission.passReason === 'already-optimized'
+      || submission.passReason === 'cancelled-original')
   ) {
     lines.push('직접 최적화: /optimize -- <원문>')
   }

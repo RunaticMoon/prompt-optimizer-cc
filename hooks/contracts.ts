@@ -349,6 +349,8 @@ export type PassReason =
   | 'smart-continuation'
   /** The text is a refined draft this plugin already delivered in this session. */
   | 'already-optimized'
+  /** The text is the original whose optimization the person just cancelled. */
+  | 'cancelled-original'
 
 /**
  * How the classifier read the submitted draft's construction
@@ -393,6 +395,12 @@ export interface SubmissionFacts {
    * again, even after its one-shot bypass permit was spent, edited or expired.
    */
   delivered?: boolean
+  /**
+   * The text is the original of the run the person just cancelled (Esc or
+   * `/optimize cancel`). Its next submission is sent as-is, once, even when the
+   * restore's permit was refused or carries the box's paste-chip view.
+   */
+  cancelled?: boolean
 }
 
 /** What the classifier decides for one submission. */

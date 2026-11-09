@@ -207,7 +207,8 @@ Prompt dropped by a hook: POPT runtime probe stopped before any main-model call
 - 보류(provisional) 티켓을 fill **전에** 먼저 발급합니다. fill이 성공하면 그 티켓을 fill이 돌려준 텍스트로 확정하고, 거절되거나 예외가 나면 철회합니다(`bypass-revoked`). 이미 소비되었거나 사람이 편집한 티켓은 덮어쓰지 않고 그대로 둡니다. 복원 도중 Enter가 와도 분류 시점에 티켓이 살아 있어 같은 원문을 다시 다듬지 않고 그대로 전송합니다.
 - 사용자 `prompt.edit` 결과에 따라 해당 초안의 bypass 텍스트를 갱신합니다.
 - bypass 일치는 CLI가 제출하는 형태(앞뒤 공백 제거, `\r\n`→`\n`)로 비교합니다(`submittedForm`). Enter가 제출 전에 편집(줄바꿈)으로 먼저 도착하거나 CLI가 앞뒤 공백을 잘라도 같은 초안으로 봅니다.
-- 이 세션에서 accept로 입력창에 넣었거나 send로 보낸 개선안은 제출 형태로 최근 20개를 메모리에 기억합니다(세션 시작·종료 시 삭제, 디스크 저장 없음). composer 제출이 그중 하나와 같으면 bypass가 소비·만료·변형된 뒤라도 규칙 ⑧b로 `pass('already-optimized')`(활성 대화의 reply·busy가 먼저) 처리해 다시 다듬지 않습니다. 원문 복원(취소·실패)은 기억하지 않습니다.
+- 이 세션에서 accept로 입력창에 넣었거나 send로 보낸 개선안은 제출 형태로 최근 20개를 메모리에 기억합니다(세션 시작·종료 시 삭제, 디스크 저장 없음). composer 제출이 그중 하나와 같으면 bypass가 소비·만료·변형된 뒤라도 규칙 ⑧b로 `pass('already-optimized')`(활성 대화의 reply·busy가 먼저) 처리해 다시 다듬지 않습니다. 원문 복원(취소·실패)은 이 개선안 기억에 넣지 않습니다(취소는 아래 ⑧c가 따로 다룹니다).
+- 취소(Esc·`/optimize cancel`)한 실행의 원문은 제출 형태로 하나만 기억합니다. 다음 composer 제출이 그 원문과 같으면 복원 티켓이 거절됐거나(붙여넣기 칩이 남은 입력창의 편집 관찰) 칩 표시 형태로 발급돼 펼친 제출과 맞지 않아도 규칙 ⑧c로 `pass('cancelled-original')` 처리해 한 번 그대로 보냅니다(활성 대화·라이브 bypass가 먼저). 그 원문이 ⑧c나 자기 bypass로 한 번 전송되거나 새 실행·세션이 시작되면 지웁니다. 그사이 다른 텍스트의 제출은 이 기억을 쓰지 않습니다. 첫 라운드 실패 복원(`restoreOriginal`)은 대상이 아닙니다.
 - 다른 플러그인의 fill, 초안 비우기, 세션 종료, 만료 시 해제합니다.
 
 **복원 중 관찰된 편집 보호(#28).** 호스트가 조건부 fill(compare-and-set)을

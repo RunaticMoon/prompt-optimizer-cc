@@ -2324,6 +2324,121 @@ describe('cancel', () => {
     })
   }
 
+  test('a cancelled pasted original is sent untouched when the box keeps its paste chip', async () => {
+    // The host can hand the dropped draft back with its paste chip; an edit
+    // then makes the cancel refuse the fill and revoke its permit, so the
+    // person's Enter on the same draft carries only the expanded original.
+    const placeholder = '글\n[Pasted text #1 +3 lines]'
+    const original = '글\n첫 번째 원문 줄\n두 번째 원문 줄\n세 번째 원문 줄'
+    let box = ''
+    const h = harness({ fill: input => {
+      box = input.text
+      return { isFilled: true, text: box, cursor: box.length }
+    } })
+    h.ports.prompt.read = async () => ({ text: box, cursor: box.length })
+    h.controller.onSessionStart('sess-1')
+    h.controller.observeComposer(placeholder)
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane'))
+      .toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+    await h.flush()
+    box = placeholder
+    h.controller.onPromptEdit(placeholder)
+
+    expect((await h.controller.cancel(h.ports)).ok).toBe(false)
+    expect(box).toBe(placeholder)
+    expect(h.controller.getState().bypass).toBeNull()
+
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane')).toEqual({ action: 'next', text: original })
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.calls.complete).toBe(1)
+    // The pass is one-shot: the same text sent again is an ordinary prompt.
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane'))
+      .toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+  })
+
+  test('a cancelled pasted original is sent untouched when the restore lands as a paste chip', async () => {
+    // The fill's own box view can show a long restored paste as its chip, so
+    // the permit carries that view while the Enter carries the expanded text.
+    const placeholder = '글\n[Pasted text #2 +3 lines]'
+    const original = '글\n첫 번째 원문 줄\n두 번째 원문 줄\n세 번째 원문 줄'
+    let box = ''
+    const h = harness({ fill: input => {
+      box = input.text === original ? placeholder : input.text
+      return { isFilled: true, text: box, cursor: box.length }
+    } })
+    h.ports.prompt.read = async () => ({ text: box, cursor: box.length })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'pane')
+    await h.flush()
+
+    expect(await h.controller.cancel(h.ports)).toEqual({ ok: true })
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane')).toEqual({ action: 'next', text: original })
+    expect(h.controller.getState().workflow).toBeNull()
+    expect(h.controller.getState().bypass).toBeNull()
+    expect(h.calls.complete).toBe(1)
+  })
+
+  test('a permit edited to other text leaves the cancelled original its one pass', async () => {
+    const original = '처음 작성한 원문 요청'
+    const edited = '조금 고친 다른 요청'
+    let box = ''
+    const h = harness({ fill: input => {
+      box = input.text
+      return { isFilled: true, text: box, cursor: box.length }
+    } })
+    h.ports.prompt.read = async () => ({ text: box, cursor: box.length })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'pane')
+    await h.flush()
+    expect(await h.controller.cancel(h.ports)).toEqual({ ok: true })
+    box = edited
+    h.controller.onPromptEdit(edited)
+    expect(await h.controller.onSubmit(h.ports, submit(edited), 'pane')).toEqual({ action: 'next', text: edited })
+
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane')).toEqual({ action: 'next', text: original })
+    expect(h.controller.getSubmissionStatus()?.passReason).toBe('cancelled-original')
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane'))
+      .toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+    expect(h.calls.complete).toBe(1)
+  })
+
+  test('a new session forgets the cancelled original', async () => {
+    const original = '처음 작성한 원문 요청'
+    const h = harness({ fill: input => ({ isFilled: false, text: '', cursor: 0, refusal: input.text === '' ? undefined : 'dialog' }) })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'pane')
+    await h.flush()
+    expect((await h.controller.cancel(h.ports)).ok).toBe(false)
+    h.controller.onSessionStart('sess-2')
+
+    expect(await h.controller.onSubmit(h.ports, submit(original), 'pane'))
+      .toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+  })
+
+  test('a different draft after a cancel is still optimized', async () => {
+    const original = '처음 작성한 원문 요청'
+    const fresh = '별도로 새로 작성한 요청'
+    let box = ''
+    const h = harness({ fill: input => {
+      box = input.text
+      return { isFilled: true, text: box, cursor: box.length }
+    } })
+    h.ports.prompt.read = async () => ({ text: box, cursor: box.length })
+    h.controller.onSessionStart('sess-1')
+    await h.controller.onSubmit(h.ports, submit(original), 'pane')
+    await h.flush()
+    expect(await h.controller.cancel(h.ports)).toEqual({ ok: true })
+    // Emptying the box spends the restore's permit; the new draft is typed fresh.
+    h.controller.onPromptEdit('')
+    box = fresh
+    h.controller.onPromptEdit(fresh)
+    expect(h.controller.getState().bypass).toBeNull()
+
+    expect(await h.controller.onSubmit(h.ports, submit(fresh), 'pane'))
+      .toEqual({ action: 'drop', reason: '프롬프트를 다듬는 중입니다.' })
+    expect(h.controller.getState().workflow?.original).toBe(fresh)
+  })
+
   test('preserves a new composer draft when cancellation cannot safely restore the saved original', async () => {
     const original = '처음 작성한 원문 요청'
     const fresh = '별도로 새로 작성한 요청'

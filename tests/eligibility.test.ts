@@ -282,6 +282,26 @@ describe('classifySubmission — rule 8b: an already-delivered refinement', () =
   })
 })
 
+describe('classifySubmission — rule 8c: the cancelled original', () => {
+  test('passes as cancelled-original with no live ticket', () => {
+    expect(classifySubmission(submit({ text: '원문' }), config(), state(), 0, { pasted: false, cancelled: true })).toEqual({
+      kind: 'pass',
+      reason: 'cancelled-original',
+    })
+  })
+
+  test('an active dialogue and a live ticket still win', () => {
+    const busy = workflow({ ui: 'pane', phase: 'generating' })
+    expect(
+      classifySubmission(submit({ text: '원문' }), config(), state({ workflow: busy }), 0, { pasted: false, cancelled: true }),
+    ).toEqual({ kind: 'busy', workflowId: 'wf-1' })
+    const ticket = bypass({ text: '원문' })
+    expect(
+      classifySubmission(submit({ text: '원문' }), config(), state({ bypass: ticket }), 0, { pasted: false, cancelled: true }),
+    ).toMatchObject({ kind: 'bypass' })
+  })
+})
+
 describe('classifySubmission — rule 5: raw mode', () => {
   const MODE = { sessionId: SESSION, draft: '초안' }
 

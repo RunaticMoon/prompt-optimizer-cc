@@ -415,6 +415,13 @@ export function createController(deps: ControllerDeps): OptimizerController {
    */
   let delivered: string[] = []
   /**
+   * The original of the run the person last cancelled, in submitted form. Its
+   * next submission passes through once: a paste can reach the box as a chip
+   * the restore's permit cannot match (or the restore is refused), and the
+   * cancel already said "not optimized". Cleared by a new run or session.
+   */
+  let cancelled: { workflowId: string; form: string } | null = null
+  /**
    * What the plugin saw build the current draft since the box was last empty
    * (`hooks/composition.ts`). Read by `submissionFacts` at submit time; reset
    * when the box is emptied or a submission is consumed.
@@ -1370,9 +1377,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     // no-event submission of the same text (↑ recall) can reuse it.
     const classification = e.origin.kind === 'composer' ? classifyDraft(e.text) : undefined
     if (classification !== undefined) remember(e.text, classification)
-    const facts = classification !== undefined && isDelivered(e.text)
-      ? { ...classification, delivered: true }
-      : classification
+    const facts = classification === undefined ? undefined : markFacts(e.text, classification)
     try {
       decision = classifySubmission(e, deps.getConfig(), state, deps.now(), facts)
     } catch {
@@ -1411,6 +1416,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
 
     switch (decision.kind) {
       case 'pass':
+        if (decision.reason === 'cancelled-original') consumeCancelled()
         return { action: 'next', text: e.text }
 
       case 'raw':
@@ -1425,6 +1431,11 @@ export function createController(deps: ControllerDeps): OptimizerController {
         // The person's own Enter on a restore's text: an in-flight restore of
         // that text is finished by it, not interrupted.
         restoreTracker.noteSubmitted(decision.ticket, e.text)
+        // The cancelled original went out under its own permit: one pass only.
+        // A permit that followed an edit to other text leaves the pass armed.
+        if (cancelled?.workflowId === decision.ticket.workflowId && submittedForm(e.text) === cancelled.form) {
+          cancelled = null
+        }
         apply({
           type: 'bypass-consumed',
           sessionId: state.sessionId,
@@ -1459,6 +1470,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
         try {
           resetExtra()
           workflow = makeWorkflow(decision.text, e.context ?? [], ui)
+          cancelled = null
           // A replacement run owns the box from here: an older restore still
           // in flight must not report into (or fill over) this workflow.
           restoreTracker.invalidate()
@@ -1512,6 +1524,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     try {
       resetExtra()
       workflow = makeWorkflow(source, [], ui)
+      cancelled = null
       // A replacement run owns the box from here: an older restore still in
       // flight must not report into (or fill over) this workflow.
       restoreTracker.invalidate()
@@ -1795,6 +1808,8 @@ export function createController(deps: ControllerDeps): OptimizerController {
     // Drop the run before restoring: a late completion then finds it stale and
     // cannot run a second restore or repaint the dialogue.
     apply({ type: 'cancel', workflowId: workflow.id })
+    const form = submittedForm(workflow.original)
+    cancelled = form === '' ? null : { workflowId: workflow.id, form }
 
     let result: Awaited<ReturnType<typeof transferDraft>>
     try {
@@ -1907,8 +1922,26 @@ export function createController(deps: ControllerDeps): OptimizerController {
   }
 
   function submissionFacts(text: string): SubmissionFacts {
-    const facts = classifyDraft(text)
-    return isDelivered(text) ? { ...facts, delivered: true } : facts
+    return markFacts(text, classifyDraft(text))
+  }
+
+  /** Adds what this session remembers about `text` to its composition verdict. */
+  function markFacts(text: string, facts: SubmissionFacts): SubmissionFacts {
+    if (isDelivered(text)) return { ...facts, delivered: true }
+    if (cancelled !== null && submittedForm(text) === cancelled.form) return { ...facts, cancelled: true }
+    return facts
+  }
+
+  /**
+   * Spends the cancelled original's one pass, with any permit its restore left:
+   * that permit holds the same draft, so it must not release a later one.
+   */
+  function consumeCancelled(): void {
+    const workflowId = cancelled?.workflowId
+    cancelled = null
+    if (state.bypass !== null && state.bypass.workflowId === workflowId) {
+      apply({ type: 'bypass-revoked', sessionId: state.sessionId })
+    }
   }
 
   /**
@@ -1994,6 +2027,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     resetGuidance()
     composition = EMPTY_COMPOSITION
     delivered = []
+    cancelled = null
     apply({ type: 'reset', sessionId })
   }
 
@@ -2004,6 +2038,7 @@ export function createController(deps: ControllerDeps): OptimizerController {
     resetGuidance()
     composition = EMPTY_COMPOSITION
     delivered = []
+    cancelled = null
     apply({ type: 'reset', sessionId: state.sessionId })
   }
 

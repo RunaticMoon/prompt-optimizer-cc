@@ -98,6 +98,11 @@ export function classifySubmission(
   //     An active dialogue (8) still owns the composer first.
   if (facts?.delivered === true) return pass('already-optimized')
 
+  // 8c. The original the person just cancelled goes out as typed: cancelling
+  //     means "send it without the optimizer", whatever became of the
+  //     restore's permit (a refused fill, or a paste chip in the box's view).
+  if (facts?.cancelled === true) return pass('cancelled-original')
+
   // 9. The optimizer is off. The raw mode (5) and an active reply (8) above
   //    still win.
   if (config.enabled === false) return pass('disabled')
