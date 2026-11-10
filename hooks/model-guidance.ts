@@ -51,6 +51,16 @@ export const QUICK_GUIDANCE: string = COMMON_GUIDANCE.replace(OPTIONAL_DETAIL_RU
 /** Shared policy with the standard-only decision rule. */
 export const STANDARD_GUIDANCE: string = COMMON_GUIDANCE.replace(OPTIONAL_DETAIL_RULE, STANDARD_DETAIL_RULE)
 
+// 근거: DESIGN-model-guidance §4.10 — F52 「Approvals」·「Keep caution from piling up」·「Say who owns the code」·「Finish the whole task」·「Make reports easy to follow」·「Review instructions written for earlier models」·「Safeguard refusals」.
+const FABLE_5_2_GUIDANCE = [
+  '- “계속”·“진행해” 같은 짧은 승인 답은 최근 대화에서 확인된 동작과 대상을 그대로 승인하는 구체적 문장으로 바꾼다. 대상이 불분명하면 묻고 승인 범위를 넓히지 않는다.',
+  '- 승인·금지 조건은 적용되는 동작을 정확히 적고, 사용자가 밝힌 예외·이미 승인한 단계·승인 없이 해도 되는 단계는 별도 줄이 아니라 그 조건 안에 함께 적는다.',
+  '- 구조 개선·중복 통합을 원한다고 확인되면 그 범위의 구조를 바꿔도 된다고 적고, 기존 동작 변경과 작은 변경까지 보고하게 한다. 최소 변경을 원하면 기존 구조 유지를 명시한다. 확인되지 않으면 코드 소유 문구를 넣지 않는다.',
+  '- 여러 단계 작업은 사용자가 정한 의도적 제한(손대지 말 파일, 보류한 접근)을 경계로 적는다. 오류·타임아웃 같은 일반 장애에서 멈추라는 조건은 만들지 않는다.',
+  '- 최종 보고·인계를 요청하면 작업 과정을 보지 않은 독자 기준으로 핵심을 먼저, 작업 중 만든 용어 없이 완결된 문장으로 쓰게 한다. 문장 길이 같은 경직된 수치 규칙은 새로 만들지 않는다.',
+  '- 응답에 사고 과정을 그대로 쓰라는 요구는 결론의 근거와 확인한 사항을 설명하라는 요구로 바꾼다.',
+].join('\n')
+
 // 근거: DESIGN-model-guidance §4.2 — F51 「작문 밀도」·「채팅에서의 서식」·「검색된 출처 인용하기」·「낮은 effort에서의 검색 트리거」·「파일 전체 재작성보다 부분 편집 선호하기」·「변경 사항과 테스트를 작업이 요구하는 범위로 제한하기」·「xhigh 및 max effort에서 긴 출력을 위한 여유 확보하기」·「전체 작업 완료하기」.
 const FABLE_5_1_GUIDANCE = [
   '- 글쓰기 요청에는 꾸민 비유와 상투어 대신 뜻을 직접 전달하는 문장을 원한다는 조건을 필요할 때 짧게 반영한다. 사용자가 지정한 문체는 유지한다.',
@@ -110,9 +120,18 @@ const SONNET_5_GUIDANCE = [
   '- 디자인 요청의 참고 자료와 기존 시각 규칙은 보존한다. 사용자가 주지 않은 색상·서체·레이아웃을 새 요구사항으로 만들지 않는다.',
 ].join('\n')
 
+// 근거: DESIGN-model-guidance §4.11 — H55 「Accurate search results」·「Prevent early stopping in long agent prompts」·「Tell coding agents to verify their changes」·「Use adaptive thinking with JSON output and your own tools」.
+const HAIKU_5_5_GUIDANCE = [
+  '- 기록·직책·가격·버전·규칙·“최신”처럼 바뀔 수 있는 사실의 질문은 답하기 전에 현재 출처를 검색해 확인하도록 적고, 답이 지역에 따라 다르면 확인된 국가·지역을 검색 조건에 넣는다. 바뀌지 않는 사실에는 검색 조건을 붙이지 않고 모든 질문에 무조건 검색하라고 쓰지 않는다.',
+  '- 요청한 작업 전체가 끝나고 확인될 때까지 진행하고 사용자 없이는 진행할 수 없거나 위험한 단계 전에만 멈추도록 완료 조건을 적는다. 요청하지 않은 기능·문서·리팩터링은 끝에 제안만 하게 한다.',
+  '- 실행·빌드·타입 검사가 가능한 코드 변경은 그 변경을 실제로 실행하는 검사를 완료 기준으로 쓴다. 문법 검사나 시작하지 못한 검사는 통과로 보지 않고, 못 한 검사는 무엇을 왜 못 했는지 보고하게 한다.',
+  '- JSON 출력과 조회가 함께 필요하면 JSON 형식은 최종 답에만 적용하고 필요한 조회를 먼저 하도록 적는다.',
+].join('\n')
+
 /** One independent add-on block per profile; `common` adds nothing. Frozen so callers cannot mutate it. */
 export const MODEL_GUIDANCE: Readonly<Record<GuidanceProfile, string>> = Object.freeze({
   common: '',
+  'fable-5-2': FABLE_5_2_GUIDANCE,
   'fable-5-1': FABLE_5_1_GUIDANCE,
   'fable-5': FABLE_5_GUIDANCE,
   'opus-5-5': OPUS_5_5_GUIDANCE,
@@ -120,4 +139,5 @@ export const MODEL_GUIDANCE: Readonly<Record<GuidanceProfile, string>> = Object.
   'opus-4-8': OPUS_4_8_GUIDANCE,
   'sonnet-5-5': SONNET_5_5_GUIDANCE,
   'sonnet-5': SONNET_5_GUIDANCE,
+  'haiku-5-5': HAIKU_5_5_GUIDANCE,
 })

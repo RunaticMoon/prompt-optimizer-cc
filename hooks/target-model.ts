@@ -39,6 +39,8 @@ const MODEL_GRAMMAR =
  * Every other formally valid id stays on `common` with reason `unlisted`.
  */
 export const MODEL_PROFILE_BY_ID: Readonly<Record<string, GuidanceProfile>> = Object.freeze({
+  'claude-fable-5-2': 'fable-5-2',
+  'claude-mythos-5-2': 'fable-5-2',
   'claude-fable-5-1': 'fable-5-1',
   'claude-mythos-5-1': 'fable-5-1',
   'claude-fable-5': 'fable-5',
@@ -48,6 +50,7 @@ export const MODEL_PROFILE_BY_ID: Readonly<Record<string, GuidanceProfile>> = Ob
   'claude-opus-4-8': 'opus-4-8',
   'claude-sonnet-5-5': 'sonnet-5-5',
   'claude-sonnet-5': 'sonnet-5',
+  'claude-haiku-5-5': 'haiku-5-5',
 })
 
 function snapshot(

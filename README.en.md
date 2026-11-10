@@ -331,6 +331,7 @@ The raw string from `$.session.model()` is preserved exactly; only a lookup copy
 
 | Model ID | Applied profile |
 |---|---|
+| `claude-fable-5-2`, `claude-mythos-5-2` | `fable-5-2` |
 | `claude-fable-5-1`, `claude-mythos-5-1` | `fable-5-1` |
 | `claude-fable-5`, `claude-mythos-5` | `fable-5` |
 | `claude-opus-5-5` | `opus-5-5` |
@@ -338,7 +339,8 @@ The raw string from `$.session.model()` is preserved exactly; only a lookup copy
 | `claude-opus-4-8` | `opus-4-8` |
 | `claude-sonnet-5-5` | `sonnet-5-5` |
 | `claude-sonnet-5` | `sonnet-5` |
-| Haiku 4.5 (`claude-haiku-4-5-...`), every other model, alias-only values (`opus`, `sonnet`, …) | `common` (common guidance only) |
+| `claude-haiku-5-5` | `haiku-5-5` |
+| Haiku 4.5 (`claude-haiku-4-5-...`), every other model, alias-only values (`opus`, `sonnet`, …) | `common` (common guidance only; Haiku 4.5 stays here) |
 
 - `[1m]` and date suffixes are ignored. For example, `claude-opus-5-5[1m]` and `claude-opus-5-5-20260901[1m]` → `claude-opus-5-5`.
 - A version-less alias, a new version outside the allowlist, an empty value, or a non-string value uses the common guidance. It never falls back to a nearby version.
@@ -375,7 +377,7 @@ Turning `modelGuidance` off still keeps the common editing guidance, and the fix
 
 **Sources**
 
-- The recommendations in [Anthropic's prompt engineering best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) and the per-model pages (Fable, Opus, Sonnet) were distilled into request wording. The source text is not downloaded at runtime or included in the repository.
+- The recommendations in [Anthropic's prompt engineering best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) and the per-model pages (Fable, Opus, Sonnet, Haiku) were distilled into request wording. The source text is not downloaded at runtime or included in the repository.
 - The request classification, the four-field goal/context/scope/done-criteria structure, and the idea of resolving referents came from the `fable-prompt` skill in [oh-my-fable](https://github.com/Junhan2/oh-my-fable) (MIT). That skill's "execute after improving" procedure and its rule of copying the blocks verbatim are not adopted.
 - Requirements clarification draws on [grill-me](https://github.com/mattpocock/skills/blob/main/skills/productivity/grill-me/SKILL.md), [grill-with-docs](https://github.com/mattpocock/skills/blob/main/skills/engineering/grill-with-docs/SKILL.md), and [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md): decision dependencies and the distinction between discoverable facts and user choices. This adaptation uses one question in the existing UI and a bounded read-only snapshot instead of a full frontier of questions and sub-agent exploration.
 - Terminology and decision rationale draw on [domain-modeling](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md), the [ADR format](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/ADR-FORMAT.md), and the [glossary format](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/GLOSSARY-FORMAT.md). Agreed terms and significant trade-offs go in the draft; these skills are not executed and document files are not created automatically.

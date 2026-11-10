@@ -695,6 +695,7 @@ export type EnginePorts = {
  */
 export type GuidanceProfile =
   | 'common'
+  | 'fable-5-2'
   | 'fable-5-1'
   | 'fable-5'
   | 'opus-5-5'
@@ -702,6 +703,7 @@ export type GuidanceProfile =
   | 'opus-4-8'
   | 'sonnet-5-5'
   | 'sonnet-5'
+  | 'haiku-5-5'
 
 /** Why a target-model snapshot ended up with its profile. */
 export type ModelResolutionReason =

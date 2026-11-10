@@ -331,6 +331,7 @@ prompt-optimizer.pasteBypass
 
 | 모델 ID | 적용 프로필 |
 |---|---|
+| `claude-fable-5-2`, `claude-mythos-5-2` | `fable-5-2` |
 | `claude-fable-5-1`, `claude-mythos-5-1` | `fable-5-1` |
 | `claude-fable-5`, `claude-mythos-5` | `fable-5` |
 | `claude-opus-5-5` | `opus-5-5` |
@@ -338,7 +339,8 @@ prompt-optimizer.pasteBypass
 | `claude-opus-4-8` | `opus-4-8` |
 | `claude-sonnet-5-5` | `sonnet-5-5` |
 | `claude-sonnet-5` | `sonnet-5` |
-| Haiku 4.5(`claude-haiku-4-5-...`), 그 밖의 모델, 별칭만 있는 값(`opus`, `sonnet` …) | `common`(공통 지침만) |
+| `claude-haiku-5-5` | `haiku-5-5` |
+| Haiku 4.5(`claude-haiku-4-5-...`), 그 밖의 모델, 별칭만 있는 값(`opus`, `sonnet` …) | `common`(공통 지침만; Haiku 4.5 유지) |
 
 - `[1m]`과 날짜 접미사는 무시한다. 예: `claude-opus-5-5[1m]`, `claude-opus-5-5-20260901[1m]` → `claude-opus-5-5`.
 - 버전 없는 별칭, allowlist 밖의 새 버전, 빈 값, 문자열이 아닌 값은 공통 지침을 쓴다. 가까운 버전으로 폴백하지 않는다.
@@ -375,7 +377,7 @@ claude-opus-5-5[1m] · 적용: opus-5-5
 
 **출처**
 
-- [Anthropic 프롬프팅 모범 사례](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/claude-prompting-best-practices)(영문판은 `/docs/en/...`)와 모델별 페이지(Fable·Opus·Sonnet)의 권고를 요청 문구로 증류했다. 실행 중 원문을 내려받지 않고 저장소에도 포함하지 않는다.
+- [Anthropic 프롬프팅 모범 사례](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/claude-prompting-best-practices)(영문판은 `/docs/en/...`)와 모델별 페이지(Fable·Opus·Sonnet·Haiku)의 권고를 요청 문구로 증류했다. 실행 중 원문을 내려받지 않고 저장소에도 포함하지 않는다.
 - 요청 분류, 목표/맥락/범위/완료 기준 네 필드 구조, 지시어 해소 아이디어는 [oh-my-fable](https://github.com/Junhan2/oh-my-fable)(MIT)의 `fable-prompt` 스킬을 참고했다. 그 스킬의 "개선 후 실행" 절차와 블록 원문 복사 규칙은 채택하지 않는다.
 - 요구사항 질문은 [grill-me](https://github.com/mattpocock/skills/blob/main/skills/productivity/grill-me/SKILL.md), [grill-with-docs](https://github.com/mattpocock/skills/blob/main/skills/engineering/grill-with-docs/SKILL.md), [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)의 결정 의존성과 사실·사용자 결정 구분을 참고했다. 여러 질문·서브에이전트 탐색 대신 기존 UI의 한 질문과 제한된 읽기 전용 스냅샷으로 적용한다.
 - 용어와 결정 이유는 [domain-modeling](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md), [ADR 형식](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/ADR-FORMAT.md), [용어집 형식](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/GLOSSARY-FORMAT.md)을 참고했다. 합의된 용어·중요한 절충을 초안에 담으며, 해당 스킬을 실행하거나 문서 파일을 자동 생성하지 않는다.

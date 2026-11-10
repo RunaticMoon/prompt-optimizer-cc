@@ -18,6 +18,9 @@ function snap(
 
 describe('normalizeTargetModel — allowlisted profiles', () => {
   const cases: ReadonlyArray<[input: string, id: string, profile: GuidanceProfile]> = [
+    ['claude-fable-5-2', 'claude-fable-5-2', 'fable-5-2'],
+    ['Claude Fable 5.2', 'claude-fable-5-2', 'fable-5-2'],
+    ['claude-mythos-5-2', 'claude-mythos-5-2', 'fable-5-2'],
     ['claude-fable-5-1', 'claude-fable-5-1', 'fable-5-1'],
     ['Claude Fable 5.1', 'claude-fable-5-1', 'fable-5-1'],
     ['claude-mythos-5-1', 'claude-mythos-5-1', 'fable-5-1'],
@@ -31,6 +34,11 @@ describe('normalizeTargetModel — allowlisted profiles', () => {
     ['Claude Opus 4.8', 'claude-opus-4-8', 'opus-4-8'],
     ['claude-sonnet-5-5', 'claude-sonnet-5-5', 'sonnet-5-5'],
     ['Sonnet 5', 'claude-sonnet-5', 'sonnet-5'],
+    ['claude-haiku-5-5', 'claude-haiku-5-5', 'haiku-5-5'],
+    ['claude-haiku-5-5[1m]', 'claude-haiku-5-5', 'haiku-5-5'],
+    ['claude-haiku-5-5-20261001', 'claude-haiku-5-5', 'haiku-5-5'],
+    ['claude-haiku-5-5-20261001[1m]', 'claude-haiku-5-5', 'haiku-5-5'],
+    ['Haiku 5.5', 'claude-haiku-5-5', 'haiku-5-5'],
   ]
 
   for (const [input, id, profile] of cases) {
@@ -42,6 +50,7 @@ describe('normalizeTargetModel — allowlisted profiles', () => {
   test('the allowlist covers exactly the design profiles', () => {
     expect(new Set(Object.values(MODEL_PROFILE_BY_ID))).toStrictEqual(
       new Set<GuidanceProfile>([
+        'fable-5-2',
         'fable-5-1',
         'fable-5',
         'opus-5-5',
@@ -49,6 +58,7 @@ describe('normalizeTargetModel — allowlisted profiles', () => {
         'opus-4-8',
         'sonnet-5-5',
         'sonnet-5',
+        'haiku-5-5',
       ]),
     )
   })
@@ -75,6 +85,8 @@ describe('normalizeTargetModel — valid grammar outside the allowlist', () => {
     ['claude-sonnet-4-6', 'claude-sonnet-4-6'],
     ['opus-5-50', 'claude-opus-5-50'],
     ['fable-7-2', 'claude-fable-7-2'],
+    ['claude-fable-5-3', 'claude-fable-5-3'],
+    ['claude-haiku-5', 'claude-haiku-5'],
   ]
 
   for (const [input, id] of cases) {
