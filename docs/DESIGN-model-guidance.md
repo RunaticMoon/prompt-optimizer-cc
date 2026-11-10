@@ -10,6 +10,8 @@
 > [grilling](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)의 결정 의존성·사실/선택 구분과 [domain-modeling](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md)의 용어·경계 사례·결정 이유를 적용한다. 모든 모델 프로필은 이 공통 정책을 따른다. 기존 `draft/message/question` 계약에 맞춰 라운드당 중요한 질문 하나와 추천·이유를 제시하고, 합의된 결정은 초안에 누적한다. 복합 초안은 목표·근거·합의·범위/계약·완료 기준·미결정을 필요에 따라 담는다. 미결정은 사용자 답변이나 근거로 해결될 때까지 유지하며 마지막 허용 회차에는 질문 없이 남긴다. 진단·조사는 증상·환경 인터뷰로 확장하지 않고, 사용자만 아는 사실이 조사 대상 자체를 바꿀 때만 묻는다. 프로젝트 규칙은 목록으로 반복하지 않으며 특정 결정을 막거나 바꾸는 근거로만 한 번 언급한다.
 >
 > 프로젝트 자료는 작업당 한 번 읽는 제한된 스냅샷에 포함한다. 서브에이전트 탐색, 원래 작업의 실행, 용어집·ADR 자동 쓰기는 하지 않는다. 질문과 구체화의 실제 품질은 `docs/smoke.md`의 의미 평가로 별도 확인하며, 문자열·mock 테스트 통과로 입증하지 않는다. 여섯 참고 자료와 적용 차이는 `README.md`의 출처에 정리했다.
+>
+> 2026-11-10 갱신(GUID-AE0A): 공식 가이드가 새로 다룬 Fable 5.2/Mythos 5.2(`fable-5-2`)와 Haiku 5.5(`haiku-5-5`)를 프로필로 추가했다. 런타임 문구는 §4.10·§4.11, 모델 ID 매핑은 §5, 출처 표기는 §2.3에 반영했다.
 
 ## 1. 요구와 완료 기준
 
@@ -55,11 +57,12 @@
 
 ### 2.3 문서 출처 표기
 
-아래 약칭은 `/home/ubuntu/dev/cc-mods-ref/omfc-9a09/`에 제공된 원문을 가리킨다. 원문 전체를 제품에 포함하거나 실행 중 다운로드하지 않는다.
+아래 약칭은 `/home/ubuntu/dev/cc-mods-ref/omfc-9a09/`에 제공된 원문을 가리킨다. 단 F52·H55는 로컬 사본 없이 2026-11-10에 공식 영문 페이지만 확인했고, 한국어 페이지는 확인하지 않았다. 원문 전체를 제품에 포함하거나 실행 중 다운로드하지 않는다.
 
 | 약칭 | 원문 및 공식 문서 |
 | --- | --- |
 | 공통 | `best-practices.ko.md`, [프롬프팅 모범 사례](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/claude-prompting-best-practices) |
+| F52 | [Fable 5.2](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2)(영문 페이지만 확인) |
 | F51 | `prompting-fable-5-1.ko.md`, [Fable 5.1](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/prompting-claude-fable-5-1) |
 | F5 | `prompting-fable-5.ko.md`, [Fable 5](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/prompting-claude-fable-5) |
 | O55 | `prompting-opus-5-5.ko.md`, [Opus 5.5](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/prompting-claude-opus-5-5) |
@@ -67,6 +70,7 @@
 | O48 | `prompting-opus-4-8.ko.md`, [Opus 4.8](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/prompting-claude-opus-4-8) |
 | S55 | `prompting-sonnet-5-5.ko.md`, [Sonnet 5.5](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/prompting-claude-sonnet-5-5) |
 | S5 | `prompting-sonnet-5.ko.md`, [Sonnet 5](https://platform.claude.com/docs/ko/build-with-claude/prompt-engineering/prompting-claude-sonnet-5) |
+| H55 | [Haiku 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-haiku-5-5)(영문 페이지만 확인) |
 | OMF | `/tmp/omfc-9a09/oh-my-fable/skills/fable-prompt/SKILL.md` 및 같은 디렉터리의 `references/prompt-blocks.md`, `references/examples.md` |
 
 OMF는 실행할 스킬이 아니라 비교·증류 자료다. 그 스킬의 “개선 후 실행” 절차와 영어 블록 원문 복사 규칙은 채택하지 않는다. 이 제품은 요청을 편집하고 사용자의 승인을 기다리는 별도 흐름이다.
@@ -205,7 +209,7 @@ Project rules는 잘린 1200자 스냅샷일 수 있어 전체 규칙의 존재 
 
 근거: 1 S5 「더 문자 그대로의 지시 따르기」, 2 「도구 사용 트리거」, 3 「응답 길이와 상세도」「어조와 문체」「사용자 대상 진행 상황 업데이트」, 4 「디자인 및 프론트엔드 기본값」.
 
-Haiku 4.5에는 개별 문자열을 만들지 않는다. `common` 프로필의 모델 추가 지침은 빈 문자열이다. 각 프로필은 독립적인 한 블록이며 상위/이전 버전 블록을 자동으로 누적하지 않는다.
+Haiku 4.5에는 개별 문자열을 만들지 않는다. Haiku 4.5는 `common`에 남고 `common` 프로필의 모델 추가 지침은 빈 문자열이다. Haiku 5.5는 별도 블록을 쓴다(§4.11). 각 프로필은 독립적인 한 블록이며 상위/이전 버전 블록을 자동으로 누적하지 않는다.
 
 ### 4.9 길이 예산
 
@@ -231,6 +235,34 @@ Haiku 4.5에는 개별 문자열을 만들지 않는다. `common` 프로필의 �
 
 상수 텍스트는 런타임에서 중간을 잘라 쓰지 않는다. 공통/각 프로필의 길이를 테스트로 제한하며 초과하면 문구를 편집한다. 모델 감지 원문은 system에 넣지 않아 임의 모델 문자열 길이가 예산이나 지시 권한에 영향을 주지 않게 한다. 당시 설계는 출력 기본값 `maxTokens=1024`를 유지했다. 이후 요구사항 구체화 변경에서는 기본값을 `2048`로 늘렸으며, 긴 생성 초안의 출력 한도는 여전히 유한하다.
 
+### 4.10 fable-5-2 — Fable 5.2 및 Mythos 5.2
+
+```text
+- “계속”·“진행해” 같은 짧은 승인 답은 최근 대화에서 확인된 동작과 대상을 그대로 승인하는 구체적 문장으로 바꾼다. 대상이 불분명하면 묻고 승인 범위를 넓히지 않는다.
+- 승인·금지 조건은 적용되는 동작을 정확히 적고, 사용자가 밝힌 예외·이미 승인한 단계·승인 없이 해도 되는 단계는 별도 줄이 아니라 그 조건 안에 함께 적는다.
+- 구조 개선·중복 통합을 원한다고 확인되면 그 범위의 구조를 바꿔도 된다고 적고, 기존 동작 변경과 작은 변경까지 보고하게 한다. 최소 변경을 원하면 기존 구조 유지를 명시한다. 확인되지 않으면 코드 소유 문구를 넣지 않는다.
+- 여러 단계 작업은 사용자가 정한 의도적 제한(손대지 말 파일, 보류한 접근)을 경계로 적는다. 오류·타임아웃 같은 일반 장애에서 멈추라는 조건은 만들지 않는다.
+- 최종 보고·인계를 요청하면 작업 과정을 보지 않은 독자 기준으로 핵심을 먼저, 작업 중 만든 용어 없이 완결된 문장으로 쓰게 한다. 문장 길이 같은 경직된 수치 규칙은 새로 만들지 않는다.
+- 응답에 사고 과정을 그대로 쓰라는 요구는 결론의 근거와 확인한 사항을 설명하라는 요구로 바꾼다.
+```
+
+근거: 1 F52 「Approvals」, 2 「Approvals」「Keep caution from piling up」(예외를 규칙 안에 적고 승인이 필요 없는 단계를 명시), 3 「Say who owns the code」, 4 「Finish the whole task」(일반 장애와 의도적 차단의 구분만), 5 「Make reports easy to follow」「Review instructions written for earlier models」(문체 규칙), 6 「Safeguard refusals」(reasoning_extraction).
+
+제외: effort 보정(「Calibrate effort」), 사고 과정 표시·progress-update 블록·턴 단위 리마인더(「Keep users informed during long turns」), 서브에이전트 도구 설명(「Set expectations for subagents」), prefix 검사·보존 사고·하네스 히스토리 편집·하네스가 쓰는 토큰 예산(「Review instructions written for earlier models」), “그 답을 완료로 간주” 문구(같은 절), 거부 카테고리와 검증 프로그램(「Safeguard refusals」)은 API·하네스 설정이거나 대화 히스토리 변경이라 제외한다.
+
+### 4.11 haiku-5-5 — Haiku 5.5
+
+```text
+- 기록·직책·가격·버전·규칙·“최신”처럼 바뀔 수 있는 사실의 질문은 답하기 전에 현재 출처를 검색해 확인하도록 적고, 답이 지역에 따라 다르면 확인된 국가·지역을 검색 조건에 넣는다. 바뀌지 않는 사실에는 검색 조건을 붙이지 않고 모든 질문에 무조건 검색하라고 쓰지 않는다.
+- 요청한 작업 전체가 끝나고 확인될 때까지 진행하고 사용자 없이는 진행할 수 없거나 위험한 단계 전에만 멈추도록 완료 조건을 적는다. 요청하지 않은 기능·문서·리팩터링은 끝에 제안만 하게 한다.
+- 실행·빌드·타입 검사가 가능한 코드 변경은 그 변경을 실제로 실행하는 검사를 완료 기준으로 쓴다. 문법 검사나 시작하지 못한 검사는 통과로 보지 않고, 못 한 검사는 무엇을 왜 못 했는지 보고하게 한다.
+- JSON 출력과 조회가 함께 필요하면 JSON 형식은 최종 답에만 적용하고 필요한 조회를 먼저 하도록 적는다.
+```
+
+근거: 1 H55 「Accurate search results」, 2 「Prevent early stopping in long agent prompts」, 3 「Tell coding agents to verify their changes」, 4 「Use adaptive thinking with JSON output and your own tools」(프롬프트 한 줄만).
+
+제외: 날짜 주입(「Accurate search results」), 턴 중 사용자 메시지(「Mid-turn user messages」), 챗봇의 시스템 프롬프트 준수(「Keep chatbots to their system prompt」), thinking on/off와 xhigh 빈 응답 처리(「Use effort to control thinking」), 거부 카테고리와 검증 프로그램(「Safeguard refusals」)은 API·하네스 설정이라 제외한다.
+
 ## 5. 결정 c — 모델 식별
 
 `session.model()` 반환값은 **raw 그대로 보존**, lookup용 `normalizedId`를 따로 만든다. `config.model`, 메인 모델 설정, 실제 API 전송 ID를 수정하지 않는다.
@@ -245,6 +277,8 @@ Haiku 4.5에는 개별 문자열을 만들지 않는다. `common` 프로필의 �
 
 | 입력 사례 | normalizedId | profile / reason |
 | --- | --- | --- |
+| `claude-fable-5-2`, `Claude Fable 5.2` | `claude-fable-5-2` | fable-5-2 / matched |
+| `claude-mythos-5-2` | `claude-mythos-5-2` | fable-5-2 / matched |
 | `claude-fable-5-1`, `Claude Fable 5.1` | `claude-fable-5-1` | fable-5-1 / matched |
 | `claude-mythos-5-1` | `claude-mythos-5-1` | fable-5-1 / matched |
 | `claude-fable-5`, `claude-mythos-5` | 해당 정식 키 | fable-5 / matched |
@@ -252,13 +286,14 @@ Haiku 4.5에는 개별 문자열을 만들지 않는다. `common` 프로필의 �
 | `claude-opus-5-5-20260901[1m]` | `claude-opus-5-5` | opus-5-5 / matched |
 | `claude-opus-5`, `Claude Opus 4.8` | 각각 `claude-opus-5`, `claude-opus-4-8` | opus-5, opus-4-8 / matched |
 | `claude-sonnet-5-5`, `Sonnet 5` | 각각 정식 키 | sonnet-5-5, sonnet-5 / matched |
+| `claude-haiku-5-5[1m]`, `Haiku 5.5` | `claude-haiku-5-5` | haiku-5-5 / matched |
 | `claude-haiku-4-5-20251001` | `claude-haiku-4-5` | common / unlisted |
 | `opus`, `sonnet`, `haiku`, `fable`, `mythos`, `OPUS[1m]` | null | common / alias |
 | `claude-opus-5-6`, `claude-sonnet-4-6` | 각각 정식 키 | common / unlisted |
 | `opusplan`, `default`, `claude-opus-5-5-preview`, `foo-claude-opus-5-5`, `opus-5-50` | null 또는 유효 문법의 정식 키 | common / unknown 또는 unlisted |
 | `''`, 공백, null/undefined | null | common / empty |
 
-Mythos 매핑은 공통 문서 「모델별 가이드」 표에 근거한다. 5.0을 5로, 5.5.1을 5.5로 축약하지 않는다. 위 표시명/별칭 처리는 미래 호환용 방어 로직이며 C가 실측한 getter 형식이 아니다. Bedrock/Vertex/게이트웨이 ID는 이번 실측 범위 밖이므로 임의 provider 파서는 추가하지 않는다.
+Mythos 매핑은 공통 문서 「모델별 가이드」 표에 근거한다. 5.0을 5로, 5.5.1을 5.5로 축약하지 않는다. Mythos 5.2는 Fable 5.2와 같은 `fable-5-2` 블록을 쓴다. Haiku 4.5는 `common`/`unlisted` 행으로 유지하고, `claude-fable-5-3`이나 `claude-haiku-5` 같은 근접 버전으로 폴백하지 않는다. 위 표시명/별칭 처리는 미래 호환용 방어 로직이며 C가 실측한 getter 형식이 아니다. Bedrock/Vertex/게이트웨이 ID는 이번 실측 범위 밖이므로 임의 provider 파서는 추가하지 않는다.
 
 ## 6. 결정 d·e·f — 조회, 조립, 설정과 실패
 
@@ -309,9 +344,9 @@ context의 `## Target model` 섹션은 만들지 않는다. context는 참고 �
 ```ts
 // hooks/contracts.ts — D
 export type GuidanceProfile =
-  | 'common' | 'fable-5-1' | 'fable-5'
+  | 'common' | 'fable-5-2' | 'fable-5-1' | 'fable-5'
   | 'opus-5-5' | 'opus-5' | 'opus-4-8'
-  | 'sonnet-5-5' | 'sonnet-5'
+  | 'sonnet-5-5' | 'sonnet-5' | 'haiku-5-5'
 
 export type ModelResolutionReason =
   | 'matched' | 'alias' | 'unlisted' | 'unknown' | 'empty'
@@ -387,7 +422,7 @@ optional EnginePorts는 구형 테스트/호스트에서 감지 불가를 안전
 
 | 검증 묶음 | 필수 사례 |
 | --- | --- |
-| 정규화 | 표의 모든 7개 프로필, Mythos 2개, Haiku, 별칭 5개, 날짜/[1m] 조합, 대소문자/공백/표시명, 빈 값/non-string, unknown/new-version, 비슷한 prefix·suffix 오매칭 거절, raw 불변 |
+| 정규화 | 표의 모든 9개 프로필, Mythos 3개, Haiku 2개(5.5 매핑·4.5 unlisted), 별칭 5개, 날짜/[1m] 조합, 대소문자/공백/표시명, 빈 값/non-string, unknown/new-version, 비슷한 prefix·suffix 오매칭 거절, raw 불변 |
 | 감지 | 성공, 동기 throw, reject, never-resolve→500ms, 빈 문자열, 누락 포트, timer 실패, off에서는 0회 조회, 외부 취소, 늦은 성공/늦은 reject, 타이머/리스너 정리 |
 | 조립 | common 정확히 1회, 선택 모델 블록만 1회, common일 때 모델 블록 없음, extra 유무/공백, 최종 FIXED_CONTRACT 순서·역할 제한·JSON 키, raw 모델 미포함 |
 | 길이 | 공통 ≤2400, 각 모델 ≤800, 공통 제외 BASE ≤1300, 고정 계약 ≤700, system은 extra 없을 때 ≤5400·최대 extra 포함 ≤9400, 초기 최대 원문/context 및 extra 0/4000, 전체 요청 ≤18000, 오래된 dialogue → context → 이전 draft 절삭, 보존 대상만으로 초과하는 예외, 원문·최신 질문과 답변 불변 |

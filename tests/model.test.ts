@@ -940,6 +940,7 @@ describe('parseReply', () => {
 /** Every profile the design's §5 mapping can produce, in §4 order. */
 const PROFILES: readonly GuidanceProfile[] = [
   'common',
+  'fable-5-2',
   'fable-5-1',
   'fable-5',
   'opus-5-5',
@@ -947,6 +948,7 @@ const PROFILES: readonly GuidanceProfile[] = [
   'opus-4-8',
   'sonnet-5-5',
   'sonnet-5',
+  'haiku-5-5',
 ]
 
 /** Non-overlapping occurrences of `needle` in `haystack`. */
@@ -1106,7 +1108,7 @@ describe('composeSystemPrompt — assembly', () => {
 })
 
 describe('composeSystemPrompt — refinement levels', () => {
-  test('deep reproduces the captured v0.13.0 prompt byte-for-byte for every profile', () => {
+  test('deep reproduces the fixture prompt byte-for-byte for every profile', () => {
     for (const profile of PROFILES) {
       expect(composeSystemPrompt('', profile, 'deep')).toBe(DEEP_SYSTEM_PROMPTS[profile])
     }
@@ -1120,7 +1122,7 @@ describe('composeSystemPrompt — refinement levels', () => {
     }
   })
 
-  test('every level reaches all eight profiles with its own base and the fixed contract last', () => {
+  test('every level reaches every profile with its own base and the fixed contract last', () => {
     for (const level of LEVELS) {
       for (const profile of PROFILES) {
         const composed = composeSystemPrompt('', profile, level)
@@ -1259,7 +1261,7 @@ describe('composeSystemPrompt — length budget', () => {
   })
 
   test('without an extra file the longest system leaves room for a maximum extra file', () => {
-    // GUIDANCE_SYSTEM_MAX_CHARS less the extra file is 5400; measured longest is fable-5-1.
+    // GUIDANCE_SYSTEM_MAX_CHARS less the extra file is 5400; measured longest is fable-5-2.
     expect(composeSystemPrompt('', longestProfile('')).length).toBeLessThanOrEqual(
       GUIDANCE_SYSTEM_MAX_CHARS - SYSTEM_PROMPT_MAX_CHARS,
     )

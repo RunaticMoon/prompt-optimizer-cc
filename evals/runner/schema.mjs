@@ -28,6 +28,7 @@ export const MAX_TAGS = 8
 export const SPLITS = ['development', 'holdout']
 export const GUIDANCE_PROFILES = [
   'common',
+  'fable-5-2',
   'fable-5-1',
   'fable-5',
   'opus-5-5',
@@ -35,6 +36,7 @@ export const GUIDANCE_PROFILES = [
   'opus-4-8',
   'sonnet-5-5',
   'sonnet-5',
+  'haiku-5-5',
 ]
 export const PROVENANCE_KINDS = ['synthetic-reconstruction', 'synthetic-authored']
 export const CONSTRAINT_KINDS = ['mustPreserve', 'mustNotInfer', 'mustInclude']
